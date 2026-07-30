@@ -811,17 +811,22 @@ function decodeKTEX(buf: Buffer): { width: number; height: number; png: Buffer }
   const mip0W = buf.readUInt16LE(8);
   const mip0H = buf.readUInt16LE(10);
   let mip0Size = buf.readUInt16LE(14);
-  if (mip0W === 0 || mip0H === 0 || mip0W > 1024 || mip0H > 1024) return null;
+  if (mip0W === 0 || mip0H === 0 || mip0W > 4096 || mip0H > 4096) return null;
   // mip0Size 可能为 0（某些 KTEX 格式），按 DXT 块大小自动计算
   if (mip0Size === 0) {
     const blocks = Math.ceil(mip0W / 4) * Math.ceil(mip0H / 4);
     mip0Size = (fmt === 0 ? 8 : 16) * blocks; // DXT1=8 bytes/block, DXT5=16 bytes/block
   }
-  // 数 mip 级别数来计算 data 偏移
+  // 数 mip 级别数来计算 data 偏移（验证每级尺寸合理：≤上级且为正）
   let dataOffset = 8;
+  let prevW = mip0W;
   for (let off = 8; off + 10 <= buf.length; off += 10) {
     const w = buf.readUInt16LE(off);
-    if (w === 0) break;
+    const h = buf.readUInt16LE(off + 2);
+    if (w === 0 || h === 0) break;
+    // 验证：宽度高度必须是合理的（≤前一级，>0）
+    if (off > 8 && w > prevW) break; // 尺寸必须递减
+    prevW = w;
     dataOffset = off + 10;
   }
   if (dataOffset + mip0Size > buf.length) return null;
@@ -1080,11 +1085,14 @@ function modItems(id: string): { name: string; prefab: string; cat: string }[] {
         if (!f.endsWith(".lua")) continue;
         const lua = readText(join(dir, f));
         // 从 lua 内容中提取所有 Prefab("xxx", ...) 定义的实际 prefab 名
+        // 支持：Prefab("name"), Prefab("path/to/name"), Prefab("common/inventory/alloy")
         const prefabNames = new Set<string>();
-        for (const m of lua.matchAll(/Prefab\s*\(\s*"([a-z0-9_]+)"/g)) prefabNames.add(m[1]);
-        for (const m of lua.matchAll(/Prefab\s*\(\s*([a-z0-9_.]+)\s*[,)]/gi)) {
-          // Prefab(def.name, ...) 形式 — def.name 来自数据表，无法静态解析
-          // 但如果有对应的 .tex 文件，说明是实际物品
+        for (const m of lua.matchAll(/Prefab\s*\(\s*"([^"]+)"/g)) {
+          // 路径式名称只取最后一段：common/inventory/alloy → alloy
+          const fullName = m[1];
+          const parts = fullName.split("/");
+          const name = parts[parts.length - 1];
+          if (/^[a-z0-9_]+$/.test(name)) prefabNames.add(name);
         }
         // 如果没有找到 Prefab() 调用，回退到文件名
         if (prefabNames.size === 0) {
@@ -2675,8 +2683,16 @@ async function api(req: Request, url: URL): Promise<Response> {
     const b = await bodyJson(req);
     const ids: string[] = Array.isArray(b.ids) ? b.ids.filter(validId) : [];
     const enabledSet = new Set(ids);
-    // 冲突检测：大型地图模组（带 modworldgenmain.lua 的）同时只能启用一个
-    const worldModIds = ids.filter((id) => existsSync(join(ugcSharedDir(), id, "modworldgenmain.lua")));
+    // 冲突检测：替换世界生成的模组（AddLevel/PRESETLEVELS）同时只能启用一个
+    // 注意：仅用 AddLevelPreInitAny 修改现有关卡的模组（如三合一）不算冲突
+    const worldModIds = ids.filter((id) => {
+      const mw = join(ugcSharedDir(), id, "modworldgenmain.lua");
+      if (!existsSync(mw)) return false;
+      const text = readText(mw);
+      // 有 AddLevel/AddPreset/LEVELTYPE 调用 = 替换型世界生成
+      // 仅有 AddLevelPreInitAny = 兼容型修改，不冲突
+      return /AddLevel\s*\(|AddPreset\s*\(|LEVELTYPE\.\w+\s*,\s*\{/.test(text) && !text.includes("AddLevelPreInitAny");
+    });
     if (worldModIds.length > 1) {
       const names = worldModIds.map((id) => modCache.items[id]?.title || parseModInfo(id)?.name || id).join("、");
       return fail(`检测到大型地图模组冲突，不能一起开启：${names}。这些模组都会替换世界生成，请只保留一个（"三合一"类模组本身包含多生态，算一个）。`);
