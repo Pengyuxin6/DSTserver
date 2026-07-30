@@ -962,78 +962,78 @@ function cropPNG(decoded: { width: number; height: number; png: Buffer }, u1: nu
     return decoded.png;
   }
 }
+// PNG 缓存（避免重复解码同一个 .tex 文件）
+const modIconPngCache = new Map<string, Buffer>();
 // 查找模组物品图标：返回 .tex 路径 + UV 坐标（支持图集切片）
-function findModIcon(id: string, prefab: string): { texPath: string; u1: number; u2: number; v1: number; v2: number } | null {
+// 使用每个模组的缓存索引，避免每次请求都递归搜索文件
+const modAtlasCache = new Map<string, Map<string, { texPath: string; u1: number; u2: number; v1: number; v2: number }>>();
+function buildModAtlasIndex(id: string): Map<string, { texPath: string; u1: number; u2: number; v1: number; v2: number }> {
+  if (modAtlasCache.has(id)) return modAtlasCache.get(id)!;
+  const index = new Map<string, { texPath: string; u1: number; u2: number; v1: number; v2: number; elementCount: number }>();
   const modDir = join(ugcSharedDir(), id);
-  const target = `${prefab}.tex`;
-  const targetXml = `${prefab}.xml`;
-  const defaultUV = { u1: 0, u2: 1, v1: 0, v2: 1 };
-
-  // 1. 快速路径：同名 .tex + .xml（独立图标，非图集）
-  const quick = [
-    join(modDir, "images", "inventoryimages"),
-    join(modDir, "images"),
-  ];
-  for (const dir of quick) {
-    const texP = join(dir, target);
-    const xmlP = join(dir, targetXml);
-    if (existsSync(texP)) {
-      // 检查同名 XML 是否存在并解析 UV
-      if (existsSync(xmlP)) {
-        const uv = parseAtlasUV(readText(xmlP), target);
-        if (uv) return { texPath: texP, ...uv };
-      }
-      return { texPath: texP, ...defaultUV };
-    }
-  }
-
-  // 2. 递归搜索 images/ 下所有 .xml，查找 prefab 是否作为 Element 存在（图集模式）
-  // 收集所有匹配，优先选择元素数少的专用图集（避免 hamletinventory 等大型通用图集）
+  const imgDir = join(modDir, "images");
   try {
-    const imgDir = join(modDir, "images");
     if (existsSync(imgDir)) {
-      const allMatches: { texPath: string; u1: number; u2: number; v1: number; v2: number; elementCount: number }[] = [];
-      const searchXml = (dir: string, depth: number) => {
+      // 一次性扫描所有 .tex 和 .xml 文件
+      const scan = (dir: string, depth: number) => {
         if (depth > 3) return;
         let entries: string[];
         try { entries = readdirSync(dir); } catch { return; }
-        // 先检查当前目录的 .tex
+        // 独立 .tex 文件
         for (const f of entries) {
-          if (f === target) { allMatches.push({ texPath: join(dir, f), ...defaultUV, elementCount: 1 }); return; }
+          if (f.endsWith(".tex")) {
+            const prefabName = f.slice(0, -4);
+            const texPath = join(dir, f);
+            const xmlPath = join(dir, f.replace(/\.tex$/, ".xml"));
+            let uv = { u1: 0, u2: 1, v1: 0, v2: 1 };
+            let elementCount = 1;
+            if (existsSync(xmlPath)) {
+              const parsed = parseAtlasUV(readText(xmlPath), f);
+              if (parsed) uv = parsed;
+            }
+            // 独立图标优先级最高（elementCount=1）
+            if (!index.has(prefabName) || index.get(prefabName)!.elementCount > 1) {
+              index.set(prefabName, { texPath, ...uv, elementCount });
+            }
+          }
         }
-        // 检查当前目录的 .xml 是否包含 prefab 作为 Element
+        // 图集 .xml 文件
         for (const f of entries) {
           if (!f.endsWith(".xml")) continue;
           const xmlPath = join(dir, f);
           const xmlText = readText(xmlPath);
-          const uv = parseAtlasUV(xmlText, target);
-          if (uv) {
-            const texMatch = xmlText.match(/<Texture\s+filename="([^"]+)"/);
-            if (texMatch) {
-              const texPath = join(dir, texMatch[1]);
-              if (existsSync(texPath)) {
-                const elementCount = (xmlText.match(/<Element/g) || []).length;
-                allMatches.push({ texPath, ...uv, elementCount });
-              }
+          const texMatch = xmlText.match(/<Texture\s+filename="([^"]+)"/);
+          if (!texMatch) continue;
+          const texPath = join(dir, texMatch[1]);
+          if (!existsSync(texPath)) continue;
+          const elementCount = (xmlText.match(/<Element/g) || []).length;
+          // 解析所有 Element
+          for (const em of xmlText.matchAll(/<Element\s+name="([^"]+)"\s+u1="([\d.]+)"\s+u2="([\d.]+)"\s+v1="([\d.]+)"\s+v2="([\d.]+)"/g)) {
+            const elemName = em[1].replace(/\.tex$/, "");
+            const existing = index.get(elemName);
+            // 优先选择元素数少的图集（专用 > 通用）
+            if (!existing || existing.elementCount > elementCount) {
+              index.set(elemName, { texPath, u1: parseFloat(em[2]), u2: parseFloat(em[3]), v1: parseFloat(em[4]), v2: parseFloat(em[5]), elementCount });
             }
           }
         }
         // 递归子目录
         for (const f of entries) {
           const fp = join(dir, f);
-          try { if (statSync(fp).isDirectory()) searchXml(fp, depth + 1); } catch {}
+          try { if (statSync(fp).isDirectory()) scan(fp, depth + 1); } catch {}
         }
       };
-      searchXml(imgDir, 0);
-      if (allMatches.length) {
-        // 优先选择元素数最少的（专用小图集优先于大型通用图集）
-        allMatches.sort((a, b) => a.elementCount - b.elementCount);
-        const best = allMatches[0];
-        return { texPath: best.texPath, u1: best.u1, u2: best.u2, v1: best.v1, v2: best.v2 };
-      }
+      scan(imgDir, 0);
     }
   } catch {}
-  return null;
+  // 清理 elementCount（只用于排序）
+  const clean = new Map<string, { texPath: string; u1: number; u2: number; v1: number; v2: number }>();
+  for (const [k, v] of index) clean.set(k, { texPath: v.texPath, u1: v.u1, u2: v.u2, v1: v.v1, v2: v.v2 });
+  modAtlasCache.set(id, clean);
+  return clean;
+}
+function findModIcon(id: string, prefab: string): { texPath: string; u1: number; u2: number; v1: number; v2: number } | null {
+  return buildModAtlasIndex(id).get(prefab) || null;
 }
 
 // 从图集 XML 中解析指定元素的 UV 坐标
@@ -3390,16 +3390,24 @@ const server = Bun.serve({
       if (!/^\d{4,15}$/.test(modId) || !/^[a-z0-9_]+$/.test(prefab)) return new Response("Bad request", { status: 400 });
       const icon = findModIcon(modId, prefab);
       if (!icon) return new Response("Not found", { status: 404 });
+      // 缓存 key = modId:prefab，避免重复解码
+      const cacheKey = `${modId}:${prefab}`;
+      const cached = modIconPngCache.get(cacheKey);
+      if (cached) return new Response(cached, { status: 200, headers: { "Content-Type": "image/png", "Cache-Control": "public, max-age=604800" } });
       try {
         const buf = readFileSync(icon.texPath);
         const result = decodeKTEX(buf);
         if (!result) return new Response("Decode failed", { status: 500 });
-        // 如果 UV 不是全图，需要裁剪
         let png = result.png;
         const isFullUV = icon.u1 === 0 && icon.u2 === 1 && icon.v1 === 0 && icon.v2 === 1;
-        if (!isFullUV) {
-          png = cropPNG(result, icon.u1, icon.u2, icon.v1, icon.v2);
+        if (!isFullUV) png = cropPNG(result, icon.u1, icon.u2, icon.v1, icon.v2);
+        // 缓存（限制总数防止内存溢出）
+        if (modIconPngCache.size > 500) {
+          // 简单 LRU：删除最早的四分之一
+          const keys = [...modIconPngCache.keys()].slice(0, 125);
+          for (const k of keys) modIconPngCache.delete(k);
         }
+        modIconPngCache.set(cacheKey, png);
         return new Response(png, { status: 200, headers: { "Content-Type": "image/png", "Cache-Control": "public, max-age=604800" } });
       } catch {
         return new Response("Error", { status: 500 });
