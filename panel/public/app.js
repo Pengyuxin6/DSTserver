@@ -47,6 +47,12 @@ async function api(path, opts = {}) {
 async function apiQuiet(path, opts = {}) {
   try { return await api(path, opts); } catch (e) { return null; }
 }
+// Steam CDN 图片代理（国内直连 steamusercontent.com 会被墙）
+function proxyImg(url) {
+  if (!url) return url;
+  if (url.includes("steamusercontent.com")) return "img-proxy?url=" + encodeURIComponent(url);
+  return url;
+}
 // 订阅数缩写：1.2M / 3.4W / 原始数
 function fmtNum(n) {
   n = Number(n) || 0;
@@ -728,15 +734,22 @@ async function loadModWorldgen() {
   if (!mods.length) { box.innerHTML = ""; return; }
   box.innerHTML = mods.map((m, mi) => {
     // 世界类型：模组提供的预设（海难/火山/哈姆雷特等）；模式难度：生存/轻松/无尽等
-    const isCaveLoc = (l) => /volcano|cave|under/i.test(l || "");
+    const caveLocs = ["volcano", "cave", "under", "caves"];
+    const isCaveLoc = (l) => caveLocs.some((c) => (l || "").toLowerCase().includes(c));
     const isModeId = (id) => /(RELAXED|ENDLESS|WILDERNESS|LIGHTS_?OUT|DEFAULT)$/.test(id);
-    const locCn = (l) => ({ shipwrecked: "海难", volcanolevel: "火山", hamlet: "哈姆雷特", porkland: "哈姆雷特", forest: "森林", caves: "洞穴", cave: "洞穴" }[l] || l);
+    const locCn = (l) => ({ shipwrecked: "海难", volcanolevel: "火山", hamlet: "哈姆雷特", porkland: "哈姆雷特(猪镇)", forest: "森林", caves: "洞穴", cave: "洞穴", volcano: "火山" }[l] || l);
     const locReps = new Map();
     for (const p of m.presets) {
       if (!p.location) continue;
-      if (worldState.isMaster === isCaveLoc(p.location)) continue;
+      // 只在对应分片显示：cave类预设只在Caves显示，其他在Master显示
+      const presetIsCave = isCaveLoc(p.location);
+      if (presetIsCave !== !worldState.isMaster) continue;
       const has = locReps.get(p.location);
       if (!has || /SURVIVAL_TOGETHER$/.test(p.id)) locReps.set(p.location, p);
+    }
+    // 地下分片但模组无地下预设：显示警告而非空下拉
+    if (!worldState.isMaster && locReps.size === 0) {
+      return `<div class="card"><div class="err-text">⚠ 模组「${esc(m.name)}」没有地下世界预设，不支持洞穴分片。建议：1) 删除地下分片；2) 使用原版地下设置（切换到上方原版设置项）。</div></div>`;
     }
     const curWg = worldState.presets?.worldgen || "";
     const curSt = worldState.presets?.settings || "";
@@ -895,7 +908,7 @@ async function renderModsLocal() {
         <td><button class="fav-star${m.favorite ? " on" : ""}" data-fav="${m.id}" title="${m.favorite ? "取消收藏" : "收藏（置顶）"}">${m.favorite ? "★" : "☆"}</button></td>
         <td><input type="checkbox" data-id="${m.id}" ${modsState.checked.has(m.id) ? "checked" : ""}></td>
         <td>${esc(m.id)}</td>
-        <td>${m.preview_url ? `<img class="mod-img" loading="lazy" src="${esc(m.preview_url)}" onerror="this.outerHTML='<div class=mod-img></div>'">` : '<div class="mod-img"></div>'}</td>
+        <td>${m.preview_url ? `<img class="mod-img" loading="lazy" src="${proxyImg(m.preview_url)}" onerror="this.outerHTML='<div class=mod-img></div>'">` : '<div class="mod-img"></div>'}</td>
         <td>${esc(m.title || m.name || "(未知)")}${m.name && m.title && m.name !== m.title ? `<div class="hint">${esc(m.name)}</div>` : ""}</td>
         <td>${esc(m.update_date || m.version || "-")}</td>
         <td>${tags}</td>
@@ -1082,7 +1095,7 @@ async function loadModDetail(id) {
   popup.innerHTML = `
     <button class="popup-close" id="popupX">×</button>
     <div class="md-head">
-      ${d.preview_url ? `<img class="md-img" src="${esc(d.preview_url)}" onerror="this.outerHTML='<div class=md-img></div>'">` : '<div class="md-img"></div>'}
+      ${d.preview_url ? `<img class="md-img" src="${proxyImg(d.preview_url)}" onerror="this.outerHTML='<div class=md-img></div>'">` : '<div class="md-img"></div>'}
       <div class="md-head-main">
         <div class="md-title">${esc(d.title || mi.name || id)}</div>
         <div class="md-sub">ID: ${esc(id)} ｜ 更新: ${esc(d.update_date || mi.version || "-")} ｜ 订阅 ${esc(fmtNum(d.subscriptions))}</div>
@@ -1160,7 +1173,7 @@ async function loadModDetail(id) {
       };
       const hover = o.hover_zh || o.hover || "";
       const curVal = fmt(o.current);
-      const iconSrcs = d.preview_url ? [d.preview_url] : [];
+      const iconSrcs = d.preview_url ? [proxyImg(d.preview_url)] : [];
       showModConfigPopup(popupOpt, curVal, hover, hasZh ? o.label : "", iconSrcs, (val) => {
         // 将选中的值写回原始 option 对象
         const targetOp = o.options.find((op) => String(op.data) === val);
@@ -1272,7 +1285,7 @@ function showModDetailPopup(id) {
     popup.innerHTML = `
       <button class="popup-close" id="popupX">×</button>
       <div class="row" style="align-items:flex-start">
-        ${d.preview_url ? `<img class="mod-img" style="width:80px;height:80px" src="${esc(d.preview_url)}" onerror="this.style.display='none'">` : ""}
+        ${d.preview_url ? `<img class="mod-img" style="width:80px;height:80px" src="${proxyImg(d.preview_url)}" onerror="this.style.display='none'">` : ""}
         <div style="flex:1">
           <h3 style="margin:0">${esc(d.title || mi.name || id)}</h3>
           <div class="hint">ID: ${esc(id)}${d.update_date ? ` ｜ 更新: ${esc(d.update_date)}` : ""}${mi.clientOnly ? " ｜ 仅客户端" : ""}${mi.allClientsRequire ? " ｜ 全员需要" : ""}</div>
@@ -1328,7 +1341,7 @@ function renderModsDownload() {
     const starStr = (s) => "★".repeat(starCount(s)) + "☆".repeat(5 - starCount(s));
     $("#searchResults").innerHTML = '<div class="search-results"><div class="mod-grid">' + rs.map((r) => `
       <div class="mod-cell" data-detail="${r.id}">
-        ${r.preview_url ? `<img class="mod-img" loading="lazy" src="${esc(r.preview_url)}" onerror="this.outerHTML='<div class=mod-img></div>'">` : '<div class="mod-img"></div>'}
+        ${r.preview_url ? `<img class="mod-img" loading="lazy" src="${proxyImg(r.preview_url)}" onerror="this.outerHTML='<div class=mod-img></div>'">` : '<div class="mod-img"></div>'}
         <div class="mod-cell-body"><b>${esc(r.title)}</b><div class="hint">ID ${esc(r.id)}</div>
         <div class="mod-cell-meta"><span class="stars">${starStr(r.subscriptions || 0)}</span><span class="hint">${esc(fmtNum(r.subscriptions))} 订阅${r.time_updated ? ` ｜ 更新 ${esc(fmtDay(r.time_updated))}` : ""}</span></div>
         <div class="btn-row"><button class="btn" data-add="${r.id}">添加</button><button class="btn primary" data-dl="${r.id}">下载</button></div></div>
@@ -1812,8 +1825,10 @@ async function pageConsole() {
     if (reset) { itemTable.innerHTML = ""; itemShown = 0; }
     itemTable.querySelector(".item-more")?.remove();
     const batch = itemView.slice(itemShown, itemShown + ITEM_BATCH);
-    itemTable.insertAdjacentHTML("beforeend", batch.map((it) =>
-      `<div class="item-row" data-p="${it.prefab}"><span class="item-name">${optIcon([it.icon ? `icons/${it.icon}/${it.prefab}.png` : ""])}${esc(it.name)}</span><span class="hint"><span class="tag">${esc(it.cat || "其他")}</span> ${it.prefab}</span></div>`).join(""));
+    itemTable.insertAdjacentHTML("beforeend", batch.map((it) => {
+      const iconSrcs = it.icon ? [`icons/${it.icon}/${it.prefab}.png`] : (it.modId ? [`mod-icon?id=${it.modId}&prefab=${it.prefab}`] : [""]);
+      return `<div class="item-row" data-p="${it.prefab}"><span class="item-name">${optIcon(iconSrcs)}${esc(it.name)}</span><span class="hint"><span class="tag">${esc(it.cat || "其他")}</span> ${it.prefab}</span></div>`;
+    }).join(""));
     itemShown += batch.length;
     if (itemShown < itemView.length) {
       itemTable.insertAdjacentHTML("beforeend", `<div class="item-more hint" style="padding:6px;text-align:center">滚动加载更多（已显示 ${itemShown}/${itemView.length}）</div>`);

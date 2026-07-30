@@ -799,6 +799,141 @@ function itemIconAtlas(): Map<string, string> {
   itemIconMap = map;
   return map;
 }
+// ---------- KTEX → PNG 解码器（DXT1/DXT5） ----------
+// 用于动态提取模组物品图标（.tex → PNG）
+function decodeKTEX(buf: Buffer): { width: number; height: number; png: Buffer } | null {
+  if (buf.length < 18) return null;
+  const magic = buf.readUInt32LE(0);
+  if (magic !== 0x5845544B) return null; // "KTEX"
+  const flags = buf.readUInt32LE(4);
+  const fmt = (flags >> 4) & 0xF; // 0=DXT1, 2=DXT5, 4=RGBA
+  // 解析 mip 级别描述符（stride=10 字节：w(2)+h(2)+pitch(2)+size(2)+pad(2)）
+  const mip0W = buf.readUInt16LE(8);
+  const mip0H = buf.readUInt16LE(10);
+  const mip0Size = buf.readUInt16LE(14);
+  if (mip0W === 0 || mip0H === 0 || mip0W > 1024 || mip0H > 1024) return null;
+  // 数 mip 级别数来计算 data 偏移
+  let dataOffset = 8;
+  for (let off = 8; off + 10 <= buf.length; off += 10) {
+    const w = buf.readUInt16LE(off);
+    if (w === 0) break;
+    dataOffset = off + 10;
+  }
+  if (dataOffset + mip0Size > buf.length) return null;
+  const pixelData = buf.subarray(dataOffset, dataOffset + mip0Size);
+  let rgba: Buffer;
+  if (fmt === 0) {
+    rgba = decodeDXT1(pixelData, mip0W, mip0H);
+  } else {
+    rgba = decodeDXT5(pixelData, mip0W, mip0H);
+  }
+  if (!rgba) return null;
+  const png = encodePNG(rgba, mip0W, mip0H);
+  return { width: mip0W, height: mip0H, png };
+}
+function decodeDXT1(data: Buffer, width: number, height: number): Buffer {
+  return decodeDXT(data, width, height, false);
+}
+function decodeDXT5(data: Buffer, width: number, height: number): Buffer {
+  return decodeDXT(data, width, height, true);
+}
+function decodeDXT(data: Buffer, width: number, height: number, dxt5: boolean): Buffer {
+  const rgba = Buffer.alloc(width * height * 4);
+  const blocksX = Math.ceil(width / 4);
+  const blocksY = Math.ceil(height / 4);
+  const blockSize = dxt5 ? 16 : 8;
+  const colorOffset = dxt5 ? 8 : 0;
+  for (let by = 0; by < blocksY; by++) {
+    for (let bx = 0; bx < blocksX; bx++) {
+      const bo = (by * blocksX + bx) * blockSize;
+      if (bo + blockSize > data.length) continue;
+      let alphas: number[] = [];
+      if (dxt5) {
+        const a0 = data[bo], a1 = data[bo + 1];
+        const aBits = data.readUInt32LE(bo + 2);
+        alphas = [a0, a1];
+        if (a0 > a1) { for (let i = 0; i < 6; i++) alphas.push(Math.floor(((6 - i) * a0 + (i + 1) * a1) / 7)); }
+        else { alphas.push(Math.floor((2 * a0 + a1) / 3), Math.floor((a0 + 2 * a1) / 3), 0, 255, 0, 0); }
+        // 修正 alpha 索引
+        alphas[6] = a0 > a1 ? Math.floor((1 * a0 + 6 * a1) / 7) : 0;
+        alphas[7] = a0 > a1 ? Math.floor((0 * a0 + 7 * a1) / 7) : 255;
+      }
+      const c0 = data.readUInt16LE(bo + colorOffset);
+      const c1 = data.readUInt16LE(bo + colorOffset + 2);
+      const cBits = data.readUInt32LE(bo + colorOffset + 4);
+      const c565 = (c: number) => [((c >> 11) & 31) * 255 / 31 | 0, ((c >> 5) & 63) * 255 / 63 | 0, (c & 31) * 255 / 31 | 0];
+      const [r0, g0, b0] = c565(c0), [r1, g1, b1] = c565(c1);
+      const colors: number[][] = [[r0, g0, b0], [r1, g1, b1]];
+      if (c0 > c1) {
+        colors.push([Math.floor((2 * r0 + r1) / 3), Math.floor((2 * g0 + g1) / 3), Math.floor((2 * b0 + b1) / 3)]);
+        colors.push([Math.floor((r0 + 2 * r1) / 3), Math.floor((g0 + 2 * g1) / 3), Math.floor((b0 + 2 * b1) / 3)]);
+      } else {
+        colors.push([Math.floor((r0 + r1) / 2), Math.floor((g0 + g1) / 2), Math.floor((b0 + b1) / 2)]);
+        colors.push([0, 0, 0]);
+      }
+      for (let py = 0; py < 4; py++) {
+        for (let px = 0; px < 4; px++) {
+          const yi = by * 4 + py, xi = bx * 4 + px;
+          if (yi >= height || xi >= width) continue;
+          const ci = (cBits >> ((py * 4 + px) * 4)) & 3;
+          const [r, g, b] = colors[ci];
+          const a = dxt5 ? alphas[(data.readUInt32LE(bo + 2) >> ((py * 4 + px) * 3)) & 7] : 255;
+          const o = (yi * width + xi) * 4;
+          rgba[o] = r; rgba[o + 1] = g; rgba[o + 2] = b; rgba[o + 3] = a;
+        }
+      }
+    }
+  }
+  return rgba;
+}
+function encodePNG(rgba: Buffer, width: number, height: number): Buffer {
+  const { deflateSync } = require("node:zlib");
+  const crc32Table: number[] = [];
+  for (let i = 0; i < 256; i++) { let c = i; for (let j = 0; j < 8; j++) c = c & 1 ? 0xEDB88320 ^ (c >>> 1) : c >>> 1; crc32Table.push(c); }
+  const crc32 = (buf: Buffer) => { let c = 0xFFFFFFFF; for (const b of buf) c = crc32Table[(c ^ b) & 0xFF] ^ (c >>> 8); return (c ^ 0xFFFFFFFF) >>> 0; };
+  const chunk = (type: string, data: Buffer): Buffer => {
+    const td = Buffer.concat([Buffer.from(type, "ascii"), data]);
+    const len = Buffer.alloc(4); len.writeUInt32BE(data.length, 0);
+    const crc = Buffer.alloc(4); crc.writeUInt32BE(crc32(td), 0);
+    return Buffer.concat([len, td, crc]);
+  };
+  const sig = Buffer.from([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0); ihdr.writeUInt32BE(height, 4);
+  ihdr[8] = 8; ihdr[9] = 6; ihdr[10] = 0; ihdr[11] = 0; ihdr[12] = 0;
+  const raw = Buffer.alloc((width * 4 + 1) * height);
+  for (let y = 0; y < height; y++) {
+    raw[y * (width * 4 + 1)] = 0; // filter: None
+    rgba.copy(raw, y * (width * 4 + 1) + 1, y * width * 4, (y + 1) * width * 4);
+  }
+  const idat = deflateSync(raw, { level: 9 });
+  return Buffer.concat([sig, chunk("IHDR", ihdr), chunk("IDAT", idat), chunk("IEND", Buffer.alloc(0))]);
+}
+// 查找模组物品的 .tex 图标文件并返回 PNG
+function modItemIconPath(id: string, prefab: string): string | null {
+  const modDir = join(ugcSharedDir(), id);
+  // 常见位置：images/inventoryimages/<prefab>.tex 或 images/<prefab>.tex
+  const candidates = [
+    join(modDir, "images", "inventoryimages", `${prefab}.tex`),
+    join(modDir, "images", `${prefab}.tex`),
+  ];
+  for (const p of candidates) if (existsSync(p)) return p;
+  // 搜索 images/ 下的 .tex
+  try {
+    const imgDir = join(modDir, "images");
+    if (existsSync(imgDir)) {
+      for (const sub of ["inventoryimages", ""]) {
+        const dir = sub ? join(imgDir, sub) : imgDir;
+        if (!existsSync(dir)) continue;
+        for (const f of readdirSync(dir)) {
+          if (f === `${prefab}.tex`) return join(dir, f);
+        }
+      }
+    }
+  } catch {}
+  return null;
+}
+
 // ---------- 模组新增物品扫描 ----------
 let vanillaPrefabSet: Set<string> | null = null;
 function vanillaPrefabs(): Set<string> {
@@ -836,7 +971,7 @@ function modItems(id: string): { name: string; prefab: string; cat: string }[] {
   return out;
 }
 
-interface ModWorldgenOption { key: string; label: string; group: string; world: string; default: string; values: { v: string; label: string }[] }
+interface ModWorldgenOption { key: string; label: string; group: string; world: string; default: string; values: { v: string; label: string }[]; img?: string; atlas?: string }
 interface ModWorldgenPreset { id: string; name: string; location: string; overrides: Record<string, string> }
 
 let vanillaStringsMap: Map<string, string> | null = null;
@@ -1151,6 +1286,105 @@ function parseModCustomizeFile(text: string, modId = ""): ModWorldgenOption[] {
       }
     }
   }
+  // --- Porkland / Hamlet 风格：modcustomizeitems.lua ---
+  // 辅助：从分组体内提取所有条目（字符串条目 "name" 和表条目 key = { ... }）
+  const extractItemsFromGroup = (body: string): { key: string; block: string }[] => {
+    const items: { key: string; block: string }[] = [];
+    let pos = 0;
+    while (pos < body.length) {
+      while (pos < body.length && /[\s,]/.test(body[pos])) pos++;
+      if (pos >= body.length) break;
+      // 字符串条目："item_name"
+      if (body[pos] === '"') {
+        const sm = /^"([A-Za-z_]\w*)"/.exec(body.slice(pos));
+        if (sm) { items.push({ key: sm[1], block: "" }); pos += sm[0].length; continue; }
+      }
+      // 表条目：key = { ... }
+      const tm = /^([A-Za-z_]\w*)\s*=\s*\{/.exec(body.slice(pos));
+      if (tm) {
+        const bs = pos + tm[0].length - 1;
+        const be = braceMatch(body, bs);
+        if (be !== -1) { items.push({ key: tm[1], block: body.slice(bs + 1, be) }); pos = be + 1; continue; }
+      }
+      pos++;
+    }
+    return items;
+  };
+  // 通用：解析单个 item block 并 push 到 options
+  const pushItem = (key: string, block: string, groupLabel: string, world: string, atlas: string) => {
+    const def = (/\bvalue\s*=\s*"([^"]*)"/.exec(block) || [])[1] || "default";
+    const itemDesc = (/\bdesc\s*=\s*([A-Za-z_]\w*)/.exec(block) || [])[1] || "frequency_descriptions";
+    const img = (/\bimage\s*=\s*"([^"]+)"/.exec(block) || [])[1] || key + ".tex";
+    const values = descMaps[itemDesc] || descMaps["frequency_descriptions"];
+    let label = zhNameForKey(key);
+    if (!label && modId) {
+      const en = modStringLookup(modId, key.toUpperCase(), "NAMES") || modStringLookup(modId, key.replace(/_setting$/, "").toUpperCase(), "NAMES");
+      if (en) label = chinesePo().get(en) || en;
+    }
+    options.push({ key, label: label || key, group: groupLabel, world, default: def, values, img, atlas });
+  };
+  // pl_customize_table：每个顶层 key = 分组，含 category/text/items
+  const plRe = /\bpl_customize_table\s*=\s*\{/g;
+  let plM: RegExpExecArray | null;
+  while ((plM = plRe.exec(text))) {
+    const plEnd = braceMatch(text, plM.index + plM[0].length - 1);
+    if (plEnd === -1) { plRe.lastIndex = text.length; break; }
+    const plBody = text.slice(plM.index + plM[0].length, plEnd);
+    plRe.lastIndex = plEnd;
+    const grpRe = /([A-Za-z_]\w*)\s*=\s*\{/g;
+    let gr: RegExpExecArray | null;
+    while ((gr = grpRe.exec(plBody))) {
+      const ge = braceMatch(plBody, grpRe.lastIndex - 1);
+      if (ge === -1) continue;
+      const gblk = plBody.slice(grpRe.lastIndex, ge);
+      grpRe.lastIndex = ge;
+      const groupTextExpr = (/\btext\s*=\s*([^,\n]+)/.exec(gblk) || [])[1] || "";
+      const groupLabel = resolveStringsRef(groupTextExpr) || gr[1];
+      const gaM = /\batlas\s*=\s*(?:([A-Z_][A-Za-z0-9_]*)|"([^"]+)")/.exec(gblk);
+      const groupAtlas = normalizeAtlas((gaM && (gaM[1] || gaM[2])) || "") || "customization_porkland";
+      const im = /items\s*=\s*\{/.exec(gblk);
+      if (!im) continue;
+      const iEnd = braceMatch(gblk, im.index + im[0].length - 1);
+      if (iEnd === -1) continue;
+      const iBody = gblk.slice(im.index + im[0].length, iEnd);
+      for (const it of extractItemsFromGroup(iBody)) {
+        pushItem(it.key, it.block, groupLabel, "porkland", groupAtlas);
+      }
+    }
+  }
+  // customize_items：[LEVELCATEGORY.WORLDGEN/SETTINGS] → 分组 → 条目
+  const SUBGROUP_CN: Record<string, string> = { global: "全局", monsters: "怪物", animals: "动物", resources: "资源", misc: "杂项", survivors: "生存者", events: "事件" };
+  const ciRe = /\bcustomize_items\s*=\s*\{/g;
+  let ciM: RegExpExecArray | null;
+  while ((ciM = ciRe.exec(text))) {
+    const ciEnd = braceMatch(text, ciM.index + ciM[0].length - 1);
+    if (ciEnd === -1) { ciRe.lastIndex = text.length; break; }
+    const ciBody = text.slice(ciM.index + ciM[0].length, ciEnd);
+    ciRe.lastIndex = ciEnd;
+    const catRe = /\[LEVELCATEGORY\.(\w+)\]\s*=\s*\{/g;
+    let catM: RegExpExecArray | null;
+    while ((catM = catRe.exec(ciBody))) {
+      const catEnd = braceMatch(ciBody, catRe.lastIndex - 1);
+      if (catEnd === -1) continue;
+      const catBody = ciBody.slice(catRe.lastIndex, catEnd);
+      catRe.lastIndex = catEnd;
+      const catLabel = catM[1] === "WORLDGEN" ? "世界生成" : "世界设置";
+      // 分组：["global"] 或 monsters = { ... }
+      const grpRe = /\[?"?([A-Za-z_]\w*)"?\]?\s*=\s*\{/g;
+      let gr: RegExpExecArray | null;
+      while ((gr = grpRe.exec(catBody))) {
+        const ge = braceMatch(catBody, grpRe.lastIndex - 1);
+        if (ge === -1) continue;
+        const gblk = catBody.slice(grpRe.lastIndex, ge);
+        grpRe.lastIndex = ge;
+        const subGroupName = gr[1];
+        const groupLabel = catLabel + "·" + (SUBGROUP_CN[subGroupName] || subGroupName);
+        for (const it of extractItemsFromGroup(gblk)) {
+          pushItem(it.key, it.block, groupLabel, "porkland", "customization_porkland");
+        }
+      }
+    }
+  }
   return options;
 }
 function parseModLevelPresets(text: string, modId = ""): ModWorldgenPreset[] {
@@ -1227,6 +1461,8 @@ function modWorldgenData(id: string): { name: string; options: ModWorldgenOption
   if (existsSync(mw)) files.push(mw);
   const cust = join(dir, "scripts", "map", "customize_patch.lua");
   if (existsSync(cust)) files.push(cust);
+  const custItems = join(dir, "modcustomizeitems.lua");
+  if (existsSync(custItems)) files.push(custItems);
   const lvDir = join(dir, "scripts", "map", "levels");
   try { if (existsSync(lvDir)) for (const f of readdirSync(lvDir)) if (f.endsWith(".lua")) files.push(join(lvDir, f)); } catch {}
   if (!files.length) return null;
@@ -2605,7 +2841,8 @@ async function api(req: Request, url: URL): Promise<Response> {
       for (const it of modItems(id)) {
         if (!seen.has(it.prefab)) {
           seen.add(it.prefab);
-          all.push({ ...it, icon: iconMap.get(it.prefab) || "" });
+          // 模组物品：标记 modId，前端用 /mod-icon?id=<modId>&prefab=<prefab> 获取图标
+          all.push({ ...it, icon: "", modId: id });
         }
       }
     }
@@ -2902,10 +3139,41 @@ const server = Bun.serve({
     if (path === "/" || path === "/index.html") {
       return serveFile(join(PUBLIC_DIR, checkAuth(req) ? "index.html" : "login.html"));
     }
+    // 动态模组物品图标：/mod-icon?id=<modId>&prefab=<prefab> → PNG
+    if (path === "/mod-icon" && req.method === "GET") {
+      const modId = url.searchParams.get("id") || "";
+      const prefab = url.searchParams.get("prefab") || "";
+      if (!/^\d{4,15}$/.test(modId) || !/^[a-z0-9_]+$/.test(prefab)) return new Response("Bad request", { status: 400 });
+      const texPath = modItemIconPath(modId, prefab);
+      if (!texPath) return new Response("Not found", { status: 404 });
+      try {
+        const buf = readFileSync(texPath);
+        const result = decodeKTEX(buf);
+        if (!result) return new Response("Decode failed", { status: 500 });
+        return new Response(result.png, { status: 200, headers: { "Content-Type": "image/png", "Cache-Control": "public, max-age=604800" } });
+      } catch {
+        return new Response("Error", { status: 500 });
+      }
+    }
     // 静态资源（相对路径引用，无敏感数据；允许 bg/ 等一层子目录，禁止 .. 穿越）
     if (/^\/[\w.\-/]+$/.test(path) && !path.includes("..")) {
       const fp = join(PUBLIC_DIR, path);
       try { if (existsSync(fp) && statSync(fp).isFile()) return serveFile(fp); } catch {}
+    }
+    // Steam CDN 图片代理（解决国内无法直连 steamusercontent.com 的问题）
+    if (path === "/img-proxy" && req.method === "GET") {
+      const target = url.searchParams.get("url") || "";
+      if (!target.startsWith("https://images.steamusercontent.com/") && !target.startsWith("https://cdn.steamusercontent.com/")) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      try {
+        const res = await fetch(target, { signal: AbortSignal.timeout(8000) });
+        if (!res.ok) return new Response("Fetch failed", { status: 502 });
+        const buf = await res.arrayBuffer();
+        return new Response(buf, { status: 200, headers: { "Content-Type": res.headers.get("Content-Type") || "image/png", "Cache-Control": "public, max-age=86400" } });
+      } catch {
+        return new Response("Fetch error", { status: 502 });
+      }
     }
     return new Response("Not Found", { status: 404 });
   },
