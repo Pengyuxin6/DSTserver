@@ -1,0 +1,15 @@
+[Unit]
+Description=DST Dedicated Server Management Panel (Bun)
+After=network.target
+
+[Service]
+Type=simple
+User=steam
+Group=steam
+WorkingDirectory=/home/steam/dst_panel
+ExecStart=/usr/local/bin/bun run src/server.ts
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

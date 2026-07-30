@@ -1,0 +1,8 @@
+{
+  "name": "dst-panel",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "start": "bun run src/server.ts"
+  }
+}

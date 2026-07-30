@@ -1,0 +1,229 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>饥荒服务器管理面板 - 登录</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body[data-theme="amber"] { --amber: #e8a33d; --amber-d: #c77f1f; --text: #e8dcc0; --muted: #9a917c; --input-bg: rgba(10, 10, 20, .55); --page-solid: #12121f; }
+  body[data-theme="paper"] { --amber: #d9a441; --amber-d: #b97a17; --text: #f5eeda; --muted: #b8ab8e; --input-bg: rgba(10, 10, 20, .45); --page-solid: #e8e2d2; }
+  body[data-theme="tech"]  { --amber: #3fd6ea; --amber-d: #1fa8bf; --text: #d5e8f5; --muted: #7e9ab5; --input-bg: rgba(4, 10, 20, .55); --page-solid: #081020; }
+  body {
+    color: var(--text); font-family: "Microsoft YaHei", "PingFang SC", sans-serif;
+    min-height: 100vh; display: flex; align-items: center; justify-content: center;
+    background: var(--page-solid); overflow: hidden;
+  }
+  /* 全屏背景图 + 暗色渐变遮罩（保证文字可读） */
+  #bgLayer {
+    position: fixed; inset: 0; z-index: 0;
+    background: var(--page-solid) center / cover no-repeat;
+    transform: scale(1.03);
+  }
+  #bgMask {
+    position: fixed; inset: 0; z-index: 1;
+    background:
+      radial-gradient(ellipse at 50% 42%, rgba(0, 0, 0, .18) 0%, rgba(0, 0, 0, .62) 78%),
+      linear-gradient(180deg, rgba(0, 0, 0, .42) 0%, rgba(0, 0, 0, .18) 45%, rgba(0, 0, 0, .66) 100%);
+  }
+  #fx { position: fixed; inset: 0; z-index: 2; pointer-events: none; }
+  /* 玻璃拟态登录卡片 */
+  .card {
+    position: relative; z-index: 3;
+    background: rgba(18, 16, 28, .52);
+    -webkit-backdrop-filter: blur(14px) saturate(1.2); backdrop-filter: blur(14px) saturate(1.2);
+    border: 1px solid var(--amber-d); border-radius: 14px;
+    padding: 42px 38px; width: min(370px, 92vw);
+    box-shadow: 0 10px 44px rgba(0, 0, 0, .62), inset 0 1px 0 rgba(255, 255, 255, .08);
+  }
+  h1 {
+    font-size: 23px; color: var(--amber); text-align: center; margin-bottom: 6px; letter-spacing: 3px;
+    text-shadow: 0 0 18px var(--amber-d), 0 0 4px var(--amber);
+    animation: titleGlow 3.2s ease-in-out infinite alternate;
+  }
+  @keyframes titleGlow {
+    from { text-shadow: 0 0 12px var(--amber-d), 0 0 3px var(--amber); }
+    to   { text-shadow: 0 0 26px var(--amber), 0 0 6px var(--amber); }
+  }
+  .sub { text-align: center; color: var(--muted); font-size: 13px; margin-bottom: 28px; letter-spacing: 1px; }
+  label { display: block; font-size: 13px; color: var(--text); opacity: .82; margin: 14px 0 6px; }
+  input {
+    width: 100%; padding: 10px 12px; border-radius: 6px; border: 1px solid rgba(150, 140, 110, .35);
+    background: var(--input-bg); color: var(--text); font-size: 14px; outline: none;
+    transition: border-color .15s, box-shadow .15s;
+  }
+  input:focus { border-color: var(--amber); box-shadow: 0 0 10px var(--amber-d); }
+  input::placeholder { color: var(--muted); }
+  button {
+    width: 100%; margin-top: 24px; padding: 11px; border: none; border-radius: 6px;
+    background: linear-gradient(180deg, var(--amber), var(--amber-d)); color: #14101e;
+    font-size: 15px; font-weight: bold; cursor: pointer; letter-spacing: 4px;
+    transition: filter .15s, box-shadow .15s;
+  }
+  button:hover { filter: brightness(1.15); box-shadow: 0 0 16px var(--amber-d); }
+  .msg { margin-top: 14px; text-align: center; font-size: 13px; color: #ff7b6b; min-height: 18px; text-shadow: 0 1px 3px rgba(0,0,0,.6); }
+</style>
+</head>
+<body>
+<script>
+// 前端调试保护（参考企查查：无限 debugger + DevTools 检测）
+// 调试后门：localStorage.setItem('dstp_nodebug','1') 后刷新即关闭本保护
+(function () {
+  if (localStorage.getItem('dstp_nodebug') === '1') return;
+  // 1. 禁用 F12 / Ctrl+Shift+I,J,C / Ctrl+U / 右键菜单
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'F12' ||
+      (e.ctrlKey && e.shiftKey && ['I', 'J', 'C'].includes(e.key.toUpperCase())) ||
+      (e.ctrlKey && e.key.toUpperCase() === 'U')) {
+      e.preventDefault(); e.stopPropagation();
+    }
+  }, true);
+  document.addEventListener('contextmenu', function (e) { e.preventDefault(); }, true);
+  // 2. 无限 debugger：DevTools 打开时持续断点，无法正常调试
+  (function loop() {
+    try { (function () { return false; }).constructor('debugger')(); } catch (e) {}
+    setTimeout(loop, 600);
+  })();
+  // 3. DevTools 检测（计时法，零误判）：debugger 语句真正造成暂停才说明控制台开着
+  var warned = false;
+  setInterval(function () {
+    var t0 = performance.now();
+    debugger;
+    if (performance.now() - t0 > 120 && !warned) {
+      warned = true;
+      document.body.innerHTML =
+        '<div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;background:#12121f;color:#e8a33d;font-family:sans-serif;z-index:99999">' +
+        '<h2>\u26a0 \u68c0\u6d4b\u5230\u5f00\u53d1\u8005\u5de5\u5177</h2><p style="color:#8a8578">\u51fa\u4e8e\u5b89\u5168\u8003\u8651\uff0c\u8bf7\u5173\u95ed\u5f00\u53d1\u8005\u5de5\u5177(F12)\u540e\u5237\u65b0\u4f7f\u7528</p></div>';
+    }
+  }, 1000);
+})();
+</script>
+<script>
+// 皮肤预载：主题（存 localStorage，与主界面皮肤设置共享）
+document.body.dataset.theme = localStorage.getItem("dstp_theme") || "amber";
+</script>
+<div id="bgLayer"></div>
+<script>
+// 登录背景图（hero/header/capsule/none，皮肤设置里可换）
+(function () {
+  try { const cc = JSON.parse(localStorage.getItem("dstp_colors") || "{}"); const st = document.body.style;
+    if (cc.accent) { st.setProperty("--amber", cc.accent); st.setProperty("--amber-d", cc.accent); st.setProperty("--ember1", cc.accent); }
+    if (cc.bg) st.setProperty("--bg", cc.bg); } catch (e) {}
+  const bg = localStorage.getItem("dstp_login_bg") || "hero";
+  if (bg !== "none") document.getElementById("bgLayer").style.backgroundImage = 'url("bg/' + bg + '.jpg")';
+})();
+</script>
+<div id="bgMask"></div>
+<canvas id="fx"></canvas>
+<div class="card">
+  <h1>饥荒服务器管理面板</h1>
+  <div class="sub">Don't Starve Together 专用服务器</div>
+  <label>用户名</label>
+  <input id="user" placeholder="任意用户名" autocomplete="username">
+  <label>密码</label>
+  <input id="pass" type="password" placeholder="面板密码" autocomplete="current-password">
+  <button id="btn">登 录</button>
+  <div class="msg" id="msg"></div>
+</div>
+<script>
+// ===== 紧凑 SHA-256 实现（HTTP 环境无 crypto.subtle，用于登录挑战哈希） =====
+function sha256hex(ascii) {
+  function rr(v, a) { return (v >>> a) | (v << (32 - a)); }
+  var K = [0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2];
+  var str = unescape(encodeURIComponent(ascii));
+  var bytes = [];
+  for (var i = 0; i < str.length; i++) bytes.push(str.charCodeAt(i));
+  var bitLen = bytes.length * 8;
+  bytes.push(0x80);
+  while (bytes.length % 64 !== 56) bytes.push(0);
+  for (var i = 0; i < 4; i++) bytes.push(0);
+  for (i = 3; i >= 0; i--) bytes.push((bitLen >>> (i * 8)) & 0xff);
+  var h = [0x6a09e667,0xbb67ae85,0x3c6ef372,0xa54ff53a,0x510e527f,0x9b05688c,0x1f83d9ab,0x5be0cd19];
+  for (var off = 0; off < bytes.length; off += 64) {
+    var w = new Array(64);
+    for (var t = 0; t < 16; t++) w[t] = (bytes[off+t*4] << 24) | (bytes[off+t*4+1] << 16) | (bytes[off+t*4+2] << 8) | bytes[off+t*4+3];
+    for (t = 16; t < 64; t++) { var s0 = rr(w[t-15],7)^rr(w[t-15],18)^(w[t-15]>>>3), s1 = rr(w[t-2],17)^rr(w[t-2],19)^(w[t-2]>>>10); w[t] = (w[t-16]+s0+w[t-7]+s1)|0; }
+    var a = h[0], b = h[1], c = h[2], d = h[3], e = h[4], f = h[5], g = h[6], hh = h[7];
+    for (t = 0; t < 64; t++) {
+      var S1 = rr(e,6)^rr(e,11)^rr(e,25), ch = (e&f)^(~e&g), t1 = (hh+S1+ch+K[t]+w[t])|0, S0 = rr(a,2)^rr(a,13)^rr(a,22), mj = (a&b)^(a&c)^(b&c), t2 = (S0+mj)|0;
+      hh = g; g = f; f = e; e = (d+t1)|0; d = c; c = b; b = a; a = (t1+t2)|0;
+    }
+    h[0]=(h[0]+a)|0; h[1]=(h[1]+b)|0; h[2]=(h[2]+c)|0; h[3]=(h[3]+d)|0; h[4]=(h[4]+e)|0; h[5]=(h[5]+f)|0; h[6]=(h[6]+g)|0; h[7]=(h[7]+hh)|0;
+  }
+  return h.map(function(x){ return (x>>>0).toString(16).padStart(8,'0'); }).join('');
+}
+
+const btn = document.getElementById('btn');
+async function login() {
+  const password = document.getElementById('pass').value;
+  const username = document.getElementById('user').value;
+  const msg = document.getElementById('msg');
+  msg.textContent = '';
+  try {
+    // 挑战-响应：密码不上网，只发 哈希(哈希(盐+密码)+nonce)
+    const ch = (await (await fetch('api/login/challenge')).json()).data;
+    const h1 = sha256hex(ch.salt + password);
+    const hash = sha256hex(h1 + ch.nonce);
+    const r = await fetch('api/login', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({username, hash, nonce: ch.nonce})
+    });
+    const j = await r.json();
+    if (j.ok) location.reload();
+    else msg.textContent = j.msg || '登录失败';
+  } catch (e) {
+    msg.textContent = '网络错误，请重试';
+  }
+}
+btn.onclick = login;
+document.getElementById('pass').addEventListener('keydown', e => { if (e.key === 'Enter') login(); });
+
+// ===== 余烬/萤火虫粒子（纯 canvas，颜色跟随主题变量） =====
+(function () {
+  const cv = document.getElementById('fx');
+  const ctx = cv.getContext('2d');
+  let W = 0, H = 0, parts = [];
+  const css = (n) => getComputedStyle(document.body).getPropertyValue(n).trim();
+  let c1 = css('--ember1') || '#f5c86e', c2 = css('--ember2') || '#e87f3d';
+  // 登录页未加载 style.css，按主题给定粒子色
+  if (!css('--ember1')) {
+    const t = document.body.dataset.theme;
+    [c1, c2] = t === 'tech' ? ['#6ff2ff', '#2f9fd8'] : t === 'paper' ? ['#e8b85a', '#c98f2d'] : ['#f5c86e', '#e87f3d'];
+  }
+  function resize() {
+    W = cv.width = innerWidth; H = cv.height = innerHeight;
+  }
+  function spawn(n) {
+    parts = [];
+    for (let i = 0; i < n; i++) parts.push({
+      x: Math.random() * W, y: Math.random() * H,
+      r: .8 + Math.random() * 1.9,
+      vy: -(.12 + Math.random() * .38), vx: (Math.random() - .5) * .22,
+      ph: Math.random() * Math.PI * 2, sp: .008 + Math.random() * .02,
+      c: Math.random() < .55 ? c1 : c2,
+    });
+  }
+  resize(); spawn(Math.min(52, Math.floor(W * H / 26000)));
+  addEventListener('resize', () => { resize(); });
+  function tick() {
+    if (!document.hidden) {
+      ctx.clearRect(0, 0, W, H);
+      for (const p of parts) {
+        p.y += p.vy; p.x += p.vx + Math.sin(p.ph) * .15; p.ph += p.sp;
+        if (p.y < -8) { p.y = H + 8; p.x = Math.random() * W; }
+        if (p.x < -8) p.x = W + 8; else if (p.x > W + 8) p.x = -8;
+        const a = .25 + .55 * (0.5 + 0.5 * Math.sin(p.ph * 2));
+        ctx.globalAlpha = a;
+        ctx.fillStyle = p.c;
+        ctx.shadowColor = p.c; ctx.shadowBlur = 7;
+        ctx.beginPath(); ctx.arc(p.x, p.y, p.r, 0, Math.PI * 2); ctx.fill();
+      }
+      ctx.globalAlpha = 1; ctx.shadowBlur = 0;
+    }
+    requestAnimationFrame(tick);
+  }
+  tick();
+})();
+</script>
+</body>
+</html>

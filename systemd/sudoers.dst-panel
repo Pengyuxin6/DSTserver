@@ -1,0 +1,2 @@
+# 允许 steam 用户仅控制饥荒看门狗定时器（面板「基本设置」页的开关）
+steam ALL=(root) NOPASSWD: /usr/bin/systemctl start dst-steam-guard.timer, /usr/bin/systemctl stop dst-steam-guard.timer, /usr/bin/systemctl is-active dst-steam-guard.timer, /usr/bin/systemctl is-enabled dst-steam-guard.timer

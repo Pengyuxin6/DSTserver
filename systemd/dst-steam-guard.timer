@@ -1,0 +1,9 @@
+[Unit]
+Description=Run DST steam-identity guard every minute
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=60s
+
+[Install]
+WantedBy=timers.target
