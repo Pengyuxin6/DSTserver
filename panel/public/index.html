@@ -8,39 +8,6 @@
 </head>
 <body>
 <script>
-// 前端调试保护（参考企查查：无限 debugger + DevTools 检测）
-// 调试后门：localStorage.setItem('dstp_nodebug','1') 后刷新即关闭本保护
-(function () {
-  if (localStorage.getItem('dstp_nodebug') === '1') return;
-  // 1. 禁用 F12 / Ctrl+Shift+I,J,C / Ctrl+U / 右键菜单
-  document.addEventListener('keydown', function (e) {
-    if (e.key === 'F12' ||
-      (e.ctrlKey && e.shiftKey && ['I', 'J', 'C'].includes(e.key.toUpperCase())) ||
-      (e.ctrlKey && e.key.toUpperCase() === 'U')) {
-      e.preventDefault(); e.stopPropagation();
-    }
-  }, true);
-  document.addEventListener('contextmenu', function (e) { e.preventDefault(); }, true);
-  // 2. 无限 debugger：DevTools 打开时持续断点，无法正常调试
-  (function loop() {
-    try { (function () { return false; }).constructor('debugger')(); } catch (e) {}
-    setTimeout(loop, 600);
-  })();
-  // 3. DevTools 检测（计时法，零误判）：debugger 语句真正造成暂停才说明控制台开着
-  var warned = false;
-  setInterval(function () {
-    var t0 = performance.now();
-    debugger;
-    if (performance.now() - t0 > 120 && !warned) {
-      warned = true;
-      document.body.innerHTML =
-        '<div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;background:#12121f;color:#e8a33d;font-family:sans-serif;z-index:99999">' +
-        '<h2>\u26a0 \u68c0\u6d4b\u5230\u5f00\u53d1\u8005\u5de5\u5177</h2><p style="color:#8a8578">\u51fa\u4e8e\u5b89\u5168\u8003\u8651\uff0c\u8bf7\u5173\u95ed\u5f00\u53d1\u8005\u5de5\u5177(F12)\u540e\u5237\u65b0\u4f7f\u7528</p></div>';
-    }
-  }, 1000);
-})();
-</script>
-<script>
 // 主题预载：首屏渲染前应用 localStorage 里的皮肤，避免闪烁
 document.body.dataset.theme = localStorage.getItem("dstp_theme") || "amber";
 </script>
@@ -55,6 +22,39 @@ document.body.dataset.theme = localStorage.getItem("dstp_theme") || "amber";
 <div id="crumbs"></div>
 <main id="content"><div class="skeleton sk-lg"></div><div class="skeleton sk-sm"></div><div class="skeleton sk-sm"></div></main>
 <div id="toast"></div>
-<script src="app.js"></script>
+<script src="app.js" defer></script>
+<script>
+// 前端调试保护：延迟到页面加载完成后启动，不阻塞首屏
+// 调试后门：localStorage.setItem('dstp_nodebug','1') 后刷新即关闭本保护
+window.addEventListener('load', function () {
+  if (localStorage.getItem('dstp_nodebug') === '1') return;
+  // 1. 禁用 F12 / Ctrl+Shift+I,J,C / Ctrl+U / 右键菜单
+  document.addEventListener('keydown', function (e) {
+    if (e.key === 'F12' ||
+      (e.ctrlKey && e.shiftKey && ['I', 'J', 'C'].includes(e.key.toUpperCase())) ||
+      (e.ctrlKey && e.key.toUpperCase() === 'U')) {
+      e.preventDefault(); e.stopPropagation();
+    }
+  }, true);
+  document.addEventListener('contextmenu', function (e) { e.preventDefault(); }, true);
+  // 2. 无限 debugger：降低频率（3秒一次），减少 CPU 占用
+  (function loop() {
+    try { (function () { return false; }).constructor('debugger')(); } catch (e) {}
+    setTimeout(loop, 3000);
+  })();
+  // 3. DevTools 检测（计时法，零误判）：5秒一次
+  var warned = false;
+  setInterval(function () {
+    var t0 = performance.now();
+    debugger;
+    if (performance.now() - t0 > 120 && !warned) {
+      warned = true;
+      document.body.innerHTML =
+        '<div style="position:fixed;inset:0;display:flex;align-items:center;justify-content:center;flex-direction:column;background:#12121f;color:#e8a33d;font-family:sans-serif;z-index:99999">' +
+        '<h2>\u26a0 \u68c0\u6d4b\u5230\u5f00\u53d1\u8005\u5de5\u5177</h2><p style="color:#8a8578">\u51fa\u4e8e\u5b89\u5168\u8003\u8651\uff0c\u8bf7\u5173\u95ed\u5f00\u53d1\u8005\u5de5\u5177(F12)\u540e\u5237\u65b0\u4f7f\u7528</p></div>';
+    }
+  }, 5000);
+});
+</script>
 </body>
 </html>
