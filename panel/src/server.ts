@@ -909,26 +909,32 @@ function encodePNG(rgba: Buffer, width: number, height: number): Buffer {
   const idat = deflateSync(raw, { level: 9 });
   return Buffer.concat([sig, chunk("IHDR", ihdr), chunk("IDAT", idat), chunk("IEND", Buffer.alloc(0))]);
 }
-// 查找模组物品的 .tex 图标文件并返回 PNG
+// 查找模组物品的 .tex 图标文件：递归搜索整个 images/ 目录
 function modItemIconPath(id: string, prefab: string): string | null {
   const modDir = join(ugcSharedDir(), id);
-  // 常见位置：images/inventoryimages/<prefab>.tex 或 images/<prefab>.tex
-  const candidates = [
-    join(modDir, "images", "inventoryimages", `${prefab}.tex`),
-    join(modDir, "images", `${prefab}.tex`),
+  const target = `${prefab}.tex`;
+  // 快速路径：常见位置直接检查
+  const quick = [
+    join(modDir, "images", "inventoryimages", target),
+    join(modDir, "images", target),
   ];
-  for (const p of candidates) if (existsSync(p)) return p;
-  // 搜索 images/ 下的 .tex
+  for (const p of quick) if (existsSync(p)) return p;
+  // 递归搜索 images/ 下所有子目录
   try {
     const imgDir = join(modDir, "images");
     if (existsSync(imgDir)) {
-      for (const sub of ["inventoryimages", ""]) {
-        const dir = sub ? join(imgDir, sub) : imgDir;
-        if (!existsSync(dir)) continue;
+      const search = (dir: string, depth: number): string | null => {
+        if (depth > 3) return null;
         for (const f of readdirSync(dir)) {
-          if (f === `${prefab}.tex`) return join(dir, f);
+          if (f === target) return join(dir, f);
         }
-      }
+        for (const f of readdirSync(dir)) {
+          const fp = join(dir, f);
+          try { if (statSync(fp).isDirectory()) { const r = search(fp, depth + 1); if (r) return r; } } catch {}
+        }
+        return null;
+      };
+      return search(imgDir, 0);
     }
   } catch {}
   return null;
@@ -947,23 +953,45 @@ const modItemsCache = new Map<string, { name: string; prefab: string; cat: strin
 function modItems(id: string): { name: string; prefab: string; cat: string }[] {
   if (modItemsCache.has(id)) return modItemsCache.get(id)!;
   const out: { name: string; prefab: string; cat: string }[] = [];
+  const seen = new Set<string>();
   const dir = join(ugcSharedDir(), id, "scripts", "prefabs");
+  const resolveName = (prefab: string): string => {
+    const upper = prefab.toUpperCase();
+    let name = chsNames().get("STRINGS.NAMES." + upper) || "";
+    if (!name) {
+      const en = modStringLookup(id, upper, "NAMES");
+      name = en ? (chinesePo().get(en) || en) : "";
+    }
+    return name;
+  };
   try {
     if (existsSync(dir)) {
       for (const f of readdirSync(dir)) {
         if (!f.endsWith(".lua")) continue;
-        const prefab = f.slice(0, -4);
-        if (vanillaPrefabs().has(prefab)) continue;
-        const upper = prefab.toUpperCase();
-        let name = chsNames().get("STRINGS.NAMES." + upper) || "";
-        if (!name) {
-          const en = modStringLookup(id, upper, "NAMES");
-          name = en ? (chinesePo().get(en) || en) : prefab;
-        }
-        // 无名字的纯内部实体（特效/生成器/网络节点等，无 inventoryitem）不进物品列表
         const lua = readText(join(dir, f));
-        if (name === prefab && !lua.includes('"inventoryitem"') && !lua.includes("components.inventoryitem")) continue;
-        out.push({ name, prefab, cat: "模组物品" });
+        // 从 lua 内容中提取所有 Prefab("xxx", ...) 定义的实际 prefab 名
+        const prefabNames = new Set<string>();
+        for (const m of lua.matchAll(/Prefab\s*\(\s*"([a-z0-9_]+)"/g)) prefabNames.add(m[1]);
+        for (const m of lua.matchAll(/Prefab\s*\(\s*([a-z0-9_.]+)\s*[,)]/gi)) {
+          // Prefab(def.name, ...) 形式 — def.name 来自数据表，无法静态解析
+          // 但如果有对应的 .tex 文件，说明是实际物品
+        }
+        // 如果没有找到 Prefab() 调用，回退到文件名
+        if (prefabNames.size === 0) {
+          const fn = f.slice(0, -4);
+          if (!vanillaPrefabs().has(fn)) prefabNames.add(fn);
+        }
+        for (const prefab of prefabNames) {
+          if (seen.has(prefab) || vanillaPrefabs().has(prefab)) continue;
+          // 只保留有 inventoryitem 的物品（过滤掉特效/建筑等纯实体）
+          // 检查：lua 文件引用了 inventoryitem，或有对应的 .tex 图标文件
+          const hasInvItem = lua.includes('"inventoryitem"') || lua.includes("components.inventoryitem") || lua.includes("InventoryItem");
+          const hasIcon = modItemIconPath(id, prefab) !== null;
+          if (!hasInvItem && !hasIcon) continue;
+          const name = resolveName(prefab) || prefab;
+          seen.add(prefab);
+          out.push({ name, prefab, cat: "模组物品" });
+        }
       }
     }
   } catch {}
@@ -2196,6 +2224,24 @@ async function api(req: Request, url: URL): Promise<Response> {
     const wantMaster = b.type === "forest";
     const exists = shards.some((s) => s.isMaster === wantMaster);
     if (exists) return fail(wantMaster ? "地上世界已存在，仅支持各一个" : "地下世界已存在，仅支持各一个");
+    // 检查是否有不兼容洞穴的地图模组已启用
+    if (!wantMaster) {
+      const master = shards.find((s) => s.isMaster);
+      if (master) {
+        for (const [key, e] of readModOverrides(master.name)) {
+          if (!e.enabled) continue;
+          const id = key.replace("workshop-", "");
+          const d = modWorldgenData(id);
+          if (!d) continue;
+          const hasCavePreset = d.presets.some((p) => /volcano|cave|under/i.test(p.location || ""));
+          const hasOverworldPreset = d.presets.some((p) => !/volcano|cave|under/i.test(p.location || ""));
+          if (hasOverworldPreset && !hasCavePreset) {
+            const name = modCache.items[id]?.title || parseModInfo(id)?.name || id;
+            return fail(`已启用地图模组「${name}」不支持地下世界，无法添加洞穴分片。该模组的世界（如猪镇）不需要地下世界。`);
+          }
+        }
+      }
+    }
     const name = wantMaster ? "Master" : "Caves";
     const dir = shardDir(name);
     if (existsSync(dir)) return fail("目录已存在: " + name);
@@ -2467,6 +2513,25 @@ async function api(req: Request, url: URL): Promise<Response> {
     writeSetupIds(ids);
     writeModOverridesBoth(map);
     const omitted = [...old.keys()].filter((k) => !enabledSet.has(k.replace("workshop-", "")));
+    // 检测启用的地图模组是否有洞穴预设
+    const activeWorldMods = ids.filter((id) => {
+      const d = modWorldgenData(id);
+      if (!d) return false;
+      const hasCavePreset = d.presets.some((p) => /volcano|cave|under/i.test(p.location || ""));
+      const hasOverworldPreset = d.presets.some((p) => !/volcano|cave|under/i.test(p.location || ""));
+      // 只有地上预设、没有洞穴预设 = 纯地上地图模组（如猪镇）
+      return hasOverworldPreset && !hasCavePreset;
+    });
+    // 自动删除不支持的 Caves 分片
+    let cavesRemoved = false;
+    if (activeWorldMods.length) {
+      const shards = listShards();
+      const cavesShard = shards.find((s) => !s.isMaster);
+      if (cavesShard) {
+        if (await shardRunning(cavesShard.name)) return fail(`正在启用的地图模组不支持地下世界，请先关闭服务器再保存`);
+        try { rmSync(shardDir(cavesShard.name), { recursive: true, force: true }); cavesRemoved = true; } catch {}
+      }
+    }
     // 大型地图模组（海难/哈姆雷特/三合一等）：新启用时自动应用对应世界预设
     const autoApplied: string[] = [];
     const VANILLA_PRESETS = new Set(["", "SURVIVAL_TOGETHER", "DST_CAVE"]);
