@@ -736,6 +736,25 @@ function parseModInfo(id: string): ModInfo | null {
   return info;
 }
 
+// 物品图标图集映射（inventoryimages1-4.xml → 元素名 → 图集目录名）
+let itemIconMap: Map<string, string> | null = null;
+function itemIconAtlas(): Map<string, string> {
+  if (itemIconMap) return itemIconMap;
+  const map = new Map<string, string>();
+  const dir = join(PANEL_DIR, "data", "invicons");
+  try {
+    for (const f of readdirSync(dir)) {
+      const m = /^inventoryimages(\d+)\.xml$/.exec(f);
+      if (!m) continue;
+      const atlas = "inventoryimages" + m[1];
+      for (const mm of readText(join(dir, f)).matchAll(/<Element name="([^"]+)\.tex"/g)) {
+        if (!map.has(mm[1])) map.set(mm[1], atlas);
+      }
+    }
+  } catch {}
+  itemIconMap = map;
+  return map;
+}
 // ---------- 模组新增物品扫描 ----------
 let vanillaPrefabSet: Set<string> | null = null;
 function vanillaPrefabs(): Set<string> {
@@ -2372,8 +2391,10 @@ async function api(req: Request, url: URL): Promise<Response> {
 
   // ===== 控制台 =====
   if (path === "items" && method === "GET") {
-    // 原版物品 + 当前存档已启用模组新增的物品（分类：模组物品）
-    const all = [...ITEMS];
+    // 原版物品 + 当前存档已启用模组新增的物品（分类：模组物品），附带物品图集位置
+    const all: any[] = [...ITEMS];
+    const iconMap = itemIconAtlas();
+    for (const it of all) (it as any).icon = iconMap.get(it.prefab) || "";
     const seen = new Set(ITEMS.map((i) => i.prefab));
     const enabled = new Set<string>();
     for (const shard of listShards()) {
@@ -2381,7 +2402,10 @@ async function api(req: Request, url: URL): Promise<Response> {
     }
     for (const id of enabled) {
       for (const it of modItems(id)) {
-        if (!seen.has(it.prefab)) { seen.add(it.prefab); all.push(it); }
+        if (!seen.has(it.prefab)) {
+          seen.add(it.prefab);
+          all.push({ ...it, icon: iconMap.get(it.prefab) || "" });
+        }
       }
     }
     return ok(all);

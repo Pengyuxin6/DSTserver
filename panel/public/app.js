@@ -520,7 +520,7 @@ async function pageWorld() {
           <input type="text" id="optFilter" placeholder="按设置项名称 / key 过滤" value="${esc(worldState.filterText)}">
           <select id="optGroup"><option value="">全部分组</option></select>
         </div>
-        <div style="max-height:420px;overflow-y:auto"><table class="grid" id="optTable">
+        <div style="max-height:560px;overflow-y:auto"><table class="grid" id="optTable">
           <thead><tr><th>设置项</th><th>设定值</th><th>分组</th></tr></thead><tbody></tbody>
         </table></div>
         <div class="row" style="margin-top:12px"><label>设置项</label><select id="newVal"></select>
@@ -698,7 +698,7 @@ async function loadModWorldgen() {
       <input type="text" class="mwFilter" data-mi="${mi}" placeholder="搜索设置项（中文/key）" value="${esc(worldState.mwFilter || "")}" style="width:220px">
       <select class="mwGroup" data-mi="${mi}"><option value="">全部分组</option>${[...new Set(m.options.map((o) => o.group))].map((g) => `<option value="${g}" ${g === worldState.mwGroup ? "selected" : ""}>${esc(g)}</option>`).join("")}</select>
     </div>
-    <div style="max-height:280px;overflow-y:auto"><table class="grid"><thead><tr><th>设置项</th><th>设定值</th><th>分组</th></tr></thead><tbody id="mwTbody_${mi}"></tbody></table></div>
+    <div style="max-height:520px;overflow-y:auto"><table class="grid"><thead><tr><th>设置项</th><th>设定值</th><th>分组</th></tr></thead><tbody id="mwTbody_${mi}"></tbody></table></div>
     <div class="row" style="margin-top:8px"><label>设置项</label><select id="mwNewVal_${mi}"><option value="">（先在表格中选择一行）</option></select>
     <button class="btn primary" id="saveModOv">保存</button>
     <span class="hint">模组世界：保存只写入该模组的世界设置项</span></div>` : ""}
@@ -1593,7 +1593,7 @@ async function pageConsole() {
     itemTable.querySelector(".item-more")?.remove();
     const batch = itemView.slice(itemShown, itemShown + ITEM_BATCH);
     itemTable.insertAdjacentHTML("beforeend", batch.map((it) =>
-      `<div class="item-row" data-p="${it.prefab}"><span>${esc(it.name)}</span><span class="hint"><span class="tag">${esc(it.cat || "其他")}</span> ${it.prefab}</span></div>`).join(""));
+      `<div class="item-row" data-p="${it.prefab}"><span class="item-name">${optIcon([it.icon ? `icons/${it.icon}/${it.prefab}.png` : ""])}${esc(it.name)}</span><span class="hint"><span class="tag">${esc(it.cat || "其他")}</span> ${it.prefab}</span></div>`).join(""));
     itemShown += batch.length;
     if (itemShown < itemView.length) {
       itemTable.insertAdjacentHTML("beforeend", `<div class="item-more hint" style="padding:6px;text-align:center">滚动加载更多（已显示 ${itemShown}/${itemView.length}）</div>`);
