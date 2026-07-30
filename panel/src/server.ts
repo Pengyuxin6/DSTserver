@@ -1009,6 +1009,15 @@ const STD_DESC: Record<string, { v: string; label: string }[]> = {
   yesno_descriptions: [["no", "否"], ["yes", "是"]].map(([v, label]) => ({ v, label })),
   enableddisabled_descriptions: [["disabled", "禁用"], ["enabled", "启用"]].map(([v, label]) => ({ v, label })),
 };
+// atlas 名称归一化到 icons/<目录名>
+function normalizeAtlas(ref: string): string {
+  if (!ref) return "";
+  if (/ATLAS_SW2/i.test(ref)) return "customization_shipwrecked2";
+  if (/ATLAS_SW/i.test(ref)) return "customization_shipwrecked";
+  const m = /images\/([^"/]+)\.xml/.exec(ref);
+  if (m) return m[1];
+  return "";
+}
 function parseModCustomizeFile(text: string, modId = ""): ModWorldgenOption[] {
   text = stripLuaComments(text);
   const descMaps: Record<string, { v: string; label: string }[]> = { ...STD_DESC };
@@ -1047,6 +1056,8 @@ function parseModCustomizeFile(text: string, modId = ""): ModWorldgenOption[] {
       const groupDesc = (/\bdesc\s*=\s*([A-Za-z_]\w*)/.exec(gblk) || [])[1] || "";
       const groupTextExpr = (/\btext\s*=\s*([^,\n]+)/.exec(gblk) || [])[1] || "";
       const groupLabel = resolveStringsRef(groupTextExpr) || gr[1];
+      const gaM = /\batlas\s*=\s*(?:([A-Z_][A-Za-z0-9_]*)|"([^"]+)")/.exec(gblk);
+      const groupAtlas = normalizeAtlas((gaM && (gaM[1] || gaM[2])) || "");
       const im = /items\s*=\s*\{/.exec(gblk);
       if (!im) continue;
       const iEnd = braceMatch(gblk, im.index + im[0].length - 1);
@@ -1063,13 +1074,17 @@ function parseModCustomizeFile(text: string, modId = ""): ModWorldgenOption[] {
         const def = (/\bvalue\s*=\s*"([^"]*)"/.exec(iblk) || [])[1] || "default";
         const itemDesc = (/\bdesc\s*=\s*([A-Za-z_]\w*)/.exec(iblk) || [])[1] || groupDesc;
         const world = (/\bworld\s*=\s*\{\s*"([^"]+)"/.exec(iblk) || [])[1] || "";
+        // 图标：image 字段 + atlas 归属（item 级优先，其次分组级）
+        const img = (/\bimage\s*=\s*"([^"]+)"/.exec(iblk) || [])[1] || "";
+        const rawAtlas = (/\batlas\s*=\s*(?:([A-Z_][A-Za-z0-9_]*)|"([^"]+)")/.exec(iblk) || []);
+        const atlasRef = rawAtlas[1] || rawAtlas[2] || "";
         const values = descMaps[itemDesc] || descMaps["frequency_descriptions"];
         let label = zhNameForKey(key);
         if (!label && modId) {
           const en = modStringLookup(modId, key.toUpperCase(), "NAMES") || modStringLookup(modId, key.replace(/_setting$/, "").toUpperCase(), "NAMES");
           if (en) label = chinesePo().get(en) || en;
         }
-        options.push({ key, label: label || key, group: groupLabel, world, default: def, values });
+        options.push({ key, label: label || key, group: groupLabel, world, default: def, values, img, atlas: normalizeAtlas(atlasRef) || groupAtlas });
       }
     }
   }

@@ -5,6 +5,23 @@ const $ = (s, el = document) => el.querySelector(s);
 const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const content = $("#content");
 
+
+// 设置项图标：<img> 带备选链（srcs 依次尝试，全部失败则隐藏）
+function optIcon(srcs) {
+  const list = srcs.filter(Boolean);
+  if (!list.length) return "";
+  return `<img class="opt-icon" src="${list[0]}" data-fb="${list.slice(1).join(",")}" loading="lazy" onerror="optIconErr(this)">`;
+}
+function optIconErr(img) {
+  const rest = (img.dataset.fb || "").split(",").filter(Boolean);
+  if (rest.length) {
+    img.src = rest[0];
+    img.dataset.fb = rest.slice(1).join(",");
+  } else {
+    img.onerror = null;
+    img.outerHTML = '<span class="opt-icon opt-icon-empty"></span>';
+  }
+}
 function esc(s) {
   return String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 }
@@ -377,7 +394,7 @@ async function pageBasic() {
     <div class="row"><label>房间名</label><input type="text" id="cluster_name" value="${esc(ini.cluster_name)}" size="40"></div>
     <div class="row"><label>房间描述</label><input type="text" id="cluster_description" value="${esc(ini.cluster_description)}" size="60"></div>
     <div class="row"><label>房间密码</label><input type="text" id="cluster_password" size="30" placeholder="${d.has_cluster_password ? "已设置（不修改请留空）" : "未设置"}" autocomplete="off"> <span class="hint">留空保持不变</span><button class="btn" id="clearRoomPwd" ${d.has_cluster_password ? "" : "disabled"}>清除</button></div>
-    <div class="row"><label>服务器令牌(SK)</label><input type="password" id="cluster_token" size="60" style="font-family:monospace" placeholder="${d.has_token ? "已设置（不修改请留空）" : "未设置（在线模式必须）"}" autocomplete="off"> <button class="btn" id="toggleToken" type="button">显示</button> <button class="btn" id="clearToken" ${d.has_token ? "" : "disabled"}>清除</button></div>
+    <div class="row"><label>服务器令牌(SK)</label><input type="password" id="cluster_token" size="60" style="font-family:monospace" placeholder="${d.has_token ? "已设置（不修改请留空）" : "未设置（在线模式必须）"}" autocomplete="off"> <button class="btn" id="copyToken" type="button">复制</button> <button class="btn" id="clearToken" ${d.has_token ? "" : "disabled"}>清除</button></div>
     <div class="row"><label>PVP</label>${sel("pvp", [["false","否"],["true","是"]], ini.pvp)}</div>
     <div class="row"><label>玩家人数</label><input type="number" id="max_players" min="1" max="64" value="${esc(ini.max_players)}"></div>
     <div class="row"><label>开启投票</label><input type="checkbox" id="vote_kick_enabled" ${ini.vote_kick_enabled === "true" ? "checked" : ""}></div>
@@ -445,11 +462,13 @@ async function pageBasic() {
     const r = await api("basic", { method: "POST", body: { clear_token: true } });
     toast(r.msg); route();
   };
-  // 令牌显示/隐藏
-  $("#toggleToken").onclick = () => {
+  // 令牌复制
+  $("#copyToken").onclick = async () => {
     const inp = $("#cluster_token");
-    if (inp.type === "password") { inp.type = "text"; $("#toggleToken").textContent = "隐藏"; }
-    else { inp.type = "password"; $("#toggleToken").textContent = "显示"; }
+    const val = inp.value.trim();
+    if (!val) return toast("令牌为空，无可复制", true);
+    try { await navigator.clipboard.writeText(val); toast("已复制到剪贴板"); }
+    catch { inp.select(); document.execCommand("copy"); toast("已复制"); }
   };
   // 看门狗开关
   const loadGuard = async () => {
@@ -619,7 +638,8 @@ async function loadWorldOverrides() {
     const tr = document.createElement("tr");
     tr.dataset.key = o.key;
     const labelOf = (v) => (o.values.find((x) => x.v === v) || {}).label || v;
-    tr.innerHTML = `<td>${esc(o.label)}</td><td>${esc(labelOf(cur))} <span class="hint">(${esc(cur)})</span></td><td>${esc(o.group)}</td>`;
+    const ico = optIcon([`icons/worldsettings_customization/${o.key}.png`, `icons/worldgen_customization/${o.key}.png`]);
+    tr.innerHTML = `<td>${ico}${esc(o.label)}</td><td>${esc(labelOf(cur))} <span class="hint">(${esc(cur)})</span></td><td>${esc(o.group)}</td>`;
     if (worldState.selKey === o.key) tr.className = "sel";
     tr.onclick = () => {
       worldState.selKey = o.key;
@@ -700,7 +720,8 @@ async function loadModWorldgen() {
       const tr = document.createElement("tr");
       tr.dataset.key = o.key;
       tr.dataset.mi = mi;
-      tr.innerHTML = `<td>${esc(o.label)}</td><td>${esc(labelOf(cur))} <span class="hint">(${esc(cur)})</span></td><td>${esc(o.group)}${o.world ? ` <span class="hint">${esc(o.world)}</span>` : ""}</td>`;
+      const ico = o.img && o.atlas ? optIcon([`icons/${o.atlas}/${o.img.replace(/\.tex$/, ".png")}`]) : "";
+      tr.innerHTML = `<td>${ico}${esc(o.label)}</td><td>${esc(labelOf(cur))} <span class="hint">(${esc(cur)})</span></td><td>${esc(o.group)}${o.world ? ` <span class="hint">${esc(o.world)}</span>` : ""}</td>`;
       tbody.appendChild(tr);
     });
     if (!tbody.children.length) tbody.innerHTML = '<tr class="disabled"><td colspan="3">（无匹配的设置项）</td></tr>';

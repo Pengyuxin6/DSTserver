@@ -554,3 +554,7 @@ body[data-theme="paper"] #pageBg { opacity: .3; }
 .fav-star:hover { color: var(--amber); transform: scale(1.25); }
 .fav-star.on { color: var(--amber); text-shadow: 0 0 8px var(--glow); }
 .tag.err { color: var(--red); border-color: var(--red); }
+
+/* 设置项图标 */
+.opt-icon { width: 22px; height: 22px; object-fit: contain; vertical-align: -5px; margin-right: 6px; background: rgba(232,163,61,.10); border: 1px solid var(--border); border-radius: 4px; }
+.opt-icon-empty { display: inline-block; }
