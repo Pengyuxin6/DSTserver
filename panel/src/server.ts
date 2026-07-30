@@ -1597,6 +1597,10 @@ async function api(req: Request, url: URL): Promise<Response> {
     const tokenFile = join(clusterDir(), "cluster_token.txt");
     const token = readText(tokenFile).replace(/^#\s.*\n/, "").trim();
     const roomPwd = g("NETWORK", "cluster_password");
+    // 中文语言包的语言设置（workshop-367546858 的 LANG 配置项）
+    const master0 = listShards().find((s) => s.isMaster) || listShards()[0];
+    const langOv = master0 ? readModOverrides(master0.name).get("workshop-367546858") : undefined;
+    const langSetting = String(langOv?.options?.LANG || "simplified");
     return ok({
       clusterRoot: clusterRoot(),
       modsDir: modsStoreDir(),
@@ -1606,6 +1610,7 @@ async function api(req: Request, url: URL): Promise<Response> {
       cluster: panelConfig.cluster,
       beta: panelConfig.beta,
       betaBranch: panelConfig.betaBranch,
+      lang: langSetting,
       // 凭证永不下发：只返回是否已设置，不返回内容
       has_token: !!token,
       has_cluster_password: !!roomPwd,
@@ -1652,6 +1657,17 @@ async function api(req: Request, url: URL): Promise<Response> {
     if (b.clear_token === true) writeFileSync(join(clusterDir(), "cluster_token.txt"), "# 在此粘贴 Klei 服务器令牌\n");
     panelConfig.beta = !!b.beta;
     if (typeof b.betaBranch === "string" && /^[A-Za-z0-9_-]{0,64}$/.test(b.betaBranch)) panelConfig.betaBranch = b.betaBranch;
+    // 语言设置：写入中文语言包在两个分片的 modoverrides（保持启用状态）
+    if (["simplified", "traditional", "auto"].includes(String(b.lang))) {
+      for (const shard of listShards()) {
+        const map = readModOverrides(shard.name);
+        const entry = map.get("workshop-367546858") || { enabled: true, options: {} };
+        entry.enabled = true;
+        entry.options.LANG = String(b.lang);
+        map.set("workshop-367546858", entry);
+        writeFileSync(join(shardDir(shard.name), "modoverrides.lua"), serializeModOverrides(map) + "\n");
+      }
+    }
     // 保存服务器目录
     if (typeof b.serverDir === "string" && b.serverDir.trim()) {
       const dir = b.serverDir.trim();

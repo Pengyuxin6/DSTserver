@@ -372,6 +372,7 @@ async function pageBasic() {
   <div class="card">
     <h3>当前存档设置：${esc(d.cluster)}</h3>
     <div class="row"><label>游戏风格</label>${sel("intention", [["cooperative","合作模式"],["social","社交"],["competitive","竞争"],["madness","疯狂"]], ini.intention)}</div>
+    <div class="row"><label>语言</label>${sel("lang", [["simplified","简体中文"],["traditional","繁體中文"],["auto","跟随Steam客户端语言"]], d.lang || "simplified")} <span class="hint">中文语言包的语言（重启服务器生效）</span></div>
     <div class="row"><label>游戏模式</label>${sel("game_mode", [["survival","生存模式"],["relaxed","轻松"],["endless","无尽"],["wilderness","荒野"],["lightsout","暗无天日"]], ini.game_mode)}</div>
     <div class="row"><label>房间名</label><input type="text" id="cluster_name" value="${esc(ini.cluster_name)}" size="40"></div>
     <div class="row"><label>房间描述</label><input type="text" id="cluster_description" value="${esc(ini.cluster_description)}" size="60"></div>
@@ -412,6 +413,7 @@ async function pageBasic() {
     const body = {
       intention: $("#intention").value,
       game_mode: $("#game_mode").value,
+      lang: $("#lang").value,
       cluster_name: $("#cluster_name").value,
       cluster_description: $("#cluster_description").value,
       pvp: $("#pvp").value === "true",
