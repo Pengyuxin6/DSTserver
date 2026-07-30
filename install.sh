@@ -196,6 +196,19 @@ EOF
 if [ ! -f "$CLUSTER_DIR/cluster_token.txt" ]; then
   echo "# 在此粘贴 Klei 服务器令牌（在线模式必须，见 README 第 3 步）" > "$CLUSTER_DIR/cluster_token.txt"
 fi
+# 默认启用中文语言包（367546858）：让模组内容开箱即中文
+if ! grep -q 'ServerModSetup("367546858")' "$SERVER_DIR/mods/dedicated_server_mods_setup.lua" 2>/dev/null; then
+  su - "$DST_USER" -s /bin/bash -c "echo 'ServerModSetup(\"367546858\")  # 中文语言包（默认启用，可在面板取消）' >> '$SERVER_DIR/mods/dedicated_server_mods_setup.lua'"
+fi
+for shard in Master Caves; do
+  if [ ! -f "$CLUSTER_DIR/$shard/modoverrides.lua" ]; then
+    su - "$DST_USER" -s /bin/bash -c "cat > '$CLUSTER_DIR/$shard/modoverrides.lua'" <<'EOF'
+return {
+  ["workshop-367546858"] = { enabled = true },  -- 中文语言包
+}
+EOF
+  fi
+done
 chown -R "$DST_USER:$DST_USER" "$DST_HOME/.klei"
 ok "存档配置就绪: $CLUSTER_DIR"
 

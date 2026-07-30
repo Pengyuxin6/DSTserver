@@ -905,15 +905,16 @@ async function loadModDetail(id) {
   const fmt = (v) => (typeof v === "object" ? JSON.stringify(v) : String(v));
   d.options.forEach((o, idx) => {
     const tr = document.createElement("tr");
-    tr.innerHTML = `<td>${esc(o.label || o.name)}</td><td>${esc(fmt(o.current))}</td><td class="hint">${esc(fmt(o.default))}</td>`;
+    const label = o.label_zh || o.label || o.name;
+    tr.innerHTML = `<td>${esc(label)}${o.label_zh && o.label_zh !== (o.label || o.name) ? ` <span class="hint">${esc(o.label || o.name)}</span>` : ""}</td><td>${esc(fmt(o.current))}</td><td class="hint">${esc(fmt(o.default))}</td>`;
     tr.onclick = () => {
       modsState.selOpt = idx;
       $$("tr", tbody).forEach((r) => r.classList.remove("sel"));
       tr.classList.add("sel");
-      $("#optHover").value = o.hover || "（无说明）";
+      $("#optHover").value = o.hover_zh || o.hover || "（无说明）";
       const sel = $("#optVal");
       sel.innerHTML = o.options.length
-        ? o.options.map((op, i) => `<option value="${i}">${esc(op.description || fmt(op.data))} (${esc(fmt(op.data))})</option>`).join("")
+        ? o.options.map((op, i) => `<option value="${i}">${esc(op.description_zh || op.description || fmt(op.data))} (${esc(fmt(op.data))})</option>`).join("")
         : '<option value="">（无可选值，直接编辑默认值）</option>';
       const curIdx = o.options.findIndex((op) => JSON.stringify(op.data) === JSON.stringify(o.current));
       if (curIdx >= 0) sel.value = String(curIdx);

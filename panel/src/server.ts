@@ -782,9 +782,11 @@ function chinesePo(): Map<string, string> {
 }
 // 中文名映射：中文语言包模组(DST_chs.po) + 各模组自带中文语言文件(languages/chinese_s*.po / strings_cn*.lua)
 let chsNamesMap: Map<string, string> | null = null;
+let chsTextMap: Map<string, string> | null = null;
 function chsNames(): Map<string, string> {
   if (chsNamesMap) return chsNamesMap;
   const map = new Map<string, string>();
+  const textMap = new Map<string, string>();
   try {
     for (const id of readdirSync(ugcSharedDir())) {
       const dir = join(ugcSharedDir(), id);
@@ -802,17 +804,50 @@ function chsNames(): Map<string, string> {
       for (const po of files) {
         const text = readText(po);
         if (!text) continue;
-        const re = /msgctxt\s+"(STRINGS\.NAMES\.[A-Z0-9_]+)"\s*\nmsgid\s+"(?:[^"\\]|\\.)*"\s*\nmsgstr\s+"((?:[^"\\]|\\.)*)"/g;
+        // po 格式：msgctxt "STRINGS.X" + msgid 英文 + msgstr 中文
+        const re = /msgctxt\s+"(STRINGS\.NAMES\.[A-Z0-9_]+)"\s*\nmsgid\s+"((?:[^"\\]|\\.)*)"\s*\nmsgstr\s+"((?:[^"\\]|\\.)*)"/g;
         let m: RegExpExecArray | null;
-        while ((m = re.exec(text))) { if (m[2] && !map.has(m[1])) map.set(m[1], m[2]); }
+        while ((m = re.exec(text))) {
+          if (m[3] && !map.has(m[1])) map.set(m[1], m[3]);
+          if (m[3] && !textMap.has(m[2])) textMap.set(m[2], m[3]);
+        }
+        // 无 msgctxt 的通用条目
+        const re2 = /msgid\s+"((?:[^"\\]|\\.){2,60})"\s*\nmsgstr\s+"((?:[^"\\]|\\.)+)"/g;
+        while ((m = re2.exec(text))) { if (m[2] && !textMap.has(m[1])) textMap.set(m[1], m[2]); }
         // strings_cn.lua 形式：STRINGS.NAMES.X = "中文"
-        const re2 = /NAMES\.([A-Z0-9_]+)\s*=\s*"([^"]+)"/g;
-        while ((m = re2.exec(text))) { if (m[2] && !map.has("STRINGS.NAMES." + m[1])) map.set("STRINGS.NAMES." + m[1], m[2]); }
+        const re3 = /NAMES\.([A-Z0-9_]+)\s*=\s*"([^"]+)"/g;
+        while ((m = re3.exec(text))) { if (m[2] && !map.has("STRINGS.NAMES." + m[1])) map.set("STRINGS.NAMES." + m[1], m[2]); }
       }
     }
   } catch {}
   chsNamesMap = map;
+  chsTextMap = textMap;
   return map;
+}
+// 任意英文文本 → 中文（内置常用词表 → 中文语言包 msgid 映射 → 官方 po）
+const ZH_GLOSSARY: Record<string, string> = {
+  Enabled: "启用", Disabled: "禁用", Enable: "启用", Disable: "禁用",
+  On: "开", Off: "关", True: "是", False: "否", Yes: "是", No: "否",
+  Language: "语言", "Language/语言": "语言",
+  Speed: "速度", Size: "大小", Amount: "数量", Count: "数量", Number: "数量",
+  Damage: "伤害", Health: "血量", Hunger: "饥饿", Sanity: "理智",
+  Mode: "模式", Difficulty: "难度", Time: "时间", Duration: "持续时间",
+  Range: "范围", Radius: "半径", Distance: "距离", Chance: "概率", Rate: "比率",
+  Cooldown: "冷却时间", Interval: "间隔", Default: "默认", None: "无",
+  Show: "显示", Hide: "隐藏", Display: "显示", Visible: "可见",
+  Always: "总是", Never: "从不", Random: "随机", Auto: "自动", Manual: "手动",
+  Quality: "品质", Volume: "音量", Sound: "声音", Music: "音乐",
+  Debug: "调试", Version: "版本", Author: "作者", Unknown: "未知",
+};
+function zhText(en: string): string {
+  if (!en) return "";
+  const t = en.trim();
+  if (ZH_GLOSSARY[t]) return ZH_GLOSSARY[t];
+  // 后缀规则：Xxx Enabled/Disabled → 启用/禁用 Xxx
+  let m = /^(.+?)\s+(Enabled|Disabled|On|Off)$/i.exec(t);
+  if (m) return m[2] + "（" + m[1] + "）";
+  chsNames();
+  return chsTextMap?.get(t) || chinesePo().get(t) || "";
 }
 // 模组世界设置项/物品的中文名：中文语言包（含单复数变体）→ 原版物品表
 function zhNameForKey(key: string): string {
@@ -1855,6 +1890,10 @@ async function api(req: Request, url: URL): Promise<Response> {
     const ov = master ? readModOverrides(master.name).get(`workshop-${id}`) : undefined;
     const options = (mi?.configOptions || []).map((o) => ({
       ...o,
+      // 配置项前端中文翻译（中文语言包/官方 po 查不到时保留英文）
+      label_zh: zhText(o.label),
+      hover_zh: zhText(o.hover),
+      options: o.options.map((op) => ({ ...op, description_zh: zhText(typeof op.description === "string" ? op.description : String(op.description)) })),
       current: ov && o.name in ov.options ? ov.options[o.name] : o.default,
     }));
     const changelogs = await fetchChangeLogs(id);
