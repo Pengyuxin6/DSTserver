@@ -2371,6 +2371,12 @@ async function api(req: Request, url: URL): Promise<Response> {
     }
     return fail("存档不存在或名称非法");
   }
+  // 获取服务器令牌内容（用于复制到剪贴板）
+  if (path === "basic/token" && method === "GET") {
+    const tokenFile = join(clusterDir(), "cluster_token.txt");
+    const token = readText(tokenFile).replace(/^#\s.*\n/, "").trim();
+    return ok({ token });
+  }
   if (path === "cluster/rename" && method === "POST") {
     const b = await bodyJson(req);
     const name = String(b.name || "").trim();

@@ -468,13 +468,21 @@ async function pageBasic() {
     const r = await api("basic", { method: "POST", body: { clear_token: true } });
     toast(r.msg); route();
   };
-  // 令牌复制
+  // 令牌复制：如果输入框有值则复制输入框，否则从服务器获取已保存的令牌
   $("#copyToken").onclick = async () => {
     const inp = $("#cluster_token");
     const val = inp.value.trim();
-    if (!val) return toast("令牌为空，无可复制", true);
-    try { await navigator.clipboard.writeText(val); toast("已复制到剪贴板"); }
-    catch { inp.select(); document.execCommand("copy"); toast("已复制"); }
+    if (val) {
+      try { await navigator.clipboard.writeText(val); toast("已复制到剪贴板"); }
+      catch { inp.select(); document.execCommand("copy"); toast("已复制"); }
+      return;
+    }
+    // 输入框为空 → 从服务器获取已保存的令牌
+    const r = await apiQuiet("basic/token");
+    const savedToken = r?.data?.token || "";
+    if (!savedToken) return toast("令牌未设置", true);
+    try { await navigator.clipboard.writeText(savedToken); toast("已复制令牌到剪贴板"); }
+    catch { toast("复制失败，请手动复制", true); }
   };
   // 看门狗开关
   const loadGuard = async () => {
