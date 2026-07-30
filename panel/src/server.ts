@@ -795,10 +795,12 @@ function chinesePo(): Map<string, string> {
 // 中文名映射：中文语言包模组(DST_chs.po) + 各模组自带中文语言文件(languages/chinese_s*.po / strings_cn*.lua)
 let chsNamesMap: Map<string, string> | null = null;
 let chsTextMap: Map<string, string> | null = null;
+let chsMsgMap: Map<string, string> | null = null; // 全 msgctxt 路径 → 中文
 function chsNames(): Map<string, string> {
   if (chsNamesMap) return chsNamesMap;
   const map = new Map<string, string>();
   const textMap = new Map<string, string>();
+  const msgMap = new Map<string, string>();
   try {
     for (const id of readdirSync(ugcSharedDir())) {
       const dir = join(ugcSharedDir(), id);
@@ -816,12 +818,16 @@ function chsNames(): Map<string, string> {
       for (const po of files) {
         const text = readText(po);
         if (!text) continue;
-        // po 格式：msgctxt "STRINGS.X" + msgid 英文 + msgstr 中文
-        const re = /msgctxt\s+"(STRINGS\.NAMES\.[A-Z0-9_]+)"\s*\nmsgid\s+"((?:[^"\\]|\\.)*)"\s*\nmsgstr\s+"((?:[^"\\]|\\.)*)"/g;
+        // po 格式：msgctxt "STRINGS.X" + msgid 英文 + msgstr 中文（索引全部 STRINGS 路径）
+        const re = /msgctxt\s+"(STRINGS\.[A-Z0-9_.]+)"\s*\nmsgid\s+"((?:[^"\\]|\\.)*)"\s*\nmsgstr\s+"((?:[^"\\]|\\.)*)"/g;
         let m: RegExpExecArray | null;
         while ((m = re.exec(text))) {
-          if (m[3] && !map.has(m[1])) map.set(m[1], m[3]);
-          if (m[3] && !textMap.has(m[2])) textMap.set(m[2], m[3]);
+          if (!m[3]) continue;
+          if (!msgMap.has(m[1])) msgMap.set(m[1], m[3]);
+          if (m[1].startsWith("STRINGS.NAMES.")) {
+            if (!map.has(m[1])) map.set(m[1], m[3]);
+            if (!textMap.has(m[2])) textMap.set(m[2], m[3]);
+          }
         }
         // 无 msgctxt 的通用条目
         const re2 = /msgid\s+"((?:[^"\\]|\\.){2,60})"\s*\nmsgstr\s+"((?:[^"\\]|\\.)+)"/g;
@@ -834,7 +840,13 @@ function chsNames(): Map<string, string> {
   } catch {}
   chsNamesMap = map;
   chsTextMap = textMap;
+  chsMsgMap = msgMap;
   return map;
+}
+// 按完整 STRINGS 路径查中文（如 STRINGS.UI.CUSTOMIZATIONSCREEN.PALMTREE_REGROWTH）
+function chsMsg(path: string): string {
+  chsNames();
+  return chsMsgMap?.get(path) || "";
 }
 // 任意英文文本 → 中文（内置常用词表 → 中文语言包 msgid 映射 → 官方 po）
 const ZH_GLOSSARY: Record<string, string> = {
@@ -869,7 +881,7 @@ function zhNameForKey(key: string): string {
   for (const o of CAVE_OPTIONS) if (o.key === key || o.key === noSet) return o.label;
   const cands = [key, noSet, key.replace(/s$/, ""), noSet.replace(/s$/, "")];
   for (const c of cands) {
-    const cn = chsNames().get("STRINGS.NAMES." + c.toUpperCase());
+    const cn = chsNames().get("STRINGS.NAMES." + c.toUpperCase()) || chsMsg("STRINGS.UI.CUSTOMIZATIONSCREEN." + c.toUpperCase());
     if (cn) return cn;
   }
   for (const c of cands) {
@@ -931,12 +943,12 @@ function modStringLookup(id: string, key: string, prefix = ""): string {
     const text = readText(p);
     const dm = reDotted.exec(text);
     if (dm) {
-      const v = unquoteLua('"' + dm[1] + '"');
+      const v = unquoteLua(dm[1]);
       cache.set(cacheKey, v);
       return v;
     }
     let bm: RegExpExecArray | null;
-    while ((bm = reBare.exec(text))) hits.push(unquoteLua('"' + bm[1] + '"'));
+    while ((bm = reBare.exec(text))) hits.push(unquoteLua(bm[1]));
     if (hits.length >= 20) break;
   }
   // 优先含中文的，其次最短的（名字通常比描述短）
