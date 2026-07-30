@@ -957,6 +957,57 @@ async function renderModsLocal() {
   };
 }
 
+// 模组配置项弹窗（带说明文字）
+function showModConfigPopup(option, currentVal, hover, enLabel, iconSrcs, onSelect) {
+  const overlay = document.createElement("div");
+  overlay.className = "mod-detail-overlay";
+  const useRadio = option.values.length <= 8;
+  const valList = useRadio
+    ? option.values.map((v) => {
+        const checked = v.v === currentVal ? "checked" : "";
+        return `<label class="opt-radio-row"><input type="radio" name="modOptRadio" value="${esc(v.v)}" ${checked}> ${esc(v.label)} <span class="hint">(${esc(v.v)})</span></label>`;
+      }).join("")
+    : null;
+  overlay.innerHTML = `<div class="mod-detail-popup" style="max-width:520px">
+    <button class="popup-close" id="mcPopupX">×</button>
+    <div class="md-head" style="align-items:center">
+      ${iconSrcs && iconSrcs.length ? `<div style="width:48px;height:48px;flex-shrink:0;display:flex;align-items:center;justify-content:center"><img src="${esc(iconSrcs[0])}" style="width:48px;height:48px;object-fit:contain;border-radius:6px;border:1px solid var(--border)" onerror="this.style.display='none'"></div>` : ""}
+      <div class="md-head-main">
+        <div class="md-title">${esc(option.label)}</div>
+        ${enLabel ? `<div class="md-sub">${esc(enLabel)}</div>` : ""}
+        <div class="md-sub">key: <code>${esc(option.key)}</code> ｜ 当前值: <b>${esc(currentVal)}</b></div>
+      </div>
+    </div>
+    ${hover ? `<div style="margin:8px 0;padding:8px 12px;background:var(--hover-bg);border-radius:6px;font-size:13px;line-height:1.6;max-height:100px;overflow-y:auto">${esc(hover)}</div>` : ""}
+    <div style="margin-top:8px;border-top:1px solid var(--border);padding-top:10px">
+      <h3 style="margin:0 0 8px">选择新值</h3>
+      ${useRadio
+        ? `<div style="display:flex;flex-direction:column;gap:4px;max-height:280px;overflow-y:auto">${valList}</div>`
+        : `<div class="row"><select id="mcOptSelect" style="min-width:240px">${option.values.map((v) => `<option value="${esc(v.v)}" ${v.v === currentVal ? "selected" : ""}>${esc(v.label)} (${esc(v.v)})</option>`).join("")}</select></div>`}
+    </div>
+    <div class="btn-row" style="margin-top:14px">
+      <button class="btn" id="mcPopupCancel">取消</button>
+      <button class="btn primary" id="mcPopupSave">保存</button>
+    </div>
+  </div>`;
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  document.body.appendChild(overlay);
+  const getSelected = () => {
+    if (useRadio) {
+      const r = overlay.querySelector('input[name="modOptRadio"]:checked');
+      return r ? r.value : currentVal;
+    }
+    return $("#mcOptSelect", overlay).value;
+  };
+  $("#mcPopupCancel", overlay).onclick = () => overlay.remove();
+  $("#mcPopupX", overlay).onclick = () => overlay.remove();
+  $("#mcPopupSave", overlay).onclick = () => {
+    const val = getSelected();
+    if (val !== currentVal) onSelect(val);
+    overlay.remove();
+  };
+}
+
 async function loadModDetail(id) {
   const overlay = document.createElement("div");
   overlay.className = "mod-detail-overlay";
@@ -1015,19 +1066,17 @@ async function loadModDetail(id) {
   `;
 
   // ---------- 配置参数 Tab 内容 ----------
-  const configHtml = d.options.length ? `
-    <div class="cols">
-      <div class="right" style="flex:1.4">
-        <table class="grid" id="optT"><thead><tr><th>设置项</th><th>设定值</th><th>默认值</th></tr></thead><tbody></tbody></table>
-      </div>
-      <div class="right" style="flex:1">
-        <label class="hint">设置项说明</label>
-        <textarea id="optHover" readonly style="min-height:70px"></textarea>
-        <div class="row"><label>选项</label><select id="optVal"></select></div>
-        <div class="row"><label>值</label><input type="text" id="optValRaw" readonly size="12"></div>
-        <div class="btn-row"><button class="btn primary" id="saveCfg">保存修改</button></div>
-      </div>
-    </div>` : `<div class="hint">该模组没有可配置项${inst.modinfoAutoFetched ? "" : "（或 modinfo.lua 尚未下载到本地，可尝试点击下方「补全信息」）"}</div>`;
+  // 配置项排序：有中文翻译的优先，其次按名称
+  const sortedOptions = [...d.options].sort((a, b) => {
+    const aZh = (a.label_zh && a.label_zh !== (a.label || a.name)) ? 0 : 1;
+    const bZh = (b.label_zh && b.label_zh !== (b.label || b.name)) ? 0 : 1;
+    if (aZh !== bZh) return aZh - bZh;
+    return (a.label_zh || a.label || a.name).localeCompare(b.label_zh || b.label || b.name, "zh");
+  });
+  const configHtml = sortedOptions.length ? `
+    <div class="hint" style="margin-bottom:8px">点击设置项弹出详情修改弹窗。带中文翻译的配置项已置顶。</div>
+    <div style="max-height:500px;overflow-y:auto"><table class="grid" id="optT"><thead><tr><th>设置项</th><th>当前值</th><th>默认值</th></tr></thead><tbody></tbody></table></div>
+    <div class="btn-row" style="margin-top:10px"><button class="btn primary" id="saveCfg">保存修改</button></div>` : `<div class="hint">该模组没有可配置项${inst.modinfoAutoFetched ? "" : "（或 modinfo.lua 尚未下载到本地，可尝试点击下方「补全信息」）"}</div>`;
 
   const popup = overlay.querySelector(".mod-detail-popup");
   popup.innerHTML = `
@@ -1086,38 +1135,42 @@ async function loadModDetail(id) {
     toast(r.msg);
     if (r.ok) { overlay.remove(); modsState.selId = null; const j = await api("mods"); modsState.mods = j.data.mods; renderModsLocal(); }
   };
-  // ---------- 配置项交互 ----------
-  if (!d.options.length) return;
+  // ---------- 配置项交互（点击行弹出弹窗）----------
+  if (!sortedOptions.length) return;
   const tbody = $("#optT");
-  d.options.forEach((o, idx) => {
+  sortedOptions.forEach((o) => {
     const tr = document.createElement("tr");
-    const label = o.label_zh || o.label || o.name;
-    tr.innerHTML = `<td>${esc(label)}${o.label_zh && o.label_zh !== (o.label || o.name) ? ` <span class="hint">${esc(o.label || o.name)}</span>` : ""}</td><td>${esc(fmt(o.current))}</td><td class="hint">${esc(fmt(o.default))}</td>`;
+    const hasZh = o.label_zh && o.label_zh !== (o.label || o.name);
+    const label = hasZh ? o.label_zh : (o.label || o.name);
+    tr.innerHTML = `<td>${esc(label)}${hasZh ? ` <span class="hint">${esc(o.label || o.name)}</span>` : ""}</td><td>${esc(fmt(o.current))}</td><td class="hint">${esc(fmt(o.default))}</td>`;
     tr.onclick = () => {
-      modsState.selOpt = idx;
       $$("tr", tbody).forEach((r) => r.classList.remove("sel"));
       tr.classList.add("sel");
-      $("#optHover").value = o.hover_zh || o.hover || "（无说明）";
-      const sel = $("#optVal");
-      sel.innerHTML = o.options.length
-        ? o.options.map((op, i) => `<option value="${i}">${esc(op.description_zh || op.description || fmt(op.data))} (${esc(fmt(op.data))})</option>`).join("")
-        : '<option value="">（无可选值，直接编辑默认值）</option>';
-      const curIdx = o.options.findIndex((op) => JSON.stringify(op.data) === JSON.stringify(o.current));
-      if (curIdx >= 0) sel.value = String(curIdx);
-      $("#optValRaw").value = fmt(curIdx >= 0 ? o.options[curIdx].data : o.current);
+      // 构造弹窗用的 option 对象（复用 showWorldOptionPopup）
+      const popupOpt = {
+        key: o.name,
+        label: label,
+        group: "",
+        values: o.options.length ? o.options.map((op) => ({ v: String(op.data), label: op.description_zh || op.description || fmt(op.data) })) : [{ v: fmt(o.current), label: fmt(o.current) }],
+      };
+      const hover = o.hover_zh || o.hover || "";
+      const curVal = fmt(o.current);
+      const iconSrcs = d.preview_url ? [d.preview_url] : [];
+      showModConfigPopup(popupOpt, curVal, hover, hasZh ? o.label : "", iconSrcs, (val) => {
+        // 将选中的值写回原始 option 对象
+        const targetOp = o.options.find((op) => String(op.data) === val);
+        if (targetOp && ["string", "number", "boolean"].includes(typeof targetOp.data)) {
+          o.current = targetOp.data;
+        } else if (!o.options.length) {
+          // 无可选值的直接设置
+          if (["string", "number", "boolean"].includes(typeof val)) o.current = val;
+        }
+        // 刷新表格行
+        tr.children[1].textContent = fmt(o.current);
+      });
     };
     tbody.appendChild(tr);
   });
-  $("#optVal").onchange = (e) => {
-    const o = d.options[modsState.selOpt];
-    if (!o || e.target.value === "") return;
-    const data = o.options[Number(e.target.value)].data;
-    if (["string", "number", "boolean"].includes(typeof data)) {
-      o.current = data;
-      $("#optValRaw").value = fmt(data);
-      $$("tr", tbody)[modsState.selOpt].children[1].textContent = fmt(data);
-    } else toast("该选项的值是复杂表，暂不支持面板修改", true);
-  };
   $("#saveCfg").onclick = async () => {
     const options = {};
     for (const o of d.options) if (["string", "number", "boolean"].includes(typeof o.current)) options[o.name] = o.current;
