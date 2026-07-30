@@ -24,6 +24,8 @@ const MODS_DIR = join(SERVER_DIR, "mods");
 const SETUP_LUA = join(MODS_DIR, "dedicated_server_mods_setup.lua");
 const DEFAULT_CLUSTER_ROOT = join(HOME, ".klei", "DoNotStarveTogether");
 const DEFAULT_MODS_DIR = join(HOME, "dst_mods");
+// 原版预设白名单：这些预设使用原版世界设置项，不是模组世界
+const VANILLA_PRESETS = new Set(["", "SURVIVAL_TOGETHER", "DST_CAVE", "LAVAARENA", "QUAGMIRE"]);
 // 存档根目录 / 模组存放目录可在面板「基本设置」修改（存 panelConfig）
 function clusterRoot(): string { return panelConfig.clusterRoot || DEFAULT_CLUSTER_ROOT; }
 function modsStoreDir(): string { return panelConfig.modsDir || DEFAULT_MODS_DIR; }
@@ -1327,6 +1329,8 @@ const PRESET_CN: [RegExp, string][] = [
   [/ENDLESS$/, "无尽"],
   [/WILDERNESS$/, "荒野"],
   [/LIGHTS_?OUT$/, "暗无天日"],
+  [/LAVAARENA$/, "熔炉竞技场"],
+  [/QUAGMIRE$/, "暴食"],
   [/VOLCANO(_LEVEL)?$/, "火山"],
   [/^DST_CAVE$/, "洞穴"],
   [/CAVES?$/, "洞穴"],
@@ -2559,6 +2563,8 @@ async function api(req: Request, url: URL): Promise<Response> {
           [/ENDLESS$/, "endless"],
           [/WILDERNESS$/, "wilderness"],
           [/LIGHTS_?OUT$/, "lightsout"],
+          [/LAVAARENA$/, "lavaarena"],
+          [/QUAGMIRE$/, "quagmire"],
         ];
         const hit = modeMap.find(([re]) => re.test(st));
         if (hit) {
@@ -2570,7 +2576,7 @@ async function api(req: Request, url: URL): Promise<Response> {
     }
     // 模组世界：保存时只保留对应模组的世界设置项与预设自带参数（不混入原版残留项）
     const finalWg = (typeof presetArg === "object" && presetArg?.worldgen) || (typeof presetArg === "string" ? presetArg : "") || readLevelOverrides(shard).presets.worldgen;
-    if (finalWg && finalWg !== "SURVIVAL_TOGETHER" && finalWg !== "DST_CAVE") {
+    if (finalWg && !VANILLA_PRESETS.has(finalWg)) {
       const keep = new Set<string>();
       const owner = presetOwner(finalWg);
       if (owner) {
@@ -2729,7 +2735,7 @@ async function api(req: Request, url: URL): Promise<Response> {
     }
     // 大型地图模组（海难/哈姆雷特/三合一等）：新启用时自动应用对应世界预设
     const autoApplied: string[] = [];
-    const VANILLA_PRESETS = new Set(["", "SURVIVAL_TOGETHER", "DST_CAVE"]);
+    // VANILLA_PRESETS 已在文件顶部定义为全局常量
     const pickPreset = (presets: ModWorldgenPreset[], isMaster: boolean): ModWorldgenPreset | null => {
       const isCaveLoc = (l: string) => /volcano|cave|under/i.test(l || "");
       if (isMaster) {

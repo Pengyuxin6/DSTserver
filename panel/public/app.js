@@ -668,7 +668,7 @@ async function loadWorldOverrides() {
   const preset = j.data.presets?.worldgen || "";
   $("#curShard").textContent = `— ${j.data.shard}（${j.data.isMaster ? "地上" : "地下"}）${preset ? `｜预设: ${preset}` : ""}`;
   // 启用模组世界（海难/哈姆雷特/火山等）时，原版设置项不适用，直接隐藏（含设置项选择与保存按钮）
-  const isModWorld = !!preset && preset !== "SURVIVAL_TOGETHER" && preset !== "DST_CAVE";
+  const isModWorld = !!preset && !["SURVIVAL_TOGETHER", "DST_CAVE", "LAVAARENA", "QUAGMIRE", ""].includes(preset);
   const filterRow = $("#optFilter")?.closest(".row");
   const tableWrap = $("#optTable")?.parentElement;
   const saveRow = $("#saveOv")?.closest(".btn-row");
@@ -747,9 +747,9 @@ async function loadModWorldgen() {
       const has = locReps.get(p.location);
       if (!has || /SURVIVAL_TOGETHER$/.test(p.id)) locReps.set(p.location, p);
     }
-    // 地下分片但模组无地下预设：显示警告而非空下拉
+    // 地下分片但模组无地下预设：不渲染任何内容（Caves 分片应在保存模组时已自动删除）
     if (!worldState.isMaster && locReps.size === 0) {
-      return `<div class="card"><div class="err-text">⚠ 模组「${esc(m.name)}」没有地下世界预设，不支持洞穴分片。建议：1) 删除地下分片；2) 使用原版地下设置（切换到上方原版设置项）。</div></div>`;
+      return "";
     }
     const curWg = worldState.presets?.worldgen || "";
     const curSt = worldState.presets?.settings || "";
@@ -939,7 +939,8 @@ async function renderModsLocal() {
   $("#modSearch").oninput = (e) => { modsState.search = e.target.value; renderRows(); };
   $("#saveSel").onclick = async () => {
     const r = await api("mods/save-enabled", { method: "POST", body: { ids: [...modsState.checked] } });
-    toast(r.msg); renderModsLocal();
+    toast(r.msg);
+    if (r.ok) renderModsLocal();
   };
   $("#refresh").onclick = async () => {
     toast("正在刷新（请求 Steam API）…");
