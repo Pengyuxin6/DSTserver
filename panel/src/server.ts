@@ -374,7 +374,10 @@ interface ShardInfo {
   port: string;
   running: boolean;
 }
+// 缓存 shard 列表（避免每次调用都扫描目录）
+let shardListCache: ShardInfo[] | null = null;
 function listShards(): ShardInfo[] {
+  if (shardListCache) return shardListCache;
   const out: ShardInfo[] = [];
   let entries: string[] = [];
   try { entries = readdirSync(clusterDir()); } catch { return out; }
@@ -389,6 +392,7 @@ function listShards(): ShardInfo[] {
       running: false,
     });
   }
+  shardListCache = out;
   return out;
 }
 
@@ -514,8 +518,16 @@ function parseModOverrides(text: string): Map<string, ModOverrideEntry> {
   }
   return out;
 }
+// 缓存 modoverrides 解析结果（避免重复读文件）
+const modOverridesCache = new Map<string, { time: number; data: Map<string, ModOverrideEntry> }>();
 function readModOverrides(shard: string): Map<string, ModOverrideEntry> {
-  return parseModOverrides(readText(join(shardDir(shard), "modoverrides.lua")));
+  const cached = modOverridesCache.get(shard);
+  const file = join(shardDir(shard), "modoverrides.lua");
+  const mtime = existsSync(file) ? statSync(file).mtimeMs : 0;
+  if (cached && cached.time === mtime) return cached.data;
+  const data = parseModOverrides(readText(file));
+  modOverridesCache.set(shard, { time: mtime, data });
+  return data;
 }
 function serializeModOverrides(map: Map<string, ModOverrideEntry>): string {
   const parts: string[] = [];
@@ -1672,7 +1684,15 @@ function parseModLevelPresets(text: string, modId = ""): ModWorldgenPreset[] {
   }
   return out;
 }
+// 缓存 modWorldgenData 结果（每个模组只计算一次）
+const modWorldgenDataCache = new Map<string, ReturnType<typeof modWorldgenDataRaw>>();
 function modWorldgenData(id: string): { name: string; options: ModWorldgenOption[]; presets: ModWorldgenPreset[]; worldgenFiles: string[] } | null {
+  if (modWorldgenDataCache.has(id)) return modWorldgenDataCache.get(id)!;
+  const result = modWorldgenDataRaw(id);
+  modWorldgenDataCache.set(id, result);
+  return result;
+}
+function modWorldgenDataRaw(id: string): { name: string; options: ModWorldgenOption[]; presets: ModWorldgenPreset[]; worldgenFiles: string[] } | null {
   const dir = join(ugcSharedDir(), id);
   if (!existsSync(dir)) return null;
   const files: string[] = [];
