@@ -548,3 +548,9 @@ body[data-theme="paper"] #pageBg { opacity: .3; }
   #topbar { flex-wrap: nowrap; }
   #tabs { order: 0; flex-basis: auto; flex-wrap: nowrap; overflow: hidden; }
 }
+
+/* 收藏星标 */
+.fav-star { background: none; border: none; cursor: pointer; font-size: 17px; color: var(--muted); padding: 0 4px; transition: transform .15s, color .15s; }
+.fav-star:hover { color: var(--amber); transform: scale(1.25); }
+.fav-star.on { color: var(--amber); text-shadow: 0 0 8px var(--glow); }
+.tag.err { color: var(--red); border-color: var(--red); }

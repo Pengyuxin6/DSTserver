@@ -787,44 +787,64 @@ async function renderModsLocal() {
     <h3>本地Mod ${j.data.steamOk ? "" : '<span class="hint">（Steam API 不可用，仅显示本地信息）</span>'}</h3>
     <div class="btn-row">
       <button class="btn primary" id="saveSel">保存所选</button>
-      <button class="btn" id="dlMissing">下载缺失模组</button>
+      <button class="btn" id="dlMissing">下载全部缺失</button>
       <button class="btn" id="refresh">刷新</button>
-      <span class="hint">勾选 = 启用；点击模组行查看详情与配置；红色行 = 已启用但未下载</span>
+      <input type="text" id="modSearch" placeholder="搜索本地模组（名称/ID）" style="width:220px" value="${esc(modsState.search || "")}">
+      <span class="hint">★收藏置顶 ｜ 勾选=启用 ｜ 红色行=已启用未下载</span>
     </div>
     <div style="overflow-x:auto"><table class="grid" id="modTable">
-      <thead><tr><th></th><th>ID</th><th>预览</th><th>名称</th><th>更新日期</th><th>标签</th><th>状态</th></tr></thead>
+      <thead><tr><th>★</th><th></th><th>ID</th><th>预览</th><th>名称</th><th>更新日期</th><th>标签</th><th>状态</th></tr></thead>
       <tbody></tbody>
     </table></div>
   </div>`;
-  const tbody = $("#modTable tbody");
-  if (!modsState.mods.length) tbody.innerHTML = '<tr class="disabled"><td colspan="7">暂无模组。可到「mod下载与更新」添加。</td></tr>';
-  for (const m of modsState.mods) {
-    const tr = document.createElement("tr");
-    tr.className = [modsState.selId === m.id ? "sel" : "", m.enabled && !m.downloaded ? "need-dl" : ""].join(" ").trim();
-    const tags = [
-      m.clientOnly ? '<span class="tag warn">仅客户端</span>' : "",
-      m.allClientsRequire ? '<span class="tag on">全员需要</span>' : "",
-    ].join("");
-    tr.innerHTML = `
-      <td><input type="checkbox" data-id="${m.id}" ${modsState.checked.has(m.id) ? "checked" : ""}></td>
-      <td>${esc(m.id)}</td>
-      <td>${m.preview_url ? `<img class="mod-img" loading="lazy" src="${esc(m.preview_url)}" onerror="this.outerHTML='<div class=mod-img></div>'">` : '<div class="mod-img"></div>'}</td>
-      <td>${esc(m.title || m.name || "(未知)")}${m.name && m.title && m.name !== m.title ? `<div class="hint">${esc(m.name)}</div>` : ""}</td>
-      <td>${esc(m.update_date || m.version || "-")}</td>
-      <td>${tags}</td>
-      <td>${m.downloaded ? '<span class="tag on">已下载</span>' : '<span class="tag">未下载</span>'}${m.enabled ? ' <span class="tag on">已启用</span>' : ""}</td>`;
-    tr.onclick = (e) => {
-      if (e.target.type === "checkbox") return;
-      modsState.selId = m.id;
-      $$("tr", tbody).forEach((r) => r.classList.remove("sel"));
-      tr.classList.add("sel");
-      loadModDetail(m.id);
-    };
-    tbody.appendChild(tr);
-  }
-  $$('input[type=checkbox]', tbody).forEach((cb) => (cb.onchange = () => {
-    cb.checked ? modsState.checked.add(cb.dataset.id) : modsState.checked.delete(cb.dataset.id);
-  }));
+  const renderRows = () => {
+    const ft = (modsState.search || "").trim().toLowerCase();
+    const list = modsState.mods.filter((m) => !ft || (m.title || "").toLowerCase().includes(ft) || (m.name || "").toLowerCase().includes(ft) || m.id.includes(ft));
+    const tbody = $("#modTable tbody");
+    tbody.innerHTML = "";
+    if (!list.length) { tbody.innerHTML = '<tr class="disabled"><td colspan="8">（无匹配模组）</td></tr>'; return; }
+    for (const m of list) {
+      const tr = document.createElement("tr");
+      tr.className = [modsState.selId === m.id ? "sel" : "", m.enabled && !m.downloaded ? "need-dl" : ""].join(" ").trim();
+      const tags = [
+        m.clientOnly ? '<span class="tag warn">仅客户端</span>' : "",
+        m.allClientsRequire ? '<span class="tag on">全员需要</span>' : "",
+        m.error ? '<span class="tag err">异常</span>' : "",
+        m.updateAvailable ? '<span class="tag warn">可更新</span>' : "",
+      ].join("");
+      tr.innerHTML = `
+        <td><button class="fav-star${m.favorite ? " on" : ""}" data-fav="${m.id}" title="${m.favorite ? "取消收藏" : "收藏（置顶）"}">${m.favorite ? "★" : "☆"}</button></td>
+        <td><input type="checkbox" data-id="${m.id}" ${modsState.checked.has(m.id) ? "checked" : ""}></td>
+        <td>${esc(m.id)}</td>
+        <td>${m.preview_url ? `<img class="mod-img" loading="lazy" src="${esc(m.preview_url)}" onerror="this.outerHTML='<div class=mod-img></div>'">` : '<div class="mod-img"></div>'}</td>
+        <td>${esc(m.title || m.name || "(未知)")}${m.name && m.title && m.name !== m.title ? `<div class="hint">${esc(m.name)}</div>` : ""}</td>
+        <td>${esc(m.update_date || m.version || "-")}</td>
+        <td>${tags}</td>
+        <td>${m.downloaded ? '<span class="tag on">已下载</span>' : '<span class="tag">未下载</span>'}${m.enabled ? ' <span class="tag on">已启用</span>' : ""}</td>`;
+      tr.onclick = (e) => {
+        if (e.target.type === "checkbox" || e.target.closest(".fav-star")) return;
+        modsState.selId = m.id;
+        $$("tr", tbody).forEach((r) => r.classList.remove("sel"));
+        tr.classList.add("sel");
+        loadModDetail(m.id);
+      };
+      tbody.appendChild(tr);
+    }
+    $$('input[type=checkbox]', tbody).forEach((cb) => (cb.onchange = () => {
+      cb.checked ? modsState.checked.add(cb.dataset.id) : modsState.checked.delete(cb.dataset.id);
+    }));
+    $$(".fav-star", tbody).forEach((b) => (b.onclick = async () => {
+      const nowFav = !b.classList.contains("on");
+      const r = await api("mods/favorite", { method: "POST", body: { id: b.dataset.fav, fav: nowFav } });
+      toast(r.msg);
+      const m = modsState.mods.find((x) => x.id === b.dataset.fav);
+      if (m) m.favorite = nowFav;
+      modsState.mods.sort((a, z) => Number(z.favorite) - Number(a.favorite) || a.id.localeCompare(z.id));
+      renderRows();
+    }));
+  };
+  renderRows();
+  $("#modSearch").oninput = (e) => { modsState.search = e.target.value; renderRows(); };
   $("#saveSel").onclick = async () => {
     const r = await api("mods/save-enabled", { method: "POST", body: { ids: [...modsState.checked] } });
     toast(r.msg); renderModsLocal();
@@ -835,8 +855,9 @@ async function renderModsLocal() {
     renderModsLocal();
   };
   $("#dlMissing").onclick = async () => {
-    const missing = modsState.mods.filter((m) => modsState.checked.has(m.id) && !m.downloaded).map((m) => m.id);
-    if (!missing.length) return toast("勾选的模组都已下载，没有缺失");
+    // 下载全部缺失：已启用或已加入下载清单但未下载的模组
+    const missing = modsState.mods.filter((m) => !m.downloaded && (m.enabled || m.inSetup)).map((m) => m.id);
+    if (!missing.length) return toast("没有缺失的模组，全部已下载");
     const r = await api("mods/download", { method: "POST", body: { ids: missing } });
     toast(r.msg);
     modsState.sub = "download";

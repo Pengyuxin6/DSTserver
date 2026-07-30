@@ -321,6 +321,7 @@ interface PanelConfig {
   announcements: string[];
   announceAuto: { enabled: boolean; intervalSec: number; idx: number; lastSent: number };
   itemHistory: string[];
+  favorites: string[];
   serverDir: string;
   clusterRoot: string;
   modsDir: string;
@@ -342,12 +343,13 @@ function loadPanelConfig(): PanelConfig {
         lastSent: Number(c.announceAuto?.lastSent) || 0,
       },
       itemHistory: Array.isArray(c.itemHistory) ? c.itemHistory.map(String) : [],
+      favorites: Array.isArray(c.favorites) ? c.favorites.map(String) : [],
       serverDir: typeof c.serverDir === "string" && c.serverDir ? c.serverDir : join(HOME, "dst_server"),
       clusterRoot: typeof c.clusterRoot === "string" && c.clusterRoot.startsWith("/") ? c.clusterRoot : DEFAULT_CLUSTER_ROOT,
       modsDir: typeof c.modsDir === "string" && c.modsDir.startsWith("/") ? c.modsDir : DEFAULT_MODS_DIR,
     };
   } catch {
-    return { cluster: "MyDediServer", beta: false, betaBranch: "", mode: "online", autorestart: false, announcements: [], announceAuto: { enabled: false, intervalSec: 300, idx: 0, lastSent: 0 }, itemHistory: [], serverDir: join(HOME, "dst_server"), clusterRoot: DEFAULT_CLUSTER_ROOT, modsDir: DEFAULT_MODS_DIR };
+    return { cluster: "MyDediServer", beta: false, betaBranch: "", mode: "online", autorestart: false, announcements: [], announceAuto: { enabled: false, intervalSec: 300, idx: 0, lastSent: 0 }, itemHistory: [], favorites: [], serverDir: join(HOME, "dst_server"), clusterRoot: DEFAULT_CLUSTER_ROOT, modsDir: DEFAULT_MODS_DIR };
   }
 }
 let panelConfig = loadPanelConfig();
@@ -513,7 +515,13 @@ function readModOverrides(shard: string): Map<string, ModOverrideEntry> {
 }
 function serializeModOverrides(map: Map<string, ModOverrideEntry>): string {
   const parts: string[] = [];
-  for (const [id, e] of [...map.entries()].sort(([a], [b]) => a.localeCompare(b))) {
+  // 语言包类模组（含 DST_chs.po 的）固定最后加载（覆盖其他模组的字符串）
+  const isLangPack = (wsId: string) => existsSync(join(ugcSharedDir(), wsId.replace("workshop-", ""), "DST_chs.po"));
+  const sorted = [...map.entries()].sort(([a], [b]) => {
+    const la = isLangPack(a) ? 1 : 0, lb = isLangPack(b) ? 1 : 0;
+    return la - lb || a.localeCompare(b);
+  });
+  for (const [id, e] of sorted) {
     const optLines = Object.entries(e.options).map(([k, v]) => `      ${luaKey(k)} = ${luaVal(v)},`);
     parts.push(
       `  ["${id}"] = {\n    configuration_options = {\n${optLines.join("\n")}\n    },\n    enabled = ${e.enabled},\n  },`
@@ -550,7 +558,9 @@ function writeSetupIds(ids: string[]): void {
     if (t === "") continue;
     keep.push(line);
   }
-  const body = ids.map((id) => `ServerModSetup("${id}")`).join("\n");
+  // 语言包类模组（含 DST_chs.po 的）固定最后加载，使其能覆盖其他模组的字符串
+  const isLangPack = (id: string) => existsSync(join(ugcSharedDir(), id, "DST_chs.po"));
+  const body = [...ids].sort((a, b) => Number(isLangPack(a)) - Number(isLangPack(b))).map((id) => `ServerModSetup("${id}")`).join("\n");
   writeFileSync(SETUP_LUA, keep.join("\n").replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "") + "\n\n" + body + "\n");
 }
 
@@ -1187,8 +1197,19 @@ interface SteamItem {
   favorited: number;
   views: number;
   time_updated: number;
+  downloadedAt?: number;
 }
 interface ModCache { time: number; items: Record<string, SteamItem> }
+// 模组本地下载时间：优先用记录值，缺失时用目录修改时间估算
+function modDownloadedAt(id: string): number {
+  const rec = modCache.items[id]?.downloadedAt;
+  if (rec) return rec;
+  for (const c of ugcContentDirs()) {
+    const p = join(c, id);
+    try { if (existsSync(p)) return statSync(p).mtimeMs; } catch {}
+  }
+  return 0;
+}
 function loadModCache(): ModCache {
   try {
     const c = JSON.parse(readText(MOD_CACHE_FILE));
@@ -1303,11 +1324,17 @@ async function buildModList(forceRefresh = false) {
       tags: st?.tags || [],
       subscriptions: st?.subscriptions || 0,
       downloaded: localIds.has(id),
+      downloadedAt: modDownloadedAt(id),
+      error: localIds.has(id) && !mi,
+      updateAvailable: !!st && st.time_updated > 0 && modDownloadedAt(id) > 0 && st.time_updated * 1000 > modDownloadedAt(id),
+      favorite: panelConfig.favorites.includes(id),
       inSetup: setupIds.has(id),
       enabled: ov?.enabled === true,
       hasConfig: (mi?.configOptions.length || 0) > 0,
     };
   });
+  // 收藏模组默认前置
+  list.sort((a, b) => Number(b.favorite) - Number(a.favorite) || a.id.localeCompare(b.id));
   return { list, steamOk };
 }
 
@@ -1375,6 +1402,7 @@ async function downloadOneMod(id: string, task: Task, slot: number): Promise<boo
         return false;
       }
     }
+    if (modCache.items[id]) { modCache.items[id].downloadedAt = Date.now(); saveModCache(); }
     task.log += `[完成] 已安装到 ${dst}\n`;
     return true;
   } catch (e: any) {
@@ -1418,6 +1446,7 @@ async function downloadViaCdn(id: string, task: Task): Promise<boolean> {
     rmSync(dst, { recursive: true, force: true });
     const cp = await run(["cp", "-r", root, dst]);
     if (cp.code !== 0) { task.log += `[失败] 复制失败: ${cp.out}\n`; return false; }
+    if (modCache.items[id]) { modCache.items[id].downloadedAt = Date.now(); saveModCache(); }
     task.log += `[完成] 已安装到 ${dst}\n`;
     return true;
   } catch (e: any) {
@@ -2120,6 +2149,16 @@ async function api(req: Request, url: URL): Promise<Response> {
       if (map.has(key)) { map.delete(key); writeFileSync(join(shardDir(shard.name), "modoverrides.lua"), serializeModOverrides(map)); }
     }
     return ok(null, `已取消订阅模组 ${b.id}（已删除本地文件并从配置中移除）`);
+  }
+  if (path === "mods/favorite" && method === "POST") {
+    const b = await bodyJson(req);
+    if (!validId(b.id)) return fail("非法模组 ID");
+    const fav = b.fav !== false;
+    const set = new Set(panelConfig.favorites);
+    if (fav) set.add(String(b.id)); else set.delete(String(b.id));
+    panelConfig.favorites = [...set];
+    savePanelConfig();
+    return ok({ favorites: panelConfig.favorites }, fav ? "已收藏，将置顶显示" : "已取消收藏");
   }
   if (path === "mods/search" && method === "GET") {
     const q = (url.searchParams.get("q") || "").trim();
