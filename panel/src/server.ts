@@ -1684,110 +1684,6 @@ function parseModLevelPresets(text: string, modId = ""): ModWorldgenPreset[] {
   }
   return out;
 }
-// 检测并修复模组文件中的常见拼写错误（prefab 名和变量名）
-// 例：spongea → sponge，locks → lotus，keys → kelp
-function fixModworldgenPrefabs(id: string): number {
-  const mw = join(ugcSharedDir(), id, "modworldgenmain.lua");
-  if (!existsSync(mw)) return 0;
-  let text = readText(mw);
-  if (!text) return 0;
-  let fixed = 0;
-  // 收集模组中所有已定义的 prefab 名（从 Prefab("...") 和 SpawnPrefab("...") 提取）
-  const definedPrefabs = new Set<string>();
-  const prefabDir = join(ugcSharedDir(), id, "scripts", "prefabs");
-  try {
-    if (existsSync(prefabDir)) {
-      for (const f of readdirSync(prefabDir)) {
-        if (!f.endsWith(".lua")) continue;
-        const lua = readText(join(prefabDir, f));
-        for (const m of lua.matchAll(/Prefab\s*\(\s*"[^"]*\/[^"]*?([a-z0-9_]+)"/g)) definedPrefabs.add(m[1]);
-        for (const m of lua.matchAll(/Prefab\s*\(\s*"([a-z0-9_]+)"/g)) definedPrefabs.add(m[1]);
-      }
-    }
-  } catch {}
-  if (!definedPrefabs.size) return 0;
-  // 找出 modworldgenmain 中引用但未定义的 prefab 名（疑似拼写错误）
-  // 匹配：key = value 格式中的 key（prefab 名作为 override 的键）
-  const suspicious = new Set<string>();
-  for (const m of text.matchAll(/\b([a-z][a-z0-9_]*)\s*=\s*[\d.]+/g)) {
-    const name = m[1];
-    // 排除已有的标准键（如 start_location, world_size 等原版设置）
-    if (name.length < 3 || name.length > 30) continue;
-    if (!definedPrefabs.has(name) && !vanillaPrefabs().has(name)) {
-      // 尝试模糊匹配：看是否是某个已定义 prefab 的拼写错误
-      for (const defined of definedPrefabs) {
-        if (defined.length >= 3 && name.length >= 3) {
-          // 编辑距离 ≤ 2 视为拼写错误
-          const dist = levenshtein(name, defined);
-          if (dist <= 2 && dist > 0) {
-            suspicious.add(name + "→" + defined);
-            break;
-          }
-        }
-      }
-    }
-  }
-  // 修复拼写错误
-  for (const pair of suspicious) {
-    const [wrong, right] = pair.split("→");
-    const re = new RegExp(`\\b${wrong}\\s*=\\s*`, "g");
-    if (re.test(text)) {
-      text = text.replace(re, `${right} = `);
-      fixed++;
-    }
-  }
-  // 修复变量名笔误：检测"定义了 local X 但后续用了 Y"的模式
-  // 常见：local lotus = 1 → 后续用了 locks（应为 lotus）
-  // 或：local kelp = 1 → 后续用了 keys（应为 kelp）
-  const localVars = new Map<string, string>(); // wrongName → correctName
-  for (const m of text.matchAll(/local\s+([a-z_]\w*)\s*=\s*\d+/g)) {
-    const localVar = m[1];
-    // 查找后续代码中使用了与局部变量相似但未定义的名称
-    // 在 for 循环的 pairs() 或比较运算中
-    for (const fm of text.matchAll(/for\s+[^=]+,\s*([a-z_]\w*)\s+in\s+pairs\s*\(/g)) {
-      const loopVar = fm[1];
-      if (loopVar !== localVar && !text.includes(`local ${loopVar} `)) {
-        const dist = levenshtein(localVar, loopVar);
-        if (dist <= 1 && dist > 0) localVars.set(loopVar, localVar);
-      }
-    }
-  }
-  // 全面替换错误变量名（所有独立出现的位置，不影响 LOCKS./KEYS. 表名）
-  for (const [wrong, right] of localVars) {
-    const re = new RegExp(`\\b${wrong}\\b`, "g");
-    const count = (text.match(re) || []).length;
-    if (count > 0) {
-      text = text.replace(re, right);
-      fixed += count;
-    }
-  }
-  if (fixed > 0) {
-    try {
-      writeFileSync(mw, text);
-      console.log(`[自动修复] 模组 ${id} 的 modworldgenmain.lua 修复了 ${fixed} 处拼写错误`);
-    } catch {}
-  }
-  return fixed;
-}
-// 编辑距离（Levenshtein）用于模糊匹配 prefab 名
-function levenshtein(a: string, b: string): number {
-  const m = a.length, n = b.length;
-  if (m === 0) return n;
-  if (n === 0) return m;
-  const dp: number[][] = Array.from({ length: m + 1 }, (_, i) => [i, ...Array(n).fill(0)]);
-  for (let j = 1; j <= n; j++) dp[0][j] = j;
-  for (let i = 1; i <= m; i++) {
-    for (let j = 1; j <= n; j++) {
-      dp[i][j] = Math.min(
-        dp[i - 1][j] + 1,
-        dp[i][j - 1] + 1,
-        dp[i - 1][j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)
-      );
-    }
-  }
-  return dp[m][n];
-}
-
 // 缓存 modWorldgenData 结果（每个模组只计算一次）
 const modWorldgenDataCache = new Map<string, ReturnType<typeof modWorldgenDataRaw>>();
 function modWorldgenData(id: string): { name: string; options: ModWorldgenOption[]; presets: ModWorldgenPreset[]; worldgenFiles: string[] } | null {
@@ -1799,8 +1695,6 @@ function modWorldgenData(id: string): { name: string; options: ModWorldgenOption
 function modWorldgenDataRaw(id: string): { name: string; options: ModWorldgenOption[]; presets: ModWorldgenPreset[]; worldgenFiles: string[] } | null {
   const dir = join(ugcSharedDir(), id);
   if (!existsSync(dir)) return null;
-  // 自动修复 modworldgenmain.lua 中的 prefab 拼写错误
-  fixModworldgenPrefabs(id);
   const files: string[] = [];
   const mw = join(dir, "modworldgenmain.lua");
   if (existsSync(mw)) files.push(mw);
@@ -3702,13 +3596,6 @@ const server = Bun.serve({
 });
 
 console.log(`DST 管理面板已启动: http://127.0.0.1:${PORT}/  (当前存档: ${panelConfig.cluster})`);
-
-// 启动时自动修复所有模组的 modworldgenmain.lua 拼写错误 prefab
-try {
-  for (const id of readdirSync(ugcSharedDir()).filter((d) => /^\d+$/.test(d))) {
-    fixModworldgenPrefabs(id);
-  }
-} catch {}
 
 // ---------- 定时任务 ----------
 // 自动重启：每 30 秒检查分片
