@@ -574,6 +574,15 @@ function luaStrField(src: string, key: string): string {
   const m = new RegExp(`${key}\\s*=\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(src);
   return m ? unquoteLua(m[1]) : "";
 }
+// 提取配置项的显示文本：支持 en_zh("en","zh") / isCh and "zh" or "en" / 普通字符串
+function luaLabelField(src: string, key: string): string {
+  const re = new RegExp(`${key}\\s*=\\s*en_zh\\s*\\(\\s*"((?:[^"\\\\]|\\\\.)*)"\\s*,\\s*"((?:[^"\\\\]|\\\\.)*)"\\s*\\)`);
+  const m1 = re.exec(src);
+  if (m1) return unquoteLua(m1[2]); // en_zh 取中文部分
+  const m2 = new RegExp(`${key}\\s*=\\s*isCh\\s+and\\s*"((?:[^"\\\\]|\\\\.)*)"\\s+or\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(src);
+  if (m2) return unquoteLua(m2[1]); // isCh and "中文" or "英文" 取中文
+  return luaStrField(src, key);
+}
 function luaBoolField(src: string, key: string): boolean | null {
   const m = new RegExp(`${key}\\s*=\\s*(true|false)`).exec(src);
   return m ? m[1] === "true" : null;
@@ -680,8 +689,8 @@ function parseModInfo(id: string): ModInfo | null {
         const item = body.slice(ob + 1, oe);
         const opt: ModConfigOption = {
           name: luaStrField(item, "name"),
-          label: luaStrField(item, "label") || luaStrField(item, "name"),
-          hover: luaStrField(item, "hover"),
+          label: luaLabelField(item, "label") || luaStrField(item, "name"),
+          hover: luaLabelField(item, "hover"),
           default: null,
           options: [],
         };
@@ -700,7 +709,7 @@ function parseModInfo(id: string): ModInfo | null {
               const q = braceMatch(oBody, p);
               if (q === -1) break;
               const ob2 = oBody.slice(p + 1, q);
-              const description = luaStrField(ob2, "description");
+              const description = luaLabelField(ob2, "description");
               const dkm = /data\s*=\s*/.exec(ob2);
               let data: any = description;
               if (dkm) { const [v] = parseLuaValue(ob2, dkm.index + dkm[0].length); data = v; }
@@ -743,6 +752,9 @@ function modItems(id: string): { name: string; prefab: string; cat: string }[] {
           const en = modStringLookup(id, upper, "NAMES");
           name = en ? (chinesePo().get(en) || en) : prefab;
         }
+        // 无名字的纯内部实体（特效/生成器/网络节点等，无 inventoryitem）不进物品列表
+        const lua = readText(join(dir, f));
+        if (name === prefab && !lua.includes('"inventoryitem"') && !lua.includes("components.inventoryitem")) continue;
         out.push({ name, prefab, cat: "模组物品" });
       }
     }
@@ -849,9 +861,12 @@ function zhText(en: string): string {
   chsNames();
   return chsTextMap?.get(t) || chinesePo().get(t) || "";
 }
-// 模组世界设置项/物品的中文名：中文语言包（含单复数变体）→ 原版物品表
+// 模组世界设置项/物品的中文名：原版设置项表 → 中文语言包（含单复数变体）→ 原版物品表
 function zhNameForKey(key: string): string {
   const noSet = key.replace(/_setting$/, "");
+  // 原版世界设置项（start_location/world_size/touchstone/boons/season_start 等）
+  for (const o of FOREST_OPTIONS) if (o.key === key || o.key === noSet) return o.label;
+  for (const o of CAVE_OPTIONS) if (o.key === key || o.key === noSet) return o.label;
   const cands = [key, noSet, key.replace(/s$/, ""), noSet.replace(/s$/, "")];
   for (const c of cands) {
     const cn = chsNames().get("STRINGS.NAMES." + c.toUpperCase());
