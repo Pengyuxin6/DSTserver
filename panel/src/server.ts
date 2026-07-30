@@ -810,8 +810,13 @@ function decodeKTEX(buf: Buffer): { width: number; height: number; png: Buffer }
   // 解析 mip 级别描述符（stride=10 字节：w(2)+h(2)+pitch(2)+size(2)+pad(2)）
   const mip0W = buf.readUInt16LE(8);
   const mip0H = buf.readUInt16LE(10);
-  const mip0Size = buf.readUInt16LE(14);
+  let mip0Size = buf.readUInt16LE(14);
   if (mip0W === 0 || mip0H === 0 || mip0W > 1024 || mip0H > 1024) return null;
+  // mip0Size 可能为 0（某些 KTEX 格式），按 DXT 块大小自动计算
+  if (mip0Size === 0) {
+    const blocks = Math.ceil(mip0W / 4) * Math.ceil(mip0H / 4);
+    mip0Size = (fmt === 0 ? 8 : 16) * blocks; // DXT1=8 bytes/block, DXT5=16 bytes/block
+  }
   // 数 mip 级别数来计算 data 偏移
   let dataOffset = 8;
   for (let off = 8; off + 10 <= buf.length; off += 10) {
@@ -909,34 +914,139 @@ function encodePNG(rgba: Buffer, width: number, height: number): Buffer {
   const idat = deflateSync(raw, { level: 9 });
   return Buffer.concat([sig, chunk("IHDR", ihdr), chunk("IDAT", idat), chunk("IEND", Buffer.alloc(0))]);
 }
-// 查找模组物品的 .tex 图标文件：递归搜索整个 images/ 目录
-function modItemIconPath(id: string, prefab: string): string | null {
+// 根据 UV 坐标裁剪已解码的 KTEX 图像并输出 PNG
+// DXT 解码器输出自上而下的 RGBA（与 PNG 一致），UV 坐标直接使用
+function cropPNG(decoded: { width: number; height: number; png: Buffer }, u1: number, u2: number, v1: number, v2: number): Buffer {
+  const cropX = Math.round(u1 * decoded.width);
+  const cropW = Math.round((u2 - u1) * decoded.width);
+  const cropY = Math.round(v1 * decoded.height);
+  const cropH = Math.round((v2 - v1) * decoded.height);
+  if (cropW <= 0 || cropH <= 0 || cropX < 0 || cropY < 0) return decoded.png;
+  // 从 PNG 解码回 RGBA（简单方式：直接重新解码 KTEX→RGBA 再裁剪）
+  // 更高效：直接从 decodeKTEX 返回 rgba，但当前结构返回 png
+  // 这里重新解码太浪费，改为：让 decodeKTEX 也返回 rgba
+  // 临时方案：解码 PNG
+  try {
+    const { inflateSync } = require("node:zlib");
+    const png = decoded.png;
+    // 解析 PNG 获取 IHDR 和 IDAT
+    let offset = 8; // skip signature
+    let imgW = 0, imgH = 0, colorType = 0;
+    const idatChunks: Buffer[] = [];
+    while (offset < png.length) {
+      const len = png.readUInt32BE(offset);
+      const type = png.subarray(offset + 4, offset + 8).toString("ascii");
+      const data = png.subarray(offset + 8, offset + 8 + len);
+      if (type === "IHDR") {
+        imgW = data.readUInt32BE(0);
+        imgH = data.readUInt32BE(4);
+        colorType = data[9];
+      } else if (type === "IDAT") {
+        idatChunks.push(data);
+      } else if (type === "IEND") break;
+      offset += 12 + len;
+    }
+    const raw = inflateSync(Buffer.concat(idatChunks));
+    const bpp = 4; // RGBA
+    const stride = imgW * bpp + 1;
+    const cropped = Buffer.alloc(cropW * cropH * bpp);
+    for (let y = 0; y < cropH; y++) {
+      const srcRow = (cropY + y) * stride + 1; // +1 skip filter byte
+      const dstRow = y * cropW * bpp;
+      for (let x = 0; x < cropW; x++) {
+        raw.copy(cropped, dstRow + x * bpp, srcRow + (cropX + x) * bpp, srcRow + (cropX + x) * bpp + bpp);
+      }
+    }
+    return encodePNG(cropped, cropW, cropH);
+  } catch {
+    return decoded.png;
+  }
+}
+// 查找模组物品图标：返回 .tex 路径 + UV 坐标（支持图集切片）
+function findModIcon(id: string, prefab: string): { texPath: string; u1: number; u2: number; v1: number; v2: number } | null {
   const modDir = join(ugcSharedDir(), id);
   const target = `${prefab}.tex`;
-  // 快速路径：常见位置直接检查
+  const targetXml = `${prefab}.xml`;
+  const defaultUV = { u1: 0, u2: 1, v1: 0, v2: 1 };
+
+  // 1. 快速路径：同名 .tex + .xml（独立图标，非图集）
   const quick = [
-    join(modDir, "images", "inventoryimages", target),
-    join(modDir, "images", target),
+    join(modDir, "images", "inventoryimages"),
+    join(modDir, "images"),
   ];
-  for (const p of quick) if (existsSync(p)) return p;
-  // 递归搜索 images/ 下所有子目录
+  for (const dir of quick) {
+    const texP = join(dir, target);
+    const xmlP = join(dir, targetXml);
+    if (existsSync(texP)) {
+      // 检查同名 XML 是否存在并解析 UV
+      if (existsSync(xmlP)) {
+        const uv = parseAtlasUV(readText(xmlP), target);
+        if (uv) return { texPath: texP, ...uv };
+      }
+      return { texPath: texP, ...defaultUV };
+    }
+  }
+
+  // 2. 递归搜索 images/ 下所有 .xml，查找 prefab 是否作为 Element 存在（图集模式）
+  // 收集所有匹配，优先选择元素数少的专用图集（避免 hamletinventory 等大型通用图集）
   try {
     const imgDir = join(modDir, "images");
     if (existsSync(imgDir)) {
-      const search = (dir: string, depth: number): string | null => {
-        if (depth > 3) return null;
-        for (const f of readdirSync(dir)) {
-          if (f === target) return join(dir, f);
+      const allMatches: { texPath: string; u1: number; u2: number; v1: number; v2: number; elementCount: number }[] = [];
+      const searchXml = (dir: string, depth: number) => {
+        if (depth > 3) return;
+        let entries: string[];
+        try { entries = readdirSync(dir); } catch { return; }
+        // 先检查当前目录的 .tex
+        for (const f of entries) {
+          if (f === target) { allMatches.push({ texPath: join(dir, f), ...defaultUV, elementCount: 1 }); return; }
         }
-        for (const f of readdirSync(dir)) {
+        // 检查当前目录的 .xml 是否包含 prefab 作为 Element
+        for (const f of entries) {
+          if (!f.endsWith(".xml")) continue;
+          const xmlPath = join(dir, f);
+          const xmlText = readText(xmlPath);
+          const uv = parseAtlasUV(xmlText, target);
+          if (uv) {
+            const texMatch = xmlText.match(/<Texture\s+filename="([^"]+)"/);
+            if (texMatch) {
+              const texPath = join(dir, texMatch[1]);
+              if (existsSync(texPath)) {
+                const elementCount = (xmlText.match(/<Element/g) || []).length;
+                allMatches.push({ texPath, ...uv, elementCount });
+              }
+            }
+          }
+        }
+        // 递归子目录
+        for (const f of entries) {
           const fp = join(dir, f);
-          try { if (statSync(fp).isDirectory()) { const r = search(fp, depth + 1); if (r) return r; } } catch {}
+          try { if (statSync(fp).isDirectory()) searchXml(fp, depth + 1); } catch {}
         }
-        return null;
       };
-      return search(imgDir, 0);
+      searchXml(imgDir, 0);
+      if (allMatches.length) {
+        // 优先选择元素数最少的（专用小图集优先于大型通用图集）
+        allMatches.sort((a, b) => a.elementCount - b.elementCount);
+        const best = allMatches[0];
+        return { texPath: best.texPath, u1: best.u1, u2: best.u2, v1: best.v1, v2: best.v2 };
+      }
     }
   } catch {}
+  return null;
+}
+
+// 从图集 XML 中解析指定元素的 UV 坐标
+function parseAtlasUV(xml: string, elementName: string): { u1: number; u2: number; v1: number; v2: number } | null {
+  // Element name 可以是 "xxx.tex" 或 "xxx"
+  const patterns = [
+    new RegExp(`<Element\\s+name="${elementName.replace(/\./g, "\\.")}"\\s+u1="([\\d.]+)"\\s+u2="([\\d.]+)"\\s+v1="([\\d.]+)"\\s+v2="([\\d.]+)"`),
+    new RegExp(`<Element\\s+name="${elementName.replace(/\\.tex$/, "").replace(/\./g, "\\.")}"\\s+u1="([\\d.]+)"\\s+u2="([\\d.]+)"\\s+v1="([\\d.]+)"\\s+v2="([\\d.]+)"`),
+  ];
+  for (const re of patterns) {
+    const m = re.exec(xml);
+    if (m) return { u1: parseFloat(m[1]), u2: parseFloat(m[2]), v1: parseFloat(m[3]), v2: parseFloat(m[4]) };
+  }
   return null;
 }
 
@@ -986,7 +1096,7 @@ function modItems(id: string): { name: string; prefab: string; cat: string }[] {
           // 只保留有 inventoryitem 的物品（过滤掉特效/建筑等纯实体）
           // 检查：lua 文件引用了 inventoryitem，或有对应的 .tex 图标文件
           const hasInvItem = lua.includes('"inventoryitem"') || lua.includes("components.inventoryitem") || lua.includes("InventoryItem");
-          const hasIcon = modItemIconPath(id, prefab) !== null;
+          const hasIcon = findModIcon(id, prefab) !== null;
           if (!hasInvItem && !hasIcon) continue;
           const name = resolveName(prefab) || prefab;
           seen.add(prefab);
@@ -1099,7 +1209,7 @@ const ZH_GLOSSARY: Record<string, string> = {
   Quality: "品质", Volume: "音量", Sound: "声音", Music: "音乐",
   Debug: "调试", Version: "版本", Author: "作者", Unknown: "未知",
 };
-function zhText(en: string): string {
+function zhText(en: string, modId?: string): string {
   if (!en) return "";
   const t = en.trim();
   if (ZH_GLOSSARY[t]) return ZH_GLOSSARY[t];
@@ -1107,15 +1217,73 @@ function zhText(en: string): string {
   let m = /^(.+?)\s+(Enabled|Disabled|On|Off)$/i.exec(t);
   if (m) return m[2] + "（" + m[1] + "）";
   chsNames();
-  return chsTextMap?.get(t) || chinesePo().get(t) || "";
+  if (chsTextMap?.get(t)) return chsTextMap.get(t)!;
+  if (chinesePo().get(t)) return chinesePo().get(t)!;
+  // 查模组翻译
+  if (modId) {
+    const mt = modTrans(modId);
+    if (mt.po.get(t)) return mt.po.get(t)!;
+  }
+  return t;
 }
 // 模组世界设置项/物品的中文名：原版设置项表 → 中文语言包（含单复数变体）→ 原版物品表
-function zhNameForKey(key: string): string {
+// 模组翻译缓存：modId → { po: Map<en, zh>, strings: Map<STRINGS.key.lastpart, en> }
+const modTransCache = new Map<string, { po: Map<string, string>; strings: Map<string, string> }>();
+function modTrans(id: string): { po: Map<string, string>; strings: Map<string, string> } {
+  if (modTransCache.has(id)) return modTransCache.get(id)!;
+  const dir = ugcSharedDir();
+  const po = new Map<string, string>();
+  const strings = new Map<string, string>();
+  // 加载模组 .po 文件
+  const poFiles = [
+    join(dir, id, "scripts", "languages", "pl_chinese_s.po"),
+    join(dir, id, "DST_chs.po"),
+    join(dir, id, "chinese_s.po"),
+  ];
+  for (const pf of poFiles) {
+    if (!existsSync(pf)) continue;
+    const text = readText(pf);
+    const unq = (s: string) => s.split("\n").map((l) => { const m = /^\s*"((?:[^"\\]|\\.)*)"\s*$/.exec(l); return m ? m[1] : ""; }).join("").replace(/\\n/g, " ").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+    const re = /msgid\s+((?:"(?:[^"\\]|\\.)*"\s*\n?\s*)+)\nmsgstr\s+((?:"(?:[^"\\]|\\.)*"\s*\n?\s*)+)/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text))) {
+      const msgid = unq(m[1]), msgstr = unq(m[2]);
+      if (msgid && msgstr && !po.has(msgid)) po.set(msgid, msgstr);
+    }
+    break;
+  }
+  // 加载模组 strings/common.lua（英文 STRINGS 值）
+  const strFile = join(dir, id, "strings", "common.lua");
+  if (existsSync(strFile)) {
+    const text = readText(strFile);
+    // 提取 KEY = "VALUE" 对（只取叶子节点的字符串值）
+    const re = /([A-Z][A-Z0-9_]*)\s*=\s*"((?:[^"\\]|\\.)*)"/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text))) {
+      if (!strings.has(m[1])) strings.set(m[1], m[2].replace(/\\"/g, '"').replace(/\\\\/g, "\\"));
+    }
+  }
+  const result = { po, strings };
+  modTransCache.set(id, result);
+  return result;
+}
+function zhNameForKey(key: string, modId?: string): string {
   const noSet = key.replace(/_setting$/, "");
   // 原版世界设置项（start_location/world_size/touchstone/boons/season_start 等）
   for (const o of FOREST_OPTIONS) if (o.key === key || o.key === noSet) return o.label;
   for (const o of CAVE_OPTIONS) if (o.key === key || o.key === noSet) return o.label;
   const cands = [key, noSet, key.replace(/s$/, ""), noSet.replace(/s$/, "")];
+  // 查模组翻译
+  if (modId) {
+    const mt = modTrans(modId);
+    for (const c of cands) {
+      const en = mt.strings.get(c.toUpperCase());
+      if (en) { const zh = mt.po.get(en); if (zh) return zh; }
+      // 也查 NAMES
+      const enName = mt.strings.get(c.toUpperCase());
+      if (enName) { const zh = mt.po.get(enName); if (zh) return zh; }
+    }
+  }
   for (const c of cands) {
     const cn = chsNames().get("STRINGS.NAMES." + c.toUpperCase()) || chsMsg("STRINGS.UI.CUSTOMIZATIONSCREEN." + c.toUpperCase());
     if (cn) return cn;
@@ -1126,10 +1294,21 @@ function zhNameForKey(key: string): string {
   }
   return "";
 }
-function resolveStringsRef(expr: string): string {
+function resolveStringsRef(expr: string, modId?: string): string {
   const m = /STRINGS(?:\.[A-Za-z_]\w*)+\.([A-Z][A-Z0-9_]*)$/.exec((expr || "").trim());
   if (!m) return "";
-  const en = vanillaStrings().get(m[1]);
+  const lastKey = m[1];
+  // 先查模组自己的翻译
+  if (modId) {
+    const mt = modTrans(modId);
+    const modEn = mt.strings.get(lastKey);
+    if (modEn) {
+      const zh = mt.po.get(modEn);
+      if (zh) return zh;
+    }
+  }
+  // 再查原版
+  const en = vanillaStrings().get(lastKey);
   if (!en) return "";
   return chinesePo().get(en) || en;
 }
@@ -1259,7 +1438,7 @@ function parseModCustomizeFile(text: string, modId = ""): ModWorldgenOption[] {
     let vm: RegExpExecArray | null;
     while ((vm = vre.exec(body))) {
       const t = vm[1].trim();
-      const label = t.startsWith('"') ? unquoteLua(t) : (resolveStringsRef(t) || vm[2]);
+      const label = t.startsWith('"') ? unquoteLua(t) : (resolveStringsRef(t, modId) || vm[2]);
       vals.push({ v: vm[2], label });
     }
     if (vals.length) descMaps[dm[1]] = vals;
@@ -1281,7 +1460,7 @@ function parseModCustomizeFile(text: string, modId = ""): ModWorldgenOption[] {
       grpRe.lastIndex = ge;
       const groupDesc = (/\bdesc\s*=\s*([A-Za-z_]\w*)/.exec(gblk) || [])[1] || "";
       const groupTextExpr = (/\btext\s*=\s*([^,\n]+)/.exec(gblk) || [])[1] || "";
-      const groupLabel = resolveStringsRef(groupTextExpr) || gr[1];
+      const groupLabel = resolveStringsRef(groupTextExpr, modId) || gr[1];
       const gaM = /\batlas\s*=\s*(?:([A-Z_][A-Za-z0-9_]*)|"([^"]+)")/.exec(gblk);
       const groupAtlas = normalizeAtlas((gaM && (gaM[1] || gaM[2])) || "");
       const im = /items\s*=\s*\{/.exec(gblk);
@@ -1305,7 +1484,7 @@ function parseModCustomizeFile(text: string, modId = ""): ModWorldgenOption[] {
         const rawAtlas = (/\batlas\s*=\s*(?:([A-Z_][A-Za-z0-9_]*)|"([^"]+)")/.exec(iblk) || []);
         const atlasRef = rawAtlas[1] || rawAtlas[2] || "";
         const values = descMaps[itemDesc] || descMaps["frequency_descriptions"];
-        let label = zhNameForKey(key);
+        let label = zhNameForKey(key, modId);
         if (!label && modId) {
           const en = modStringLookup(modId, key.toUpperCase(), "NAMES") || modStringLookup(modId, key.replace(/_setting$/, "").toUpperCase(), "NAMES");
           if (en) label = chinesePo().get(en) || en;
@@ -1344,7 +1523,7 @@ function parseModCustomizeFile(text: string, modId = ""): ModWorldgenOption[] {
     const itemDesc = (/\bdesc\s*=\s*([A-Za-z_]\w*)/.exec(block) || [])[1] || "frequency_descriptions";
     const img = (/\bimage\s*=\s*"([^"]+)"/.exec(block) || [])[1] || key + ".tex";
     const values = descMaps[itemDesc] || descMaps["frequency_descriptions"];
-    let label = zhNameForKey(key);
+    let label = zhNameForKey(key, modId);
     if (!label && modId) {
       const en = modStringLookup(modId, key.toUpperCase(), "NAMES") || modStringLookup(modId, key.replace(/_setting$/, "").toUpperCase(), "NAMES");
       if (en) label = chinesePo().get(en) || en;
@@ -1367,7 +1546,7 @@ function parseModCustomizeFile(text: string, modId = ""): ModWorldgenOption[] {
       const gblk = plBody.slice(grpRe.lastIndex, ge);
       grpRe.lastIndex = ge;
       const groupTextExpr = (/\btext\s*=\s*([^,\n]+)/.exec(gblk) || [])[1] || "";
-      const groupLabel = resolveStringsRef(groupTextExpr) || gr[1];
+      const groupLabel = resolveStringsRef(groupTextExpr, modId) || gr[1];
       const gaM = /\batlas\s*=\s*(?:([A-Z_][A-Za-z0-9_]*)|"([^"]+)")/.exec(gblk);
       const groupAtlas = normalizeAtlas((gaM && (gaM[1] || gaM[2])) || "") || "customization_porkland";
       const im = /items\s*=\s*\{/.exec(gblk);
@@ -3204,18 +3383,24 @@ const server = Bun.serve({
     if (path === "/" || path === "/index.html") {
       return serveFile(join(PUBLIC_DIR, checkAuth(req) ? "index.html" : "login.html"));
     }
-    // 动态模组物品图标：/mod-icon?id=<modId>&prefab=<prefab> → PNG
+    // 动态模组物品图标：/mod-icon?id=<modId>&prefab=<prefab> → PNG（支持图集 UV 切片）
     if (path === "/mod-icon" && req.method === "GET") {
       const modId = url.searchParams.get("id") || "";
       const prefab = url.searchParams.get("prefab") || "";
       if (!/^\d{4,15}$/.test(modId) || !/^[a-z0-9_]+$/.test(prefab)) return new Response("Bad request", { status: 400 });
-      const texPath = modItemIconPath(modId, prefab);
-      if (!texPath) return new Response("Not found", { status: 404 });
+      const icon = findModIcon(modId, prefab);
+      if (!icon) return new Response("Not found", { status: 404 });
       try {
-        const buf = readFileSync(texPath);
+        const buf = readFileSync(icon.texPath);
         const result = decodeKTEX(buf);
         if (!result) return new Response("Decode failed", { status: 500 });
-        return new Response(result.png, { status: 200, headers: { "Content-Type": "image/png", "Cache-Control": "public, max-age=604800" } });
+        // 如果 UV 不是全图，需要裁剪
+        let png = result.png;
+        const isFullUV = icon.u1 === 0 && icon.u2 === 1 && icon.v1 === 0 && icon.v2 === 1;
+        if (!isFullUV) {
+          png = cropPNG(result, icon.u1, icon.u2, icon.v1, icon.v2);
+        }
+        return new Response(png, { status: 200, headers: { "Content-Type": "image/png", "Cache-Control": "public, max-age=604800" } });
       } catch {
         return new Response("Error", { status: 500 });
       }
