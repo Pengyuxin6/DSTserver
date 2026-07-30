@@ -584,13 +584,22 @@ function luaStrField(src: string, key: string): string {
   const m = new RegExp(`${key}\\s*=\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(src);
   return m ? unquoteLua(m[1]) : "";
 }
-// 提取配置项的显示文本：支持 en_zh("en","zh") / isCh and "zh" or "en" / 普通字符串
+// 提取配置项的显示文本：支持 en_zh("en","zh") / en_zh_zht("en","zh","zht") / isCh and "zh" or "en" / L and "en" or "zh" / 普通字符串
 function luaLabelField(src: string, key: string): string {
+  // en_zh_zht("en","zh","zht") — 三参数版，取第二个参数（简中）
+  const re3 = new RegExp(`${key}\\s*=\\s*en_zh_zht\\s*\\(\\s*"((?:[^"\\\\]|\\\\.)*)"\\s*,\\s*"((?:[^"\\\\]|\\\\.)*)"\\s*(?:,\\s*"((?:[^"\\\\]|\\\\.)*)"\\s*)?\\)`);
+  const m3 = re3.exec(src);
+  if (m3) return unquoteLua(m3[2]); // en_zh_zht 取简中部分
+  // en_zh("en","zh") — 两参数版，取第二个参数（中文）
   const re = new RegExp(`${key}\\s*=\\s*en_zh\\s*\\(\\s*"((?:[^"\\\\]|\\\\.)*)"\\s*,\\s*"((?:[^"\\\\]|\\\\.)*)"\\s*\\)`);
   const m1 = re.exec(src);
-  if (m1) return unquoteLua(m1[2]); // en_zh 取中文部分
+  if (m1) return unquoteLua(m1[2]);
+  // isCh and "中文" or "英文" — isCh 为 true 时是中文
   const m2 = new RegExp(`${key}\\s*=\\s*isCh\\s+and\\s*"((?:[^"\\\\]|\\\\.)*)"\\s+or\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(src);
-  if (m2) return unquoteLua(m2[1]); // isCh and "中文" or "英文" 取中文
+  if (m2) return unquoteLua(m2[1]);
+  // L and "英文" or "中文" — L 为 true 时是英文（locale ~= "zh"），取 or 后面的中文
+  const m4 = new RegExp(`${key}\\s*=\\s*[\\w.]+\\s+and\\s*"((?:[^"\\\\]|\\\\.)*)"\\s+or\\s*"((?:[^"\\\\]|\\\\.)*)"`).exec(src);
+  if (m4) return unquoteLua(m4[2]);
   return luaStrField(src, key);
 }
 function luaBoolField(src: string, key: string): boolean | null {
@@ -682,12 +691,12 @@ function parseModInfo(id: string): ModInfo | null {
     dstCompatible: luaBoolField(text, "dst_compatible"),
     configOptions: [],
   };
-  // 兼容 configuration_options = { / = isCh and { / =\n{ 等写法
-  // 优先处理 X and {...} or {...} 模式（如 Legion 的 L and {英文} or {中文}）
+  // 兼容 configuration_options = { / = X and { / =\n{ 等写法
+  // 处理 X and {...} or {...} 模式：需要判断哪个块是中文
   let configBody = "";
   const ternaryHead = /configuration_options\s*=\s*([\w.]+)\s+and\s*\{/.exec(text);
   if (ternaryHead) {
-    // 解析 and 后的第一个 { ... } 块
+    const varName = ternaryHead[1];
     const andOpen = ternaryHead.index + ternaryHead[0].length - 1;
     const andEnd = braceMatch(text, andOpen);
     if (andEnd !== -1) {
@@ -695,15 +704,19 @@ function parseModInfo(id: string): ModInfo | null {
       const restAfterAnd = text.slice(andEnd + 1);
       const trimmedRest = restAfterAnd.trimStart();
       if (/^or\s*\{/.test(trimmedRest)) {
-        // 在原文中找到 or 后面的 {
         const orKwIdx = text.indexOf("or", andEnd + 1);
         const orBraceIdx = text.indexOf("{", orKwIdx);
         const orEnd = braceMatch(text, orBraceIdx);
         if (orEnd !== -1) {
           const orBody = text.slice(orBraceIdx + 1, orEnd);
           const andBody = text.slice(andOpen + 1, andEnd);
-          // 优先用 or 后面的块（中文），为空则回退 and 后面的块
-          configBody = orBody.trim() !== "" ? orBody : andBody;
+          // 智能选择中文块：
+          // isCh / locale == "zh" → 变量为 true 时是中文 → and 块是中文
+          // L / locale ~= "zh" → 变量为 true 时是英文 → or 块是中文
+          const varDefRe = new RegExp(`(?:local\\s+)?${varName}\\s*=\\s*([^\\n\\r]+)`);
+          const varDef = varDefRe.exec(text);
+          const isChVar = varDef ? /==\s*["']zh|isCh|isch/i.test(varDef[1]) : /isCh/i.test(varName);
+          configBody = isChVar ? andBody : (orBody.trim() !== "" ? orBody : andBody);
         }
       } else {
         configBody = text.slice(andOpen + 1, andEnd);
