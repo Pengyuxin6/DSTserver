@@ -1492,6 +1492,61 @@ async function downloadViaCdn(id: string, task: Task): Promise<boolean> {
   }
 }
 
+// 仅下载 modinfo.lua（轻量）：通过 CDN 下载 zip → 解压出 modinfo.lua → 放入模组目录
+// 用于本地缺少 modinfo.lua 时自动补全，不下载完整模组
+async function fetchModInfoLua(id: string): Promise<boolean> {
+  const st = modCache.items[id];
+  if (!st?.file_url) return false;
+  const zipPath = `/tmp/dst_modinfo_${id}.zip`;
+  const tmpDir = `/tmp/dst_modinfo_${id}_x`;
+  try {
+    const res = await fetch(st.file_url, { signal: AbortSignal.timeout(20000) });
+    if (!res.ok) return false;
+    const buf = await res.arrayBuffer();
+    if (buf.byteLength < 100) return false;
+    writeFileSync(zipPath, new Uint8Array(buf));
+    rmSync(tmpDir, { recursive: true, force: true });
+    mkdirSync(tmpDir, { recursive: true });
+    const uz = await run(["unzip", "-o", "-q", zipPath, "-d", tmpDir]);
+    if (uz.code > 1) return false;
+    // 查找 modinfo.lua（可能在子目录）
+    let infoFile = join(tmpDir, "modinfo.lua");
+    if (!existsSync(infoFile)) {
+      const entries = readdirSync(tmpDir);
+      if (entries.length === 1 && statSync(join(tmpDir, entries[0])).isDirectory()) {
+        infoFile = join(tmpDir, entries[0], "modinfo.lua");
+      }
+    }
+    if (!existsSync(infoFile)) return false;
+    ensureUgcLayout();
+    const dst = join(ugcSharedDir(), id);
+    mkdirSync(dst, { recursive: true });
+    // 复制 modinfo.lua 及相关描述文件（modicon 等）
+    for (const f of ["modinfo.lua"]) {
+      const src = join(tmpDir, f);
+      if (existsSync(src)) { try { writeFileSync(join(dst, f), readFileSync(src)); } catch {} }
+    }
+    // 也尝试从子目录复制
+    const entries = readdirSync(tmpDir);
+    if (entries.length === 1 && statSync(join(tmpDir, entries[0])).isDirectory()) {
+      const sub = join(tmpDir, entries[0]);
+      for (const f of readdirSync(sub)) {
+        if (f === "modinfo.lua" || f.startsWith("modicon") || f === "modworldgenmain.lua") {
+          const src = join(sub, f);
+          if (!existsSync(join(dst, f))) { try { writeFileSync(join(dst, f), readFileSync(src)); } catch {} }
+        }
+      }
+    }
+    if (modCache.items[id]) { modCache.items[id].downloadedAt = modCache.items[id].downloadedAt || Date.now(); saveModCache(); }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(zipPath, { force: true });
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
 async function runDownloadTask(task: Task, slot: number) {
   task.status = "running";
   task.log += `开始处理模组 ${task.modId}\n`;
@@ -2045,7 +2100,13 @@ async function api(req: Request, url: URL): Promise<Response> {
     if (!validId(id)) return fail("非法 ID");
     await ensureSteamCache([id]);
     const st = modCache.items[id];
-    const mi = parseModInfo(id);
+    let mi = parseModInfo(id);
+    // modinfo.lua 不在本地 → 静默尝试仅下载 modinfo.lua（不通知用户）
+    let modinfoAutoFetched = false;
+    if (!mi) {
+      modinfoAutoFetched = await fetchModInfoLua(id);
+      if (modinfoAutoFetched) mi = parseModInfo(id);
+    }
     // 当前值（以 Master modoverrides 为准）
     const master = listShards().find((s) => s.isMaster) || listShards()[0];
     const ov = master ? readModOverrides(master.name).get(`workshop-${id}`) : undefined;
@@ -2058,6 +2119,27 @@ async function api(req: Request, url: URL): Promise<Response> {
       current: ov && o.name in ov.options ? ov.options[o.name] : o.default,
     }));
     const changelogs = await fetchChangeLogs(id);
+    // ---------- 安装详情 ----------
+    const localIds = new Set(localModDirs());
+    const isDownloaded = localIds.has(id);
+    const localVersion = mi?.version || "";
+    const dlAt = modDownloadedAt(id);
+    const updateAvail = !!st && st.time_updated > 0 && dlAt > 0 && st.time_updated * 1000 > dlAt;
+    // 检测本地关键文件
+    const localFiles: Record<string, boolean> = {};
+    const modDir = join(ugcSharedDir(), id);
+    if (existsSync(modDir) && statSync(modDir).isDirectory()) {
+      for (const f of ["modinfo.lua", "modmain.lua", "modworldgenmain.lua"]) {
+        localFiles[f] = existsSync(join(modDir, f));
+      }
+    }
+    // 异常检测
+    const anomalies: string[] = [];
+    if (!isDownloaded) anomalies.push("模组未下载到本地");
+    if (isDownloaded && !mi) anomalies.push("已下载但 modinfo.lua 缺失或解析失败");
+    if (mi && mi.dstCompatible === false) anomalies.push("模组标记为不兼容 DST");
+    if (updateAvail) anomalies.push("有新版本可更新");
+    if (isDownloaded && mi && !localFiles["modmain.lua"] && !localFiles["modworldgenmain.lua"]) anomalies.push("缺少 modmain.lua / modworldgenmain.lua（可能仅客户端模组）");
     return ok({
       id,
       title: st?.title || "",
@@ -2072,6 +2154,16 @@ async function api(req: Request, url: URL): Promise<Response> {
       modinfo: mi ? { name: mi.name, version: mi.version, clientOnly: mi.clientOnly, allClientsRequire: mi.allClientsRequire, dstCompatible: mi.dstCompatible } : null,
       enabled: ov?.enabled === true,
       options,
+      // 安装详情
+      installed: {
+        downloaded: isDownloaded,
+        modinfoAutoFetched,
+        localVersion,
+        downloadedAt: dlAt ? new Date(dlAt).toISOString().slice(0, 19).replace("T", " ") : "",
+        updateAvailable: updateAvail,
+        localFiles,
+        anomalies,
+      },
     });
   }
   if (path === "mods/save-enabled" && method === "POST") {
@@ -2209,6 +2301,13 @@ async function api(req: Request, url: URL): Promise<Response> {
     } catch (e: any) {
       return fail("搜索失败（网络问题？）: " + String(e?.message || e));
     }
+  }
+  if (path === "mods/fetch-modinfo" && method === "POST") {
+    const b = await bodyJson(req);
+    if (!validId(b.id)) return fail("非法模组 ID");
+    await ensureSteamCache([String(b.id)]);
+    const success = await fetchModInfoLua(String(b.id));
+    return ok({ success }, success ? "modinfo.lua 已下载" : "下载失败（无 CDN 直链或网络问题）");
   }
   if (path === "mods/download" && method === "POST") {
     const b = await bodyJson(req);

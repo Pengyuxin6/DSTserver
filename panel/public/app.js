@@ -488,6 +488,69 @@ async function pageBasic() {
 
 // ============ 2. 编辑世界 ============
 const worldState = { shard: null, overrides: {}, options: [], selKey: null, filterText: "", filterGroup: "" };
+
+// 世界设置项弹窗：点击设置项行弹出，展示图标、名称、可选值列表
+function showWorldOptionPopup(option, currentVal, iconSrcs, onSelect) {
+  const overlay = document.createElement("div");
+  overlay.className = "mod-detail-overlay";
+  const labelOf = (v) => (option.values.find((x) => x.v === v) || {}).label || v;
+  const curLabel = labelOf(currentVal);
+  // radio 列表（≤8 个）或 select（>8 个）
+  const useRadio = option.values.length <= 8;
+  const valList = useRadio
+    ? option.values.map((v) => {
+        const checked = v.v === currentVal ? "checked" : "";
+        return `<label class="opt-radio-row"><input type="radio" name="optValRadio" value="${esc(v.v)}" ${checked}> ${esc(v.label)} <span class="hint">(${esc(v.v)})</span></label>`;
+      }).join("")
+    : null;
+  overlay.innerHTML = `<div class="mod-detail-popup" style="max-width:520px">
+    <button class="popup-close" id="optPopupX">×</button>
+    <div class="md-head" style="align-items:center">
+      ${iconSrcs && iconSrcs.length ? `<div style="width:64px;height:64px;flex-shrink:0;display:flex;align-items:center;justify-content:center">${optIcon(iconSrcs)}</div>` : ""}
+      <div class="md-head-main">
+        <div class="md-title">${esc(option.label)}</div>
+        <div class="md-sub">分组: ${esc(option.group || "-")} ｜ key: <code>${esc(option.key)}</code></div>
+        <div class="md-sub">当前值: <b>${esc(curLabel)}</b> <span class="hint">(${esc(currentVal)})</span></div>
+      </div>
+    </div>
+    <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px">
+      <h3 style="margin:0 0 8px">选择新值</h3>
+      ${useRadio
+        ? `<div id="optRadioList" style="display:flex;flex-direction:column;gap:4px;max-height:300px;overflow-y:auto">${valList}</div>`
+        : `<div class="row"><select id="optSelect" style="min-width:240px">${option.values.map((v) => `<option value="${esc(v.v)}" ${v.v === currentVal ? "selected" : ""}>${esc(v.label)} (${esc(v.v)})</option>`).join("")}</select></div>`}
+    </div>
+    <div class="btn-row" style="margin-top:14px">
+      <button class="btn" id="optPopupCancel">取消</button>
+      <button class="btn primary" id="optPopupSave">保存</button>
+    </div>
+  </div>`;
+  // 修正图标：把 optIcon 结果用大尺寸样式展示
+  const iconBox = overlay.querySelector(".md-head > div:first-child");
+  if (iconBox) {
+    const img = iconBox.querySelector("img");
+    if (img) { img.style.width = "64px"; img.style.height = "64px"; img.style.objectFit = "contain"; }
+    iconBox.style.display = "flex";
+    iconBox.style.alignItems = "center";
+    iconBox.style.justifyContent = "center";
+  }
+  overlay.onclick = (e) => { if (e.target === overlay) overlay.remove(); };
+  document.body.appendChild(overlay);
+  const getSelected = () => {
+    if (useRadio) {
+      const r = overlay.querySelector('input[name="optValRadio"]:checked');
+      return r ? r.value : currentVal;
+    }
+    return $("#optSelect", overlay).value;
+  };
+  $("#optPopupCancel", overlay).onclick = () => overlay.remove();
+  $("#optPopupX", overlay).onclick = () => overlay.remove();
+  $("#optPopupSave", overlay).onclick = () => {
+    const val = getSelected();
+    if (val !== currentVal) onSelect(val);
+    overlay.remove();
+  };
+}
+
 async function pageWorld() {
   const j = await api("worlds");
   const shards = j.data;
@@ -523,9 +586,8 @@ async function pageWorld() {
         <div style="max-height:560px;overflow-y:auto"><table class="grid" id="optTable">
           <thead><tr><th>设置项</th><th>设定值</th><th>分组</th></tr></thead><tbody></tbody>
         </table></div>
-        <div class="row" style="margin-top:12px"><label>设置项</label><select id="newVal"></select>
-        <button class="btn primary" id="saveOv">保存</button></div>
-        <div class="hint">每设置完一个世界之后，都需要点击保存。点击表格行选中设置项，再在下方选择新值。</div>
+        <div class="btn-row" style="margin-top:12px"><button class="btn primary" id="saveOv">保存世界设置</button></div>
+        <div class="hint">点击设置项查看详情并修改。每设置完一个世界后，点击保存。</div>
       </div>
       <div id="modWorldBox"></div>
     </div>
@@ -603,10 +665,10 @@ async function loadWorldOverrides() {
   const isModWorld = !!preset && preset !== "SURVIVAL_TOGETHER" && preset !== "DST_CAVE";
   const filterRow = $("#optFilter")?.closest(".row");
   const tableWrap = $("#optTable")?.parentElement;
-  const newValRow = $("#newVal")?.closest(".row");
+  const saveRow = $("#saveOv")?.closest(".btn-row");
   if (filterRow) filterRow.style.display = isModWorld ? "none" : "";
   if (tableWrap) tableWrap.style.display = isModWorld ? "none" : "";
-  if (newValRow) newValRow.style.display = isModWorld ? "none" : "";
+  if (saveRow) saveRow.style.display = isModWorld ? "none" : "";
   let hint = $("#vanillaHiddenHint");
   if (!hint && tableWrap) {
     hint = document.createElement("div");
@@ -645,19 +707,15 @@ async function loadWorldOverrides() {
       worldState.selKey = o.key;
       $$("tr", tbody).forEach((r) => r.classList.remove("sel"));
       tr.classList.add("sel");
-      const selEl = $("#newVal");
-      selEl.innerHTML = o.values.map((v) => `<option value="${v.v}">${esc(v.label)} (${v.v})</option>`).join("");
-      selEl.value = worldState.overrides[o.key] || "default";
+      const curVal = worldState.overrides[o.key] || "default";
+      showWorldOptionPopup(o, curVal, [`icons/worldsettings_customization/${o.key}.png`, `icons/worldgen_customization/${o.key}.png`], (val) => {
+        worldState.overrides[o.key] = val;
+        loadWorldOverridesKeepSel();
+      });
     };
     tbody.appendChild(tr);
   });
   if (!tbody.children.length) tbody.innerHTML = '<tr class="disabled"><td colspan="3">（无匹配的设置项）</td></tr>';
-  $("#newVal").innerHTML = '<option value="">（先在表格中选择一行）</option>';
-  $("#newVal").onchange = (e) => {
-    if (!worldState.selKey || !e.target.value) return;
-    worldState.overrides[worldState.selKey] = e.target.value;
-    loadWorldOverridesKeepSel();
-  };
   loadModWorldgen();
 }
 // 大型地图模组（海难/哈姆雷特等）的世界设置与关卡预设
@@ -699,9 +757,8 @@ async function loadModWorldgen() {
       <select class="mwGroup" data-mi="${mi}"><option value="">全部分组</option>${[...new Set(m.options.map((o) => o.group))].map((g) => `<option value="${g}" ${g === worldState.mwGroup ? "selected" : ""}>${esc(g)}</option>`).join("")}</select>
     </div>
     <div style="max-height:520px;overflow-y:auto"><table class="grid"><thead><tr><th>设置项</th><th>设定值</th><th>分组</th></tr></thead><tbody id="mwTbody_${mi}"></tbody></table></div>
-    <div class="row" style="margin-top:8px"><label>设置项</label><select id="mwNewVal_${mi}"><option value="">（先在表格中选择一行）</option></select>
-    <button class="btn primary" id="saveModOv">保存</button>
-    <span class="hint">模组世界：保存只写入该模组的世界设置项</span></div>` : ""}
+    <div class="btn-row" style="margin-top:8px"><button class="btn primary" id="saveModOv">保存模组世界设置</button>
+    <span class="hint">点击设置项查看详情并修改</span></div>` : ""}
   </div>`;
   }).join("");
   // 模组设置项行渲染（支持搜索/分组过滤）
@@ -732,7 +789,7 @@ async function loadModWorldgen() {
     if (fi) fi.oninput = () => { worldState.mwFilter = fi.value; renderMwRows(mi); };
     const fgs = box.querySelector(`.mwGroup[data-mi="${mi}"]`);
     if (fgs) fgs.onchange = () => { worldState.mwGroup = fgs.value; renderMwRows(mi); }
-    // 行选择（事件委托，兼容过滤重渲染）
+    // 行点击 → 弹窗（事件委托，兼容过滤重渲染）
     const tbody = $(`#mwTbody_${mi}`);
     if (tbody) tbody.onclick = (e) => {
       const tr = e.target.closest("tr[data-key]");
@@ -740,13 +797,13 @@ async function loadModWorldgen() {
       $$("tr", tbody).forEach((r) => r.classList.remove("sel"));
       tr.classList.add("sel");
       const o = worldState.mwMods[mi].options.find((x) => x.key === tr.dataset.key);
-      const sel = $(`#mwNewVal_${mi}`);
-      sel.innerHTML = o.values.map((v) => `<option value="${v.v}">${esc(v.label)} (${v.v})</option>`).join("");
-      sel.value = worldState.overrides[o.key] || o.default || "default";
-      sel.onchange = () => {
-        worldState.overrides[o.key] = sel.value;
+      if (!o) return;
+      const curVal = worldState.overrides[o.key] || o.default || "default";
+      const iconSrcs = o.img && o.atlas ? [`icons/${o.atlas}/${o.img.replace(/\.tex$/, ".png")}`] : [];
+      showWorldOptionPopup(o, curVal, iconSrcs, (val) => {
+        worldState.overrides[o.key] = val;
         loadWorldOverrides();
-      };
+      });
     };
   });
   mods.forEach((m, mi) => {
@@ -809,6 +866,7 @@ async function renderModsLocal() {
     <div class="btn-row">
       <button class="btn primary" id="saveSel">保存所选</button>
       <button class="btn" id="dlMissing">下载全部缺失</button>
+      <button class="btn" id="fetchLuaAll">补全缺失信息</button>
       <button class="btn" id="refresh">刷新</button>
       <input type="text" id="modSearch" placeholder="搜索本地模组（名称/ID）" style="width:220px" value="${esc(modsState.search || "")}">
       <span class="hint">★收藏置顶 ｜ 勾选=启用 ｜ 红色行=已启用未下载</span>
@@ -884,6 +942,19 @@ async function renderModsLocal() {
     modsState.sub = "download";
     pageMods();
   };
+  $("#fetchLuaAll").onclick = async () => {
+    // 补全缺失 modinfo.lua 的模组：已下载到本地但 modinfo 缺失/解析失败
+    const need = modsState.mods.filter((m) => m.downloaded && (m.error || !m.hasConfig)).map((m) => m.id);
+    if (!need.length) return toast("没有需要补全信息的模组");
+    toast(`正在补全 ${need.length} 个模组的信息…`);
+    let ok = 0;
+    for (const id of need) {
+      const r = await apiQuiet("mods/fetch-modinfo", { method: "POST", body: { id } });
+      if (r?.data?.success) ok++;
+    }
+    toast(`补全完成：${ok}/${need.length} 个成功`);
+    renderModsLocal();
+  };
 }
 
 async function loadModDetail(id) {
@@ -898,10 +969,12 @@ async function loadModDetail(id) {
   modsState.detail = d;
   modsState.selOpt = null;
   const mi = d.modinfo || {};
+  const inst = d.installed || {};
   const mObj = modsState.mods.find((m) => m.id === id);
-  const m_downloaded = mObj?.downloaded;
+  const m_downloaded = mObj?.downloaded || inst.downloaded;
   const m_inSetup = mObj?.inSetup;
   const stripTags = (s) => String(s || "").replace(/\[(\/?)(color|size|b|i|u|url|img)[^\]]*\]/gi, "").replace(/<[^>]+>/g, "");
+  const fmt = (v) => (typeof v === "object" ? JSON.stringify(v) : String(v));
   const badges = [
     m_downloaded ? '<span class="tag on">已下载</span>' : '<span class="tag">未下载</span>',
     d.enabled ? '<span class="tag on">已启用</span>' : '<span class="tag">未启用</span>',
@@ -909,6 +982,53 @@ async function loadModDetail(id) {
     mi.allClientsRequire ? '<span class="tag on">全员需要</span>' : "",
     ...(mObj?.tags || []).slice(0, 6).map((t) => `<span class="tag">${esc(t)}</span>`),
   ].join("");
+
+  // ---------- 安装详情 Tab 内容 ----------
+  const anomaliesHtml = (inst.anomalies && inst.anomalies.length)
+    ? inst.anomalies.map((a) => `<div style="color:var(--red);padding:2px 0">⚠ ${esc(a)}</div>`).join("")
+    : '<div style="color:var(--green)">✓ 未检测到异常</div>';
+  const localFilesHtml = inst.localFiles
+    ? Object.entries(inst.localFiles).map(([f, exists]) =>
+        `<tr><td><code>${esc(f)}</code></td><td>${exists ? '<span class="tag on">存在</span>' : '<span class="tag">缺失</span>'}</td></tr>`
+      ).join("")
+    : '<tr><td colspan="2" class="hint">（模组目录不存在）</td></tr>';
+  const installDetailHtml = `
+    <div style="display:grid;grid-template-columns:auto 1fr;gap:4px 16px;margin-bottom:12px">
+      <span class="hint">下载状态</span><span>${inst.downloaded ? '<span class="tag on">已下载</span>' : '<span class="tag">未下载</span>'}</span>
+      <span class="hint">本地版本</span><span>${esc(inst.localVersion || "-")}</span>
+      <span class="hint">下载时间</span><span>${esc(inst.downloadedAt || "-")}</span>
+      <span class="hint">是否可更新</span><span>${inst.updateAvailable ? '<span class="tag warn">有新版本</span>' : '<span class="tag on">最新</span>'}</span>
+      <span class="hint">DST 兼容</span><span>${mi.dstCompatible === false ? '<span class="tag err">不兼容</span>' : mi.dstCompatible === true ? '<span class="tag on">兼容</span>' : '<span class="hint">未知</span>'}</span>
+      <span class="hint">仅客户端</span><span>${mi.clientOnly ? "是" : "否"}</span>
+      <span class="hint">全员需要</span><span>${mi.allClientsRequire ? "是" : "否"}</span>
+    </div>
+    <h4 style="margin:12px 0 6px">本地文件检测</h4>
+    <table class="grid" style="max-width:400px"><thead><tr><th>文件</th><th>状态</th></tr></thead><tbody>${localFilesHtml}</tbody></table>
+    <h4 style="margin:12px 0 6px">异常检测</h4>
+    <div style="background:var(--hover-bg);border-radius:6px;padding:8px 12px">${anomaliesHtml}</div>
+    ${inst.modinfoAutoFetched ? '<div class="hint" style="margin-top:8px">（modinfo.lua 由面板自动补全下载）</div>' : ""}
+    ${d.changelogs && d.changelogs.length ? `
+    <h4 style="margin:12px 0 6px">更新历史</h4>
+    <div style="max-height:180px;overflow-y:auto">
+      ${d.changelogs.map((c) => `<div style="padding:4px 0;border-bottom:1px solid var(--border)"><span class="c-accent">${esc(c.date)}</span><div class="hint" style="white-space:pre-wrap">${esc(c.text).slice(0, 500)}</div></div>`).join("")}
+    </div>` : ""}
+  `;
+
+  // ---------- 配置参数 Tab 内容 ----------
+  const configHtml = d.options.length ? `
+    <div class="cols">
+      <div class="right" style="flex:1.4">
+        <table class="grid" id="optT"><thead><tr><th>设置项</th><th>设定值</th><th>默认值</th></tr></thead><tbody></tbody></table>
+      </div>
+      <div class="right" style="flex:1">
+        <label class="hint">设置项说明</label>
+        <textarea id="optHover" readonly style="min-height:70px"></textarea>
+        <div class="row"><label>选项</label><select id="optVal"></select></div>
+        <div class="row"><label>值</label><input type="text" id="optValRaw" readonly size="12"></div>
+        <div class="btn-row"><button class="btn primary" id="saveCfg">保存修改</button></div>
+      </div>
+    </div>` : `<div class="hint">该模组没有可配置项${inst.modinfoAutoFetched ? "" : "（或 modinfo.lua 尚未下载到本地，可尝试点击下方「补全信息」）"}</div>`;
+
   const popup = overlay.querySelector(".mod-detail-popup");
   popup.innerHTML = `
     <button class="popup-close" id="popupX">×</button>
@@ -921,29 +1041,44 @@ async function loadModDetail(id) {
       </div>
     </div>
     <details class="md-desc"><summary>模组描述（点击展开/收起）</summary><div class="md-desc-body">${esc(stripTags(d.description)).slice(0, 2000) || "（无描述）"}</div></details>
-    <div class="row hint" style="margin-top:10px;margin-bottom:0">
-      本地名称: ${esc(mi.name || "-")} ｜ 仅客户端: ${mi.clientOnly ? "是" : "否"} ｜ 全员需要: ${mi.allClientsRequire ? "是" : "否"}
+    <div class="btn-row" style="margin:8px 0">
+      ${!mi || inst.modinfoAutoFetched ? '<button class="btn" id="fetchLua">补全信息（下载 modinfo.lua）</button>' : ""}
+      <button class="btn" id="dlMod">下载完整模组</button>
+      ${m_downloaded || m_inSetup ? '<button class="btn danger" id="delMod">取消订阅</button>' : ""}
     </div>
-    ${m_downloaded || m_inSetup ? `<div class="btn-row" style="margin-bottom:0"><button class="btn danger" id="delMod">取消订阅（删除文件+移除配置）</button></div>` : ""}
-    <div style="margin-top:12px;border-top:1px solid var(--border);padding-top:10px">
-      <h3 style="margin:0 0 8px">配置项</h3>
-      ${d.options.length ? `
-      <div class="cols">
-        <div class="right" style="flex:1.4">
-          <table class="grid" id="optT"><thead><tr><th>设置项</th><th>设定值</th><th>默认值</th></tr></thead><tbody></tbody></table>
-        </div>
-        <div class="right" style="flex:1">
-          <label class="hint">设置项说明</label>
-          <textarea id="optHover" readonly style="min-height:70px"></textarea>
-          <div class="row"><label>选项</label><select id="optVal"></select></div>
-          <div class="row"><label>值</label><input type="text" id="optValRaw" readonly size="12"></div>
-          <div class="btn-row"><button class="btn primary" id="saveCfg">保存修改</button></div>
-        </div>
-      </div>` : '<div class="hint">该模组没有可配置项（或 modinfo.lua 尚未下载到本地）。</div>'}
+    <div class="subtabs" style="margin-top:8px">
+      <button data-tab="config" class="active">配置参数</button>
+      <button data-tab="install">安装详情</button>
     </div>
+    <div id="tabConfig">${configHtml}</div>
+    <div id="tabInstall" style="display:none">${installDetailHtml}</div>
     <div class="btn-row" style="margin-top:12px"><button class="btn" id="closePopup">关闭</button></div>`;
+
+  // ---------- Tab 切换 ----------
+  const switchTab = (tab) => {
+    $$(".subtabs button", popup).forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
+    $("#tabConfig", popup).style.display = tab === "config" ? "" : "none";
+    $("#tabInstall", popup).style.display = tab === "install" ? "" : "none";
+  };
+  $$(".subtabs button", popup).forEach((b) => (b.onclick = () => switchTab(b.dataset.tab)));
+
   $("#closePopup").onclick = () => overlay.remove();
   $("#popupX").onclick = () => overlay.remove();
+  const dlBtn = $("#dlMod");
+  if (dlBtn) dlBtn.onclick = async () => {
+    const r = await api("mods/download", { method: "POST", body: { ids: [id] } });
+    toast(r.msg);
+    startTaskPoll();
+  };
+  const fetchBtn = $("#fetchLua");
+  if (fetchBtn) fetchBtn.onclick = async () => {
+    fetchBtn.disabled = true;
+    fetchBtn.textContent = "下载中…";
+    const r = await api("mods/fetch-modinfo", { method: "POST", body: { id } });
+    toast(r.msg);
+    if (r.ok) { overlay.remove(); loadModDetail(id); }
+    else { fetchBtn.disabled = false; fetchBtn.textContent = "补全信息（下载 modinfo.lua）"; }
+  };
   const delBtn = $("#delMod");
   if (delBtn) delBtn.onclick = async () => {
     if (!(await dlgConfirm(`确定取消订阅模组 ${id}？\n将删除本地文件并从配置中彻底移除，不可恢复。`, { danger: true }))) return;
@@ -951,9 +1086,9 @@ async function loadModDetail(id) {
     toast(r.msg);
     if (r.ok) { overlay.remove(); modsState.selId = null; const j = await api("mods"); modsState.mods = j.data.mods; renderModsLocal(); }
   };
+  // ---------- 配置项交互 ----------
   if (!d.options.length) return;
   const tbody = $("#optT");
-  const fmt = (v) => (typeof v === "object" ? JSON.stringify(v) : String(v));
   d.options.forEach((o, idx) => {
     const tr = document.createElement("tr");
     const label = o.label_zh || o.label || o.name;
@@ -1884,11 +2019,15 @@ async function pageHelp() {
     <button data-h="guide" class="${helpState.sub === "guide" ? "active" : ""}">📖 开服文档</button>
     <button data-h="panel" class="${helpState.sub === "panel" ? "active" : ""}">🎛 面板功能</button>
     <button data-h="faq" class="${helpState.sub === "faq" ? "active" : ""}">❓ 常见问题</button>
+    <button data-h="tech" class="${helpState.sub === "tech" ? "active" : ""}">🔧 技术解析</button>
+    <button data-h="manual" class="${helpState.sub === "manual" ? "active" : ""}">⌨️ 手动操作</button>
+    <button data-h="migrate" class="${helpState.sub === "migrate" ? "active" : ""}">📦 模组迁移</button>
   </div>
   <div id="helpBody"></div>`;
   $$(".subtabs button").forEach((b) => (b.onclick = () => { helpState.sub = b.dataset.h; pageHelp(); }));
   const body = $("#helpBody");
-  body.innerHTML = helpState.sub === "guide" ? HELP_GUIDE : helpState.sub === "panel" ? HELP_PANEL : HELP_FAQ;
+  const helpMap = { guide: HELP_GUIDE, panel: HELP_PANEL, faq: HELP_FAQ, tech: HELP_TECH, manual: HELP_MANUAL, migrate: HELP_MIGRATE };
+  body.innerHTML = helpMap[helpState.sub] || HELP_GUIDE;
 }
 
 // ---- 章节一：完整开服文档 ----
@@ -2072,6 +2211,988 @@ const HELP_FAQ = (() => {
   ];
   return faqs.map(([q, a]) => `<details class="faq"><summary>${esc(q)}</summary><div class="faq-body">${a}</div></details>`).join("");
 })();
+
+// ---- 章节四：技术解析 ----
+const HELP_TECH = `
+<div class="card help-doc">
+  <h3>🔧 技术解析：DST 服务器内部是怎么运作的</h3>
+  <p>这一章不讲"怎么操作"，而是讲<b>"为什么是这样"</b>——服务器程序是怎么启动的、游戏文件用了哪些压缩格式、<code>.tex</code> 图片是怎么存的、文字和汉化是怎么实现的、玩家和服务器之间是怎么对话的。目标读者：没有编程基础但好奇原理的服主。</p>
+
+  <h4>一、服务器启动原理：从敲下回车到玩家能进</h4>
+  <p>服务器跑的可执行文件叫 <code>dst_server/bin64/dontstarve_dedicated_server_nullrenderer_x64</code>。名字拆开看：</p>
+  <table class="grid"><thead><tr><th>名称片段</th><th>含义</th></tr></thead><tbody>
+    <tr><td><code>dedicated_server</code></td><td>专用服务器（不是客户端，没有游戏画面）</td></tr>
+    <tr><td><code>nullrenderer</code></td><td><b>空渲染器</b>——不画任何画面，不依赖显卡，所有图形计算被替换成"空操作"。这就是它能在没有显示器的云服务器上跑的原因</td></tr>
+    <tr><td><code>x64</code></td><td>64 位版本</td></tr>
+  </tbody></table>
+  <p>启动命令长这样：</p>
+  <div class="doc-pre">dontstarve_dedicated_server_nullrenderer_x64 -cluster MyDediServer -shard Master</div>
+  <table class="grid"><thead><tr><th>启动参数</th><th>含义</th></tr></thead><tbody>
+    <tr><td><code>-cluster 名字</code></td><td>用哪个集群（对应 <code>~/.klei/DoNotStarveTogether/名字/</code> 目录）</td></tr>
+    <tr><td><code>-shard 名字</code></td><td>这个进程当哪个分片（Master 或 Caves）</td></tr>
+    <tr><td><code>-console</code></td><td>在屏幕上加一个可以直接输命令的控制台</td></tr>
+    <tr><td><code>-persistent_storage_root 路径</code></td><td>换存档根目录（默认 <code>~/.klei</code>）</td></tr>
+    <tr><td><code>-offline</code></td><td>离线模式：不连 Klei（搜不到、模组/皮肤失效，仅局域网调试用）</td></tr>
+    <tr><td><code>-tick 30</code></td><td>改服务器心跳为 30（默认 15；一般不要动）</td></tr>
+  </tbody></table>
+
+  <p>按下回车后，程序大致按以下 8 个步骤干活（括号里是日志里能看到的对应行）：</p>
+  <ol>
+    <li><b>读集群配置</b>：打开 <code>cluster.ini</code>，拿到房名、密码、人数、分片设置。（<code>Loading cluster.ini</code>）</li>
+    <li><b>验明正身</b>：读 <code>cluster_token.txt</code>，连 Klei 服务器验证 token 是否合法。<b>token 错或缺失，到这里就停了</b>。</li>
+    <li><b>解压游戏数据</b>：把 <code>data/databundles/</code> 里的几个大压缩包（下一节细讲）挂进内存，游戏的所有代码、图片、声音都在里面。</li>
+    <li><b>启动 Lua 引擎</b>：饥荒的几乎全部游戏逻辑（生物 AI、合成表、战斗、季节）都是用 <b>Lua 语言</b>写的脚本，存在 <code>scripts.zip</code> 里。引擎把 <code>scripts/main.lua</code> 跑起来，游戏世界"活"了。</li>
+    <li><b>处理模组</b>：读 <code>dedicated_server_mods_setup.lua</code>，逐个检查 <code>ServerModSetup("ID")</code> 声明的模组——本地没有或版本旧就连 Steam 创意工坊下载（<code>Downloading mod...</code>）。然后按 <code>modoverrides.lua</code> 决定哪些启用、什么参数，把启用模组的 <code>modmain.lua</code> 注入游戏。</li>
+    <li><b>加载或生成世界</b>：看 <code>save/</code> 里有没有存档——有就读档（<code>Loading world...</code>）；没有就读 <code>leveldataoverride.lua</code> 现场生成一个（<code>Generating world...</code>，第一次开服要等几分钟就在这一步）。</li>
+    <li><b>开门营业</b>：绑定 UDP 端口（Master 默认 11000），向 Steam 和 Klei 大厅注册（<code>Registering master server</code>），玩家就能搜到并连进来了。</li>
+    <li><b>进入心跳循环</b>：服务器默认每秒"走"15 步（tick rate 15），每步推进一次世界：生物动一下、饥饿扣一点、植物长一点。没玩家且 <code>pause_when_empty=true</code> 时就原地待命。</li>
+  </ol>
+  <div class="doc-tip">💡 Master 和 Caves 是<b>两个独立进程</b>，各自跑一遍上面的流程，各开一个 UDP 端口。它们启动后通过 <code>master_port</code>（默认 10889，TCP，仅限本机 127.0.0.1）握手，用 <code>cluster_key</code> 这个"暗号"互相认亲。玩家下洞穴时，Master 把玩家数据从这条内部通道递给 Caves，客户端再改连 Caves 的端口。</div>
+
+  <h4>二、压缩文件体系：databundles/ 游戏数据是怎么打包的</h4>
+  <p>打开 <code>dst_server/data/databundles/</code>，核心就这几个文件：</p>
+  <table class="grid"><thead><tr><th>文件</th><th>里面装什么</th><th>大小量级</th></tr></thead><tbody>
+    <tr><td><code>scripts.zip</code></td><td><b>全部游戏逻辑</b>：几千个 .lua 脚本（生物、物品、合成、地图生成、文本）</td><td>游戏的大脑</td></tr>
+    <tr><td><code>images.zip</code></td><td><b>全部界面/图标图集</b>：几千对 .xml + .tex</td><td>界面皮肤</td></tr>
+    <tr><td><code>anim_dynamic.zip</code></td><td>动画数据（角色/生物动作）</td><td>动作库</td></tr>
+    <tr><td><code>fonts.zip</code></td><td>字体文件</td><td>文字</td></tr>
+    <tr><td><code>shaders.zip</code></td><td>着色器（光照/特效，服务器用不上但打包在一起）</td><td>画面</td></tr>
+    <tr><td><code>klump.zip</code></td><td>其他杂项资源</td><td>—</td></tr>
+    <tr><td><code>hashes.txt</code></td><td>每个文件的校验指纹</td><td>完整性检查</td></tr>
+  </tbody></table>
+  <p><b>为什么打包成 zip？</b> 上万个几 KB 的小文件直接放硬盘又慢又碎；打成 zip 后：下载快、校验方便（<code>hashes.txt</code> 一对就知道文件坏没坏）、<code>steamcmd app_update 343050 validate</code> 能自动修复。服务器启动时把这些 zip 挂载成"虚拟文件系统"，代码里写 <code>images/inventoryimages1.xml</code> 就能读，感觉和普通文件夹一样。</p>
+  <p><b>加载优先级</b>：游戏引擎查找文件时，先查 <code>data/databundles/</code> 里的打包文件，再查 <code>data/</code> 目录下的散装文件，最后查模组提供的文件。模组文件会<b>覆盖</b>同名的原版文件——这就是模组能改游戏内容的基础。</p>
+  <div class="doc-tip">💡 <b>怎么提取 databundles 里的文件？</b> <code>scripts.zip</code> 等本质是标准 ZIP 格式，直接用 <code>unzip scripts.zip -d scripts_extracted/</code> 即可解压查看。<code>images.zip</code> 同理，但里面的 <code>.tex</code> 文件需要专门的 KTEX 解码器才能查看（下一节详解）。</p></div>
+
+  <h4>三、图片渲染：.tex 格式与 DXT 压缩算法详解（核心章节）</h4>
+  <p>游戏里所有图片都是 <code>.tex</code> 后缀，<b>不是普通图片</b>（不是 PNG/JPG），而是 Klei 私有的 KTEX 格式。社区逆向得出的文件结构如下：</p>
+
+  <h4>3.1 KTEX 文件头结构</h4>
+  <p>每个 <code>.tex</code> 文件的二进制布局：</p>
+  <div class="doc-pre">偏移    大小    字段名              说明
+─────────────────────────────────────────────────────
+0x00    4       magic               魔数：4B 54 45 58（ASCII "KTEX"，标识这是 KTEX 文件）
+0x04    4       textureType         纹理类型标志（1D/2D/3D/CubeMap，DST 中绝大多数是 2D = 0）
+0x08    4       pixelFormat         像素格式标志（包含压缩类型：DXT1/DXT5/RGBA + mipmap 标志）
+0x0C    2       width               图片宽度（像素）
+0x0E    2       height              图片高度（像素）
+0x10    1       numMipMaps          mipmap 等级数（0=只有原图，>0=带多级缩小版）
+...
+之后是 per-mipmap-level 数据块：
+  - pitchOrLinearSize（4 字节）：这一级数据的字节大小（DXT 格式用线性大小，RGBA 用 pitch=宽×4）
+  - pixel data：实际的像素/压缩数据</div>
+  <table class="grid"><thead><tr><th>字段</th><th>类型</th><th>说明</th></tr></thead><tbody>
+    <tr><td><code>magic</code></td><td>4 字节</td><td>魔数 <code>4B 54 45 58</code>（ASCII "KTEX"），校验文件身份，不匹配则拒绝加载</td></tr>
+    <tr><td><code>textureType</code></td><td>4 字节</td><td>纹理类型：0=2D 纹理（DST 中绝大多数），其他值表示 1D/3D/立方体贴图</td></tr>
+    <tr><td><code>pixelFormat</code></td><td>4 字节</td><td>像素格式标志位，包含压缩类型（DXT1 / DXT5 / RGBA8888）和是否含 mipmap</td></tr>
+    <tr><td><code>width / height</code></td><td>各 2 字节</td><td>原图的像素宽度和高度</td></tr>
+    <tr><td><code>numMipMaps</code></td><td>1 字节</td><td>mipmap 等级数量（0 表示只有原始分辨率，不生成缩小版）</td></tr>
+    <tr><td><code>pitchOrLinearSize</code></td><td>4 字节/级</td><td>每级 mipmap 的数据字节大小</td></tr>
+  </tbody></table>
+
+  <h4>3.2 DXT 块压缩原理：为什么 .tex 这么小</h4>
+  <p>DXT（也叫 S3TC）是<b>显卡原生支持的块纹理压缩格式</b>。它的核心思想：不是逐像素存储颜色，而是把图像按 <b>4×4 像素块</b>分组，每个块只存 2 个参考颜色 + 索引表，通过插值还原出 16 个像素的颜色。</p>
+
+  <p><b>DXT1（最小，8 字节/块）：</b></p>
+  <ul>
+    <li>每个 4×4 像素块占用 <b>8 字节</b> = 2 个 16 位 RGB565 参考颜色（各 2 字节）+ 4 字节索引表（16 个像素 × 2 位/像素 = 32 位 = 4 字节）</li>
+    <li>只能表示 <b>4 种颜色</b>（2 个参考色 + 2 个插值色），适合没有透明通道的贴图</li>
+    <li>压缩比：原图 RGBA = 4 字节/像素，DXT1 = 0.5 字节/像素，<b>压缩 8 倍</b></li>
+    <li>如果启用 1-bit alpha 模式，第 4 种颜色变成透明，适合做栅栏、树叶等镂空贴图</li>
+  </ul>
+
+  <p><b>DXT5（带透明度，16 字节/块）：</b></p>
+  <ul>
+    <li>每个 4×4 像素块占用 <b>16 字节</b> = 2 个 8 位 alpha 参考值（各 1 字节）+ 16 个 3 位 alpha 索引（6 字节）+ 2 个 16 位 RGB565 参考颜色（4 字节）+ 4 字节颜色索引表</li>
+    <li>颜色部分和 DXT1 一样（4 种颜色），但额外有 <b>8 级透明度</b>（2 个参考值插值出 6 级 + 2 个参考值本身 + 完全透明）</li>
+    <li>适合有半透明效果的贴图（烟雾、光晕、渐变阴影）</li>
+    <li>压缩比：RGBA 16 字节/4×4 块 → DXT5 16 字节/4×4 块 = 压缩 4 倍</li>
+  </ul>
+
+  <h4>3.3 DXT 解压算法（逐步拆解）</h4>
+  <p>把一个 DXT1 4×4 块还原成 16 个像素，算法步骤如下：</p>
+  <div class="doc-pre">对图像中每一个 4×4 像素块：
+  ① 读取 color0（16 位 RGB565 参考颜色 0）→ 转成 RGB
+  ② 读取 color1（16 位 RGB565 参考颜色 1）→ 转成 RGB
+  ③ 根据 color0 和 color1 的大小关系，计算 2 个插值颜色：
+     - 如果 color0 > color1（不透明模式）：
+         color2 = (2×color0 + color1) / 3   （三分之二混色）
+         color3 = (color0 + 2×color1) / 3   （三分之一混色）
+     - 如果 color0 ≤ color1（1-bit alpha 模式）：
+         color2 = (color0 + color1) / 2     （五五混色）
+         color3 = 透明（RGB=0, alpha=0）
+  ④ 读取 4 字节（32 位）索引表，每 2 位代表一个像素的查表值（0~3）
+  ⑤ 按 2 位索引从 [color0, color1, color2, color3] 查出该像素的颜色
+  ⑥ 16 个像素排成 4×4 矩阵 → 这一块就还原了</div>
+  <table class="grid"><thead><tr><th>索引值</th><th>DXT1 不透明模式</th><th>DXT1 1-bit alpha 模式</th></tr></thead><tbody>
+    <tr><td><code>0b00</code></td><td>color0（参考色 0）</td><td>color0</td></tr>
+    <tr><td><code>0b01</code></td><td>color1（参考色 1）</td><td>color1</td></tr>
+    <tr><td><code>0b10</code></td><td>color2 = 2/3 混色</td><td>color2 = 1/2 混色</td></tr>
+    <tr><td><code>0b11</code></td><td>color3 = 1/3 混色</td><td>透明</td></tr>
+  </tbody></table>
+  <div class="doc-tip">💡 RGB565 是 16 位颜色格式：红色 5 位（32 级）、绿色 6 位（64 级，人眼对绿色最敏感所以多一位）、蓝色 5 位（32 级）。转成 24 位 RGB 时需要左移补齐：R = (r5 &lt;&lt; 3) | (r5 &gt;&gt; 2)。</div>
+
+  <h4>3.4 KTEX 特有坑：像素行翻转</h4>
+  <div class="doc-warn">⚠ 解码 KTEX 时发现一个关键坑：KTEX 的像素排列方向和常规图片<b>相反</b>——像素行是上下翻转的（bottom-up，而非标准图像的 top-down）。解码后必须<b>垂直翻转（沿水平中线翻转 180°）</b>才是正确的图像。如果不翻转，图片就是上下颠倒的。本面板的 KTEX 解码器就包含了这一步翻转逻辑。</div>
+
+  <h4>3.5 为什么用 GPU 原生格式</h4>
+  <p>DXT1/DXT5 是<b>显卡硬件直接支持的纹理格式</b>。这意味着游戏引擎把 <code>.tex</code> 数据读进内存后，<b>不需要 CPU 解压缩</b>，可以直接原样上传到 GPU 显存作为纹理使用。GPU 在渲染时实时按需解压。好处：</p>
+  <ul>
+    <li><b>省显存</b>：DXT5 比 RGBA8888 省 75% 显存，DXT1 省 87.5%</li>
+    <li><b>省带宽</b>：纹理数据量小，从内存到显存传输快</li>
+    <li><b>零 CPU 开销</b>：不需要软件解码，启动更快</li>
+  </ul>
+  <div class="doc-tip">💡 这就是为什么 <code>.tex</code> 文件不能直接用图片查看器打开——图片查看器不认识 DXT 格式，必须先解码成 PNG/RGBA 才能显示。本面板内置了 KTEX→PNG 解码器，才能在网页上显示模组图标。</div>
+
+  <h4>3.6 RGBA 模式（无压缩）</h4>
+  <p>少数 <code>.tex</code> 文件使用未压缩的 RGBA8888 格式（pixelFormat 标志位标识）。这种情况下每个像素直接存 4 字节（R, G, B, Alpha 各 1 字节），不需要 DXT 解压——读取后直接就是完整的像素数据。特点是画质无损但文件体积大（一张 256×256 图片 = 256×256×4 = 262144 字节 ≈ 256KB）。</p>
+
+  <h4>四、图集系统：.xml Atlas 详解</h4>
+  <h4>4.1 什么是图集（Atlas）</h4>
+  <p>游戏里小图标成千上万（物品栏、合成栏、设置项……），如果每张一个文件，读取会非常慢。Klei 的解决办法是<b>图集</b>：把几百张小图拼进一张大贴图（比如 <code>inventoryimages1.tex</code>），再配一个同名 <code>.xml</code> 当"地图册目录"，记录每张小图在大图中的位置。</p>
+
+  <h4>4.2 XML 结构</h4>
+  <div class="doc-pre">&lt;Atlas&gt;
+  &lt;Texture filename="inventoryimages1.tex" /&gt;
+  &lt;Elements&gt;
+    &lt;Element name="log.tex"    u1="0.001" v1="0.002" u2="0.050" v2="0.060" /&gt;
+    &lt;Element name="rocks.tex"  u1="0.051" v1="0.002" u2="0.100" v2="0.060" /&gt;
+    &lt;Element name="flint.tex"  u1="0.101" v1="0.002" u2="0.150" v2="0.060" /&gt;
+    ...（几百个 Element）
+  &lt;/Elements&gt;
+&lt;/Atlas&gt;</div>
+  <table class="grid"><thead><tr><th>参数</th><th>含义</th></tr></thead><tbody>
+    <tr><td><code>filename="xxx.tex"</code></td><td>这张图集对应的大贴图文件名（<code>&lt;Texture&gt;</code> 标签里）</td></tr>
+    <tr><td><code>name="log.tex"</code></td><td>这块小图的<b>查找名字</b>（正好对应物品代码 <code>log</code> = 木头）。游戏代码要画"木头图标"时就拿这个名字去查</td></tr>
+    <tr><td><code>u1 / v1</code></td><td>小图在大图上的<b>左上角 UV 坐标</b>，0.0~1.0 归一化比例（u=横向、v=纵向）。如 <code>u1=0.05</code> 表示从大图左边 5% 处开始</td></tr>
+    <tr><td><code>u2 / v2</code></td><td>小图在大图上的<b>右下角 UV 坐标</b>，0.0~1.0 归一化比例</td></tr>
+  </tbody></table>
+
+  <h4>4.3 UV → 像素转换</h4>
+  <p>UV 是归一化坐标（0.0~1.0），要转成像素只需乘以大图的尺寸：</p>
+  <div class="doc-pre">假设大图 inventoryimages1.tex 宽度=2048 像素，高度=2048 像素
+小图 log.tex 的 UV：u1=0.001 v1=0.002 u2=0.050 v2=0.060
+
+像素坐标：
+  左上角 x = u1 × 2048 = 0.001 × 2048 = 2    像素
+  左上角 y = v1 × 2048 = 0.002 × 2048 = 4    像素
+  右下角 x = u2 × 2048 = 0.050 × 2048 = 102  像素
+  右下角 y = v2 × 2048 = 0.060 × 2048 = 123  像素
+
+→ 从大图 (2,4) 到 (102,123) 的矩形区域就是木头图标
+→ 宽度 = 100 像素，高度 ≈ 119 像素</div>
+
+  <h4>4.4 真实图集文件</h4>
+  <table class="grid"><thead><tr><th>图集文件</th><th>内容</th></tr></thead><tbody>
+    <tr><td><code>images/inventoryimages1.xml</code> ~ <code>inventoryimages4.xml</code></td><td>四张巨型图集装下<b>全部原版物品图标</b>（3000+ 个 Element）</td></tr>
+    <tr><td><code>images/worldgen_customization.xml</code></td><td>开房界面"世界生成"每个选项的图标</td></tr>
+    <tr><td><code>images/worldsettings_customization.xml</code></td><td>开房界面"世界设置"每个选项的图标</td></tr>
+    <tr><td><code>minimap/*.xml</code></td><td>小地图图标的图集</td></tr>
+    <tr><td>模组 <code>images/inventoryimages.xml</code></td><td>模组自己物品的图标图集</td></tr>
+    <tr><td>模组 <code>modicon.xml + modicon.tex</code></td><td>模组列表里显示的模组图标</td></tr>
+  </tbody></table>
+  <div class="doc-tip">💡 本面板"物品带图搜索"功能原理：启动时把 4 个物品图集 XML 读进内存，建成"物品代码 → 在哪张图集、什么坐标"的字典；网页上搜"木头"就按坐标把对应小图从解码好的 PNG 大图里裁出来显示。</div>
+
+  <h4>五、声音系统：FMOD 引擎</h4>
+  <p>DST 使用 <b>FMOD 音频引擎</b>，声音资源分两种文件：</p>
+  <table class="grid"><thead><tr><th>文件类型</th><th>内容</th><th>作用</th></tr></thead><tbody>
+    <tr><td><code>.fev</code></td><td>音频事件定义（FMOD Event）</td><td>定义"什么动作触发什么声音"的事件表，如 <code>dont_starve/characters/wilson/hit</code></td></tr>
+    <tr><td><code>.fsb</code></td><td>音频数据包（FMOD Sound Bank）</td><td>实际的声音波形数据打包在一起</td></tr>
+  </tbody></table>
+  <p>客户端启动时加载 <code>.fev</code> 事件表和 <code>.fsb</code> 音频包，游戏逻辑触发某个事件名时 FMOD 就播放对应声音。<b>服务器端（nullrenderer）不加载也不播放任何声音</b>——声音只在客户端处理。所以服务端的 <code>sound/</code> 目录基本是闲置的。</p>
+
+  <h4>六、动画系统：.anim / .bin 骨骼动画</h4>
+  <p>DST 的角色和生物动画使用 Klei 自研的骨骼动画系统，资源文件如下：</p>
+  <table class="grid"><thead><tr><th>文件</th><th>内容</th></tr></thead><tbody>
+    <tr><td><code>anim.bin</code></td><td>动画帧数据：每一帧每个骨骼部件的位置、旋转、缩放，以及动画事件标记</td></tr>
+    <tr><td><code>build.bin</code></td><td>构建数据：骨骼层级结构 + 每个部件绑定的贴图（来自 atlas 图集）</td></tr>
+    <tr><td>atlas (.xml + .tex)</td><td>部件贴图图集，<code>build.bin</code> 里的部件通过 UV 从图集中取图</td></tr>
+  </tbody></table>
+  <p>三者配合的渲染流程：代码要播放动画"wilson/run"→ <code>anim.bin</code> 读取这一帧每个骨骼部件的变换矩阵 → <code>build.bin</code> 知道每个部件对应图集里的哪个区域 → 从 atlas 取出贴图 → 按变换矩阵画到屏幕上。服务端只关心碰撞体积等<b>逻辑数据</b>（用于判定攻击范围、可拾取区域），不关心视觉表现。</p>
+  <div class="doc-tip">💡 模组内部的角色/物品动画资源（<code>anim/</code> 里）又是 zip 打包——<b>套娃式打包</b>：角色/物品的动画包 <code>.zip</code> 里有 <code>anim.bin</code>、<code>build.bin</code>、atlas 贴图。</div>
+
+  <h4>七、翻译模块详解</h4>
+  <h4>7.1 STRINGS 表结构</h4>
+  <p>饥荒所有文本都集中在一个 Lua 大表 <code>STRINGS</code>（在 <code>scripts.zip</code> 的 <code>scripts/strings.lua</code>，约 839KB / 80 多万字节）里，按层级嵌套组织：</p>
+  <div class="doc-pre">STRINGS.NAMES.LOG = "Log"                         -- 物品名：木头
+STRINGS.RECIPE_DESC.AXE = "Chop down trees!"    -- 合成描述：斧头
+STRINGS.CHARACTERS.WILSON.DESCRIBE.AXE = "..."  -- 威尔逊检查斧头的台词
+STRINGS.UI.CUSTOMIZATIONSCREEN.SETTINGS.XXX      -- 世界设置项的名字
+STRINGS.NAMES.SPIDIDER = "Spider"                -- 生物名：蜘蛛</div>
+  <p>游戏界面要显示一句话时，就到这张表里按键查找。每一句游戏内可见的文字——物品名、描述、角色台词、UI 按钮、世界设置项——都能在这张表里找到对应条目。<b>改文字 = 改这张表</b>，这给汉化留了标准入口。</p>
+
+  <h4>7.2 .po 文件格式详解</h4>
+  <p>翻译存放在 <code>scripts/languages/*.po</code> 里。po 是 GNU gettext 标准（业界通用的翻译格式），每个条目由多个字段组成：</p>
+  <div class="doc-pre"># STRINGS.NAMES.LOG                        ← #. 注释：注释行，记录对应的 STRINGS 键路径
+msgctxt "STRINGS.NAMES.LOG"                 ← msgctxt：上下文，等于 STRINGS 键路径（用于精确匹配）
+msgid "Log"                                 ← msgid：英文原文（翻译源）
+msgstr "木头"                               ← msgstr：翻译后的文字（中文译文）
+
+# STRINGS.RECIPE_DESC.AXE
+msgctxt "STRINGS.RECIPE_DESC.AXE"
+msgid "Chop down trees!"
+msgstr "砍倒大树！"</div>
+  <table class="grid"><thead><tr><th>.po 字段</th><th>含义</th></tr></thead><tbody>
+    <tr><td><code>#.</code>（注释行）</td><td>注释，记录这一条翻译对应的 STRINGS 键路径，方便译者定位</td></tr>
+    <tr><td><code>msgctxt</code></td><td>上下文标记，等于 STRINGS 键路径（如 <code>STRINGS.NAMES.LOG</code>），用于精确匹配同义词（英文 "Log" 既是物品名也是动词，靠 msgctxt 区分）</td></tr>
+    <tr><td><code>msgid</code></td><td>英文原文（待翻译的源文本），在 STRINGS 表里查到的英文值</td></tr>
+    <tr><td><code>msgstr</code></td><td>翻译后的目标语言文字，空字符串 <code>""</code> 表示尚未翻译</td></tr>
+  </tbody></table>
+  <p>启动时游戏按语言设置，遍历 <code>.po</code> 文件，用每条的 <code>msgctxt</code> 在 STRINGS 表里找到对应键，把英文 <code>msgid</code> 替换成 <code>msgstr</code> 译文。</p>
+
+  <h4>7.3 语言加载流程</h4>
+  <div class="doc-pre">玩家在客户端设置里选"简体中文"
+→ locale 代码 = "zh"（或 "zhr" 繁体）
+→ loc.lua（语言加载器）读取语言映射表
+→ 执行 LoadPOFile("chinese_s.po", "zh")
+→ 遍历 .po 中每一条：
+    msgctxt = "STRINGS.NAMES.LOG"
+    msgid  = "Log"
+    msgstr = "木头"
+  → 在 STRINGS 表中按 msgctxt 路径找到 STRINGS.NAMES.LOG
+  → 把它的值从 "Log" 替换成 "木头"
+→ 全部替换完成，游戏界面变成中文</div>
+
+  <h4>7.4 官方内置的 15 个语言文件</h4>
+  <table class="grid"><thead><tr><th>.po 文件</th><th>语言</th><th>备注</th></tr></thead><tbody>
+    <tr><td><code>strings.pot</code></td><td>翻译模板</td><td>所有待译原文，给其他语言做底子（不是具体语言）</td></tr>
+    <tr><td><code>chinese_s.po</code></td><td><b>简体中文</b></td><td>官方全量翻译，约 1700 万字节</td></tr>
+    <tr><td><code>chinese_t.po</code></td><td>繁体中文</td><td>—</td></tr>
+    <tr><td><code>japanese.po</code></td><td>日语</td><td>—</td></tr>
+    <tr><td><code>korean.po</code></td><td>韩语</td><td>—</td></tr>
+    <tr><td><code>french.po</code></td><td>法语</td><td>—</td></tr>
+    <tr><td><code>german.po</code></td><td>德语</td><td>—</td></tr>
+    <tr><td><code>spanish.po</code></td><td>西班牙语</td><td>—</td></tr>
+    <tr><td><code>spanish_mex.po</code></td><td>墨西哥西班牙语</td><td>—</td></tr>
+    <tr><td><code>portuguese_br.po</code></td><td>巴西葡萄牙语</td><td>—</td></tr>
+    <tr><td><code>italian.po</code></td><td>意大利语</td><td>—</td></tr>
+    <tr><td><code>polish.po</code></td><td>波兰语</td><td>—</td></tr>
+    <tr><td><code>russian.po</code></td><td>俄语</td><td>—</td></tr>
+  </tbody></table>
+  <p>配套文件：<code>loc.lua</code>（语言加载器，负责读 po、替换 STRINGS）、<code>language.lua</code>（语言列表定义，定义每种语言的显示名和 locale 代码）。</p>
+
+  <h4>7.5 字体缩放（每种语言不同）</h4>
+  <p>不同语言的字符宽高比例差异很大，DST 为每种语言设置了不同的字体缩放系数，防止文字溢出 UI 边界：</p>
+  <table class="grid"><thead><tr><th>语言</th><th>字体缩放</th><th>原因</th></tr></thead><tbody>
+    <tr><td>英语</td><td>1.0（基准）</td><td>默认尺寸</td></tr>
+    <tr><td>简体中文</td><td>0.85</td><td>汉字方块字比英文字母宽，缩小 15% 才不溢出 UI</td></tr>
+    <tr><td>繁体中文</td><td>0.85</td><td>同上</td></tr>
+    <tr><td>日语 / 韩语</td><td>0.85~0.90</td><td>同样使用宽字符</td></tr>
+    <tr><td>俄语</td><td>0.90</td><td>西里尔字母略宽</td></tr>
+  </tbody></table>
+
+  <h4>7.6 两种模组汉化方法</h4>
+  <p><b>方法 A：.po 文件 + LoadPOFile（推荐，和官方机制一致）</b></p>
+  <div class="doc-pre">-- 在模组的 modmain.lua 中：
+local lang = locale ~= nil and (locale == "zh" or locale == "zhr") and "zh" or "en"
+if lang == "zh" then
+    -- 读取模组自带的 .po 文件替换 STRINGS
+    LoadPOFile("DST_chs.po", "zh")
+end</div>
+  <p><b>方法 B：直接 STRINGS 赋值（简单粗暴）</b></p>
+  <div class="doc-pre">-- 在模组的 modmain.lua 中直接赋值：
+if locale == "zh" then
+    GLOBAL.STRINGS.NAMES.CUSTOM_ITEM = "自定义物品"
+    GLOBAL.STRINGS.RECIPE_DESC.CUSTOM_ITEM = "这是一个自定义物品"
+end</div>
+
+  <h4>7.7 中文语言包模组实例（workshop-1301033176）</h4>
+  <p>创意工坊的"中文语言包"类模组（如 workshop-1301033176）的实现方式：</p>
+  <ul>
+    <li>自带 <code>DST_chs.po</code> 文件，包含大量模组词条的中文翻译；</li>
+    <li>在 <code>modmain.lua</code> 中调用 <code>LoadPOFile("DST_chs.po", "zh")</code> 载入翻译；</li>
+    <li>还会<b>修补 Lua 的 string.match 函数</b>——因为 DST 原版代码中有一些用英文正则匹配字符串的逻辑，中文字符在某些 Lua 版本下会导致 string.match 报错（Unicode 编码问题），语言包通过 monkey-patch 修复这个 bug；</li>
+    <li>这种模组不添加任何游戏内容，只做翻译覆盖。</li>
+  </ul>
+
+  <h4>7.8 为什么语言包必须最后加载</h4>
+  <p>模组的文本覆盖遵循<b>"后来居上"</b>规则：模组按 <code>modoverrides.lua</code> 中的顺序逐个加载，后加载的 STRINGS 赋值会盖掉先加载的。所以：</p>
+  <ul>
+    <li>玩法模组先加载（它们往 STRINGS 里写英文或自带翻译）；</li>
+    <li><b>汉化包最后加载</b>——它最后"盖章"，才能把前面所有模组的文本统一刷成中文。</li>
+  </ul>
+  <div class="doc-warn">⚠ 顺序反了，就会出现"一半中文一半英文"。本面板会自动识别语言包类模组（目录里含 <code>DST_chs.po</code> 这类文件的），启动排序时<b>强制排在最后</b>，就是这个原理。</div>
+
+  <h4>八、网络通信：客户端与服务器全端口交互图</h4>
+  <div class="doc-pre">┌─────────────────────────────────────────────────────────┐
+│                     玩家客户端（游戏）                      │
+│  ┌───────────────────────────────────────────────────┐  │
+│  │  Steam 层：身份认证 / 好友邀请 / 创意工坊下载          │  │
+│  └───────────────────────────────────────────────────┘  │
+└──────────┬──────────────────┬────────────────┬──────────┘
+           │ UDP 11000         │ UDP 27018      │ UDP 8768
+           │ (游戏数据)         │ (Steam查询)     │ (Steam认证)
+           ▼                   ▼                ▼
+┌──────────────────────────────────────────────────────────┐
+│  Master 进程（地上世界）  端口 11000                        │
+│  ├── 11000 UDP   游戏数据（玩家移动/聊天/世界同步）          │
+│  ├── 27018 UDP   Steam 主服务器查询（服务器列表信息）        │
+│  ├── 8768  UDP   Steam 身份认证（验证 Steam 票据）          │
+│  └── 10889 TCP   分片内部通信（仅 127.0.0.1）              │
+│         │                                                 │
+│         │ TCP 10889（cluster_key 握手）                     │
+│         ▼                                                 │
+│  Caves 进程（地下世界）  端口 11001                        │
+│  ├── 11001 UDP   游戏数据（玩家在洞穴中的同步）              │
+│  ├── 27019 UDP   Steam 主服务器查询                        │
+│  └── 8769  UDP   Steam 身份认证                            │
+└──────────────────────────────────────────────────────────┘</div>
+  <table class="grid"><thead><tr><th>端口</th><th>协议</th><th>用途</th><th>对外开放</th></tr></thead><tbody>
+    <tr><td>11000</td><td>UDP</td><td>Master 游戏数据端口（玩家进出/移动/聊天/世界同步）</td><td>✅ 必须</td></tr>
+    <tr><td>11001</td><td>UDP</td><td>Caves 游戏数据端口（同上，洞穴世界）</td><td>✅ 必须</td></tr>
+    <tr><td>27018 / 27019</td><td>UDP</td><td>Steam 主服务器端口（服务器列表查询/Steam 浏览器信息）</td><td>✅ 必须</td></tr>
+    <tr><td>8768 / 8769</td><td>UDP</td><td>Steam 认证端口（验证玩家 Steam 身份票据）</td><td>✅ 必须</td></tr>
+    <tr><td>10889</td><td>TCP</td><td>分片内部通信（Master ↔ Caves 玩家数据传递）</td><td>❌ 仅 127.0.0.1</td></tr>
+  </tbody></table>
+  <p><b>玩家进服全过程</b>（6 步）：</p>
+  <ol>
+    <li><b>发现</b>：服务器启动时向 Steam/Klei 大厅注册（房名、人数、标签、要不要密码）。玩家"浏览游戏"时看到的就是这些注册信息。</li>
+    <li><b>敲门</b>：客户端连服务器的 UDP 11000 端口，先发认证数据（Steam 身份 → 换成 KU_ID）。</li>
+    <li><b>过闸</b>：服务器依次检查——token 有效吗？房间满了吗？<b>在 blocklist.txt 黑名单里吗？</b> 密码对吗？任何一关不过就拒连。</li>
+    <li><b>对模组</b>：服务器告诉客户端"我用了这些模组、这些版本"。客户端缺的/版本旧的，当场从创意工坊自动下载（<code>all_clients_require_mod=true</code> 的强制，缺了就进不来）。</li>
+    <li><b>进世界</b>：服务器把玩家出生点附近的世界状态发给客户端；之后客户端只收"你周围发生了什么"，远处的不传（省流量）。</li>
+    <li><b>换世界</b>：下洞穴时客户端被转接到 Caves 的 11001 端口。</li>
+  </ol>
+  <div class="doc-tip">💡 本面板<b>不改游戏任何协议</b>，它只是把"本来要手动做的事"搬到网页上：改配置 → 替你写 <code>cluster.ini</code> / <code>server.ini</code> / <code>modoverrides.lua</code>；控制台 → 替你发远程命令（就是日志里那些 <code>print("DSTPANEL"...)</code> 的 RemoteCommandInput）；看日志/聊天 → 替你读 <code>server_log.txt</code> / <code>server_chat_log.txt</code>。面板会的一切，纯手工都能做——面板只是快和不容易错。</div>
+</div>`;
+
+// ---- 章节五：无面板手动操作完全指南 ----
+const HELP_MANUAL = `
+<div class="card help-doc">
+  <h3>⌨️ 手动操作完全指南：不用面板也能管理服务器</h3>
+  <p>这一章教你<b>完全不用面板</b>，纯用命令行管理 DST 服务器。适合理解底层原理、排查面板故障、或在没装面板的机器上开服。每个命令都标注了参数含义。</p>
+
+  <h4>一、从零搭建：完整命令链</h4>
+  <h4>1.1 装系统依赖（root 执行）</h4>
+  <div class="doc-pre">apt-get update
+apt-get install -y lib32gcc-s1 lib32stdc++6 screen wget tar</div>
+  <table class="grid"><thead><tr><th>部分</th><th>含义</th></tr></thead><tbody>
+    <tr><td><code>apt-get update</code></td><td>刷新"软件商店目录"（不装东西，只更新清单）</td></tr>
+    <tr><td><code>install -y</code></td><td>安装，<code>-y</code> 自动确认所有提示</td></tr>
+    <tr><td><code>lib32gcc-s1</code></td><td>32 位 GCC 运行库——SteamCMD 是 32 位程序，64 位系统必须装</td></tr>
+    <tr><td><code>lib32stdc++6</code></td><td>32 位 C++ 标准库，同上</td></tr>
+    <tr><td><code>screen</code></td><td>虚拟终端工具：让服务器在后台跑，随时能接进去看</td></tr>
+    <tr><td><code>wget</code></td><td>命令行下载工具</td></tr>
+    <tr><td><code>tar</code></td><td>解压工具</td></tr>
+  </tbody></table>
+
+  <h4>1.2 创建运行用户（root 执行）</h4>
+  <div class="doc-pre">useradd -m -s /bin/bash steam
+su - steam</div>
+  <table class="grid"><thead><tr><th>部分</th><th>含义</th></tr></thead><tbody>
+    <tr><td><code>useradd</code></td><td>创建新用户</td></tr>
+    <tr><td><code>-m</code></td><td>顺便创建主目录 <code>/home/steam</code>（make home）</td></tr>
+    <tr><td><code>-s /bin/bash</code></td><td>指定登录 shell 为 bash</td></tr>
+    <tr><td><code>su - steam</code></td><td>切换成 steam 用户；<code>-</code> 表示连环境变量一起切，少了它路径会错</td></tr>
+  </tbody></table>
+  <div class="doc-tip">💡 为什么要单独用户：安全。游戏服被入侵时，攻击者只有 steam 权限，动不了系统。</div>
+
+  <h4>1.3 下载 SteamCMD（steam 用户执行）</h4>
+  <div class="doc-pre">mkdir -p ~/steamcmd && cd ~/steamcmd
+wget https://steamcdn-a.akamaihd.net/client/installer/steamcmd_linux.tar.gz
+tar -xzf steamcmd_linux.tar.gz</div>
+  <table class="grid"><thead><tr><th>部分</th><th>含义</th></tr></thead><tbody>
+    <tr><td><code>mkdir -p</code></td><td>创建目录；<code>-p</code> 父目录不存在也建且已存在不报错</td></tr>
+    <tr><td><code>&amp;&amp;</code></td><td>前一条成功才执行后一条</td></tr>
+    <tr><td><code>tar -xzf</code></td><td>解压：x=解压、z=gzip 格式、f=后面跟文件名</td></tr>
+  </tbody></table>
+
+  <h4>1.4 下载游戏服务端（最长的一步，几个 GB）</h4>
+  <div class="doc-pre">cd ~/steamcmd
+./steamcmd.sh +force_install_dir /home/steam/dst_server +login anonymous +app_update 343050 validate +quit</div>
+  <table class="grid"><thead><tr><th>部分</th><th>含义</th></tr></thead><tbody>
+    <tr><td><code>./steamcmd.sh</code></td><td>运行当前目录下的 steamcmd 脚本</td></tr>
+    <tr><td><code>+force_install_dir /home/steam/dst_server</code></td><td>指定安装目录，<b>必须在 login 之前</b>，否则装到默认位置</td></tr>
+    <tr><td><code>+login anonymous</code></td><td>匿名登录 Steam（下载服务端不需要账号）</td></tr>
+    <tr><td><code>+app_update 343050</code></td><td>下载 AppID <b>343050</b>（DST 专用服务端的编号）</td></tr>
+    <tr><td><code>validate</code></td><td>校验文件完整性，坏了自动重下</td></tr>
+    <tr><td><code>+quit</code></td><td>干完活退出</td></tr>
+  </tbody></table>
+  <div class="doc-warn">⚠ 以后<b>更新游戏版本</b>就是原样再跑一遍这条命令。</div>
+
+  <h4>二、目录创建与配置文件</h4>
+  <h4>2.1 创建集群目录</h4>
+  <div class="doc-pre">mkdir -p ~/.klei/DoNotStarveTogether/MyDediServer/Master
+mkdir -p ~/.klei/DoNotStarveTogether/MyDediServer/Caves</div>
+  <table class="grid"><thead><tr><th>路径</th><th>含义</th></tr></thead><tbody>
+    <tr><td><code>~/.klei/DoNotStarveTogether/</code></td><td>DST 服务端写死的默认存档根目录</td></tr>
+    <tr><td><code>MyDediServer</code></td><td>集群名=文件夹名，启动时 <code>-cluster</code> 参数要对上</td></tr>
+    <tr><td><code>Master/</code></td><td>地面世界分片目录</td></tr>
+    <tr><td><code>Caves/</code></td><td>洞穴世界分片目录</td></tr>
+  </tbody></table>
+
+  <h4>2.2 cluster.ini 全参数详解</h4>
+  <p>创建 <code>~/.klei/DoNotStarveTogether/MyDediServer/cluster.ini</code>：</p>
+  <div class="doc-pre">[GAMEPLAY]
+game_mode = survival
+max_players = 6
+pvp = false
+pause_when_empty = false
+intention = cooperative
+vote_kick_enabled = false
+
+[NETWORK]
+cluster_name = My DST Server
+cluster_description = A dedicated server for friends
+cluster_password =
+lan_only_cluster = false
+offline_cluster = false
+whitelist_slots = 0
+tick_rate = 15
+
+[MISC]
+console_enabled = true
+max_snapshots = 6
+autosaver_enabled = true
+
+[SHARD]
+shard_enabled = true
+bind_ip = 127.0.0.1
+master_ip = 127.0.0.1
+master_port = 10889
+cluster_key = supersecretkey</div>
+  <p><b>[GAMEPLAY] 玩法段：</b></p>
+  <table class="grid"><thead><tr><th>字段</th><th>可选值</th><th>含义</th></tr></thead><tbody>
+    <tr><td><code>game_mode</code></td><td><code>survival</code></td><td>生存模式：死变鬼魂，全员死亡开始世界重置倒计时</td></tr>
+    <tr><td></td><td><code>endless</code></td><td>无尽模式：随时在出生门复活，世界永不重置</td></tr>
+    <tr><td></td><td><code>relaxed</code></td><td>轻松模式：难度低，适合新手</td></tr>
+    <tr><td></td><td><code>wilderness</code></td><td>荒野模式：无出生门，死了随机地点复活</td></tr>
+    <tr><td><code>max_players</code></td><td>1~64</td><td>同时在线人数上限（推荐 ≤6，人多吃配置）</td></tr>
+    <tr><td><code>pvp</code></td><td><code>true/false</code></td><td>玩家能否互相攻击</td></tr>
+    <tr><td><code>pause_when_empty</code></td><td><code>true/false</code></td><td>没人时暂停世界（true 省 CPU）</td></tr>
+    <tr><td><code>intention</code></td><td><code>cooperative</code> / <code>social</code> / <code>competitive</code> / <code>madness</code></td><td>服务器列表的风格标签</td></tr>
+    <tr><td><code>vote_kick_enabled</code></td><td><code>true/false</code></td><td>允许玩家投票踢人（小服建议 false）</td></tr>
+  </tbody></table>
+  <p><b>[NETWORK] 网络段：</b></p>
+  <table class="grid"><thead><tr><th>字段</th><th>含义</th></tr></thead><tbody>
+    <tr><td><code>cluster_name</code></td><td>房间名（玩家列表里看到的）</td></tr>
+    <tr><td><code>cluster_description</code></td><td>房间简介</td></tr>
+    <tr><td><code>cluster_password</code></td><td>进房密码；留空=公开房</td></tr>
+    <tr><td><code>lan_only_cluster</code></td><td>true=只在局域网可见</td></tr>
+    <tr><td><code>offline_cluster</code></td><td>true=完全离线（模组和皮肤失效，别用）</td></tr>
+    <tr><td><code>whitelist_slots</code></td><td>白名单预留位置数（0=不预留）</td></tr>
+    <tr><td><code>tick_rate</code></td><td>服务器心跳频率，默认 15；调高更流畅更吃 CPU</td></tr>
+  </tbody></table>
+  <p><b>[MISC] 杂项段：</b></p>
+  <table class="grid"><thead><tr><th>字段</th><th>含义</th></tr></thead><tbody>
+    <tr><td><code>console_enabled</code></td><td>允许远程控制台（管理员 ~ 发命令的总开关）</td></tr>
+    <tr><td><code>max_snapshots</code></td><td>存档快照保留份数（默认 6；改大能回更多天的档）</td></tr>
+    <tr><td><code>autosaver_enabled</code></td><td>每天自动保存（保持 true）</td></tr>
+  </tbody></table>
+  <p><b>[SHARD] 分片段：</b></p>
+  <table class="grid"><thead><tr><th>字段</th><th>含义</th></tr></thead><tbody>
+    <tr><td><code>shard_enabled</code></td><td>启用分片机制（带洞穴必须 true）</td></tr>
+    <tr><td><code>bind_ip</code></td><td>本分片监听内部通信的 IP，同机器 <code>127.0.0.1</code></td></tr>
+    <tr><td><code>master_ip</code></td><td>主分片 IP，同机器 <code>127.0.0.1</code></td></tr>
+    <tr><td><code>master_port</code></td><td>分片内部通信 TCP 端口，默认 10889，<b>不要对外开放</b></td></tr>
+    <tr><td><code>cluster_key</code></td><td>分片间认亲暗号；同集群所有分片必须一致</td></tr>
+  </tbody></table>
+
+  <h4>2.3 server.ini 全参数详解</h4>
+  <p><b>Master/server.ini：</b></p>
+  <div class="doc-pre">[NETWORK]
+server_port = 11000
+
+[SHARD]
+is_master = true
+name = Master
+id = 10000
+
+[STEAM]
+master_server_port = 27018
+authentication_port = 8768
+
+[ACCOUNT]
+encode_user_path = true</div>
+  <p><b>Caves/server.ini：</b></p>
+  <div class="doc-pre">[NETWORK]
+server_port = 11001
+
+[SHARD]
+is_master = false
+name = Caves
+id = 10001
+
+[STEAM]
+master_server_port = 27019
+authentication_port = 8769
+
+[ACCOUNT]
+encode_user_path = true</div>
+  <table class="grid"><thead><tr><th>字段</th><th>含义</th></tr></thead><tbody>
+    <tr><td><code>server_port</code></td><td>这个分片对玩家开放的 UDP 端口；<b>每个分片必须不同</b></td></tr>
+    <tr><td><code>is_master</code></td><td>true=主分片（整个集群<b>只能有一个</b>）</td></tr>
+    <tr><td><code>name</code></td><td>分片名（Caves 就写 Caves）</td></tr>
+    <tr><td><code>id</code></td><td>分片数字编号，集群内唯一</td></tr>
+    <tr><td><code>master_server_port</code></td><td>Steam 服务器浏览器查询端口（UDP），每个分片不同</td></tr>
+    <tr><td><code>authentication_port</code></td><td>Steam 认证端口（UDP），每个分片不同</td></tr>
+    <tr><td><code>encode_user_path</code></td><td>玩家数据文件名做 URL 编码，保持 true</td></tr>
+  </tbody></table>
+
+  <h4>三、启动与停止</h4>
+  <h4>3.1 screen 启动命令</h4>
+  <div class="doc-pre">cd /home/steam/dst_server/bin64
+screen -dmS dst_master ./dontstarve_dedicated_server_nullrenderer_x64 -cluster MyDediServer -shard Master
+screen -dmS dst_caves  ./dontstarve_dedicated_server_nullrenderer_x64 -cluster MyDediServer -shard Caves</div>
+  <table class="grid"><thead><tr><th>部分</th><th>含义</th></tr></thead><tbody>
+    <tr><td><code>screen</code></td><td>虚拟终端管理器</td></tr>
+    <tr><td><code>-dm</code>（合写 <code>-d -m</code>）</td><td>新建会话但不接进去（后台创建）</td></tr>
+    <tr><td><code>-S dst_master</code></td><td>给会话起名字，以后 <code>screen -r dst_master</code> 靠名字找</td></tr>
+    <tr><td><code>-cluster MyDediServer</code></td><td>用哪个集群</td></tr>
+    <tr><td><code>-shard Master</code></td><td>这个进程当哪个分片</td></tr>
+  </tbody></table>
+
+  <h4>3.2 查看控制台 / 接入 screen 会话</h4>
+  <div class="doc-pre">screen -ls                     # 列出所有 screen 会话
+screen -r dst_master           # 接入地面世界会话（看实时控制台输出）
+                               # 退出 screen（不关服务器）：按 Ctrl+A 再按 D
+screen -r dst_caves            # 接入洞穴会话</div>
+  <div class="doc-warn">⚠ 按 <code>Ctrl+C</code> 或输入 <code>exit</code> 会<b>直接关闭服务器</b>。只是暂时退出查看要按 <code>Ctrl+A</code> 然后 <code>D</code>（detach 分离）。</div>
+
+  <h4>3.3 向 screen 会话"隔空发命令"（不接入会话）</h4>
+  <div class="doc-pre">screen -S dst_master -X stuff $'c_announce("服务器5分钟后重启")\n'</div>
+  <table class="grid"><thead><tr><th>部分</th><th>含义</th></tr></thead><tbody>
+    <tr><td><code>-S dst_master</code></td><td>指定目标会话名</td></tr>
+    <tr><td><code>-X</code></td><td>向会话发送控制指令（不进会话，隔空操作）</td></tr>
+    <tr><td><code>stuff</code></td><td>具体指令=塞入一段"键盘输入"</td></tr>
+    <tr><td><code>$'...\n'</code></td><td>bash 转义：<code>\n</code> 变成真正的回车。<b>少了它命令只打进去不执行</b></td></tr>
+  </tbody></table>
+
+  <h4>3.4 优雅停止（先存档再关）</h4>
+  <div class="doc-pre"># 先发公告
+screen -S dst_master -X stuff $'c_announce("服务器即将关闭")\n'
+
+# 优雅关闭（c_shutdown 会先存档再退出）
+screen -S dst_master -X stuff $'c_shutdown()\n'
+screen -S dst_caves  -X stuff $'c_shutdown()\n'
+
+# 30 秒还不退再强杀
+ps aux | grep dontstarve | grep -v grep    # 查看进程号
+kill 进程号                                 # 温和终止
+kill -9 进程号                              # 强制终止（最后手段）</div>
+
+  <h4>四、模组手动管理</h4>
+  <h4>4.1 找模组 ID</h4>
+  <p>创意工坊模组页面网址：<code>https://steamcommunity.com/sharedfiles/filedetails/?id=1965741394</code>。<b><code>id=</code> 后面那串数字就是模组 ID</b>（1965741394 = 海难）。</p>
+
+  <h4>4.2 编辑 dedicated_server_mods_setup.lua（声明下载）</h4>
+  <div class="doc-pre">nano /home/steam/dst_server/mods/dedicated_server_mods_setup.lua</div>
+  <p>加入：</p>
+  <div class="doc-pre">ServerModSetup("1965741394")
+ServerModSetup("1185229307")
+ServerModCollectionSetup("1234567890")   -- 下载整个合集</div>
+  <p>这个文件是游戏官方预留的"开机购物清单"：服务器<b>每次启动</b>都读它，发现没下载或版本旧就自动从创意工坊拉取。</p>
+
+  <h4>4.3 编辑 modoverrides.lua（启用与配置）</h4>
+  <p><b>Master 和 Caves 两份都要改</b>：</p>
+  <div class="doc-pre">nano ~/.klei/DoNotStarveTogether/MyDediServer/Master/modoverrides.lua
+nano ~/.klei/DoNotStarveTogether/MyDediServer/Caves/modoverrides.lua</div>
+  <p>内容：</p>
+  <div class="doc-pre">return {
+  ["workshop-1185229307"] = {
+    enabled = true,
+    configuration_options = {},
+  },
+  ["workshop-1965741394"] = {
+    enabled = true,
+    configuration_options = {
+      ["coffee"] = 1,
+    },
+  },
+  ["workshop-367546858"] = {       -- 语言包类：放在最后一项
+    enabled = true,
+    configuration_options = {},
+  },
+}</div>
+  <table class="grid"><thead><tr><th>字段</th><th>含义</th></tr></thead><tbody>
+    <tr><td><code>return { ... }</code></td><td>Lua 语法：这个文件"返回一张表"，游戏启动时读取它</td></tr>
+    <tr><td><code>["workshop-1965741394"]</code></td><td>键名，固定格式 <code>workshop-模组ID</code>，<b>方括号引号都不能少</b></td></tr>
+    <tr><td><code>enabled = true</code></td><td>开关：true 启用 / false 停用</td></tr>
+    <tr><td><code>configuration_options = {}</code></td><td>模组自定义参数表；空 <code>{}</code> = 全部用默认值</td></tr>
+    <tr><td><code>["coffee"] = 1</code></td><td>一个具体参数：键名和取值从模组 <code>modinfo.lua</code> 抄</td></tr>
+    <tr><td>每行结尾的 <code>,</code></td><td>Lua 表分隔符，<b>漏逗号是最常见的崩服原因</b></td></tr>
+  </tbody></table>
+  <div class="doc-warn">⚠ 语言包类模组<b>必须放在 modoverrides.lua 的最后一项</b>——因为模组按顺序加载，后加载的覆盖先加载的，语言包最后加载才能把前面所有模组的文本统一翻译。</div>
+
+  <h4>4.4 modinfo.lua 关键字段说明</h4>
+  <p>每个模组根目录都有 <code>modinfo.lua</code>，它是模组的"名片"，关键字段：</p>
+  <table class="grid"><thead><tr><th>字段</th><th>含义</th></tr></thead><tbody>
+    <tr><td><code>name</code></td><td>模组显示名</td></tr>
+    <tr><td><code>author</code></td><td>作者</td></tr>
+    <tr><td><code>version</code></td><td>版本号</td></tr>
+    <tr><td><code>api_version</code></td><td>需要的游戏 API 版本（当前为 10）</td></tr>
+    <tr><td><code>dst_compatible</code></td><td>是否兼容 DST 联机版</td></tr>
+    <tr><td><code>all_clients_require_mod</code></td><td>true=所有玩家必须装这个模组才能进服</td></tr>
+    <tr><td><code>client_only_mod</code></td><td>true=纯客户端模组（服务器不用装）</td></tr>
+    <tr><td><code>server_filter_tags</code></td><td>服务器列表搜索标签</td></tr>
+    <tr><td><code>configuration_options</code></td><td>模组设置项定义（面板/开房界面照它生成选项）</td></tr>
+  </tbody></table>
+
+  <h4>4.5 手动下载模组（不等重启）</h4>
+  <div class="doc-pre">cd ~/steamcmd
+./steamcmd.sh +login anonymous +workshop_download_item 322330 1965741394 +quit
+# 322330 = DST 游戏本体 AppID（不是服务端的 343050！）
+# 产物在 ~/Steam/steamapps/workshop/content/322330/1965741394/
+cp -r ~/Steam/steamapps/workshop/content/322330/1965741394 /home/steam/dst_mods/</div>
+
+  <h4>五、管理员与黑名单</h4>
+  <h4>5.1 管理员名单 adminlist.txt</h4>
+  <div class="doc-pre">nano ~/.klei/DoNotStarveTogether/MyDediServer/adminlist.txt</div>
+  <p>每行一个 KU_ID：</p>
+  <div class="doc-pre">KU_cZLtq95O
+KU_abcdefgh</div>
+
+  <h4>5.2 黑名单 blocklist.txt</h4>
+  <div class="doc-pre">nano ~/.klei/DoNotStarveTogether/MyDediServer/blocklist.txt</div>
+  <p>每行一个 KU_ID，后面可空格加备注：</p>
+  <div class="doc-pre">KU_aaaaaaa 偷东西，2026-07-30 封
+KU_bbbbbbb 骂人</div>
+
+  <h4>5.3 白名单 whitelist.txt（预留位）</h4>
+  <div class="doc-pre">nano ~/.klei/DoNotStarveTogether/MyDediServer/whitelist.txt</div>
+  <p>每行一个 KU_ID。还要在 <code>cluster.ini</code> 设 <code>whitelist_slots = 2</code> 才生效。</p>
+
+  <h4>5.4 生效时机（重要！）</h4>
+  <table class="grid"><thead><tr><th>操作</th><th>改文件后什么时候生效</th></tr></thead><tbody>
+    <tr><td>管理员（adminlist.txt）</td><td><b>下次玩家加入时</b>或重启服务器后生效。已经在玩的玩家需要重新登录才能获得管理员权限</td></tr>
+    <tr><td>封禁（blocklist.txt）</td><td><b>新加入的玩家立即生效</b>（连进来就被拒）。已经在服上的在线玩家<b>不会被立即踢</b>——要用控制台 <code>TheNet:Ban("KU_xxx")</code> 才能立即赶走</td></tr>
+    <tr><td>解封</td><td>从 blocklist.txt 删掉 KU_ID + 重启服务器；或控制台 <code>TheNet:Unban("KU_xxx")</code></td></tr>
+    <tr><td>控制台 TheNet:Ban</td><td><b>立即生效</b>（在线玩家马上被踢），但只持续到下次重启</td></tr>
+    <tr><td>控制台 TheNet:Kick</td><td><b>立即踢出</b>，但对方可以马上重连</td></tr>
+  </tbody></table>
+  <div class="doc-warn">⚠ <b>控制台命令管"现在"，文件管"以后"</b>。要永久封人：先 <code>TheNet:Ban("KU_xxx")</code> 立即赶走，同时写进 blocklist.txt 保证重启后依然封禁。</div>
+
+  <h4>5.5 怎么找玩家的 KU_ID</h4>
+  <div class="doc-pre">grep "玩家名" ~/.klei/DoNotStarveTogether/MyDediServer/Master/server_log.txt
+# 输出里 Join Announcement 行有 KU_ 开头的 ID</div>
+  <p>或者在控制台输入 <code>c_listallplayers()</code> 会列出在线玩家及其编号。</p>
+
+  <h4>六、控制台命令大全</h4>
+  <p>命令发送方式有两种：</p>
+  <ul>
+    <li><b>方式一</b>：<code>screen -r dst_master</code> 进去直接敲（服务器本地控制台）</li>
+    <li><b>方式二</b>：管理员在游戏客户端里按 <code>~</code> 键，切到"远程"模式输入——命令发到服务器执行</li>
+    <li><b>方式三</b>（隔空）：<code>screen -S dst_master -X stuff $'c_save()\n'</code></li>
+  </ul>
+
+  <p><b>服务器管理类命令：</b></p>
+  <table class="grid"><thead><tr><th>命令</th><th>作用</th></tr></thead><tbody>
+    <tr><td><code>c_save()</code></td><td>立刻保存存档</td></tr>
+    <tr><td><code>c_shutdown()</code></td><td>保存并关闭这个分片</td></tr>
+    <tr><td><code>c_rollback()</code></td><td>回档一天（回到上一份快照）</td></tr>
+    <tr><td><code>c_rollback(3)</code></td><td>回档三天（括号里是天数）</td></tr>
+    <tr><td><code>c_regenerateworld()</code></td><td><b>重新生成当前世界</b>（慎用！世界清空重新来）</td></tr>
+    <tr><td><code>c_announce("文字")</code></td><td>全服滚动公告</td></tr>
+    <tr><td><code>c_listallplayers()</code></td><td>列出在线玩家（名字+编号+KU_ID）</td></tr>
+    <tr><td><code>TheNet:Ban("KU_xxxxx")</code></td><td>封人（立即生效，本次运行内进不来）</td></tr>
+    <tr><td><code>TheNet:Unban("KU_xxxxx")</code></td><td>解封</td></tr>
+    <tr><td><code>TheNet:Kick("KU_xxxxx")</code></td><td>踢人（立即生效，可重进）</td></tr>
+    <tr><td><code>TheNet:SetAllowIncomingConnections(true/false)</code></td><td>临时关门/开门（true 允许进，false 拒绝所有人）</td></tr>
+  </tbody></table>
+
+  <p><b>游戏作弊/调试类命令（管理员用）：</b></p>
+  <table class="grid"><thead><tr><th>命令</th><th>作用</th></tr></thead><tbody>
+    <tr><td><code>c_spawn("物品代码", 数量)</code></td><td>在鼠标位置生成物品，如 <code>c_spawn("log", 40)</code></td></tr>
+    <tr><td><code>c_give("物品代码", 数量)</code></td><td>直接进自己背包</td></tr>
+    <tr><td><code>c_godmode()</code></td><td>无敌（再输一次取消）</td></tr>
+    <tr><td><code>c_sethealth(1)</code> / <code>c_sethunger(1)</code> / <code>c_setsanity(1)</code></td><td>设血量/饥饿/精神（1=100%，0.5=一半）</td></tr>
+    <tr><td><code>c_speedmult(2)</code></td><td>移速加倍</td></tr>
+    <tr><td><code>c_goto(AllPlayers[编号])</code></td><td>传送到某个玩家身边</td></tr>
+    <tr><td><code>c_teleportto(x, y, z)</code></td><td>传送到坐标</td></tr>
+    <tr><td><code>UserToPlayer("玩家名")</code></td><td>按名字获取玩家对象，如 <code>UserToPlayer("Wilson"):SetHealth(1)</code></td></tr>
+    <tr><td><code>TheWorld:PushEvent("ms_setseason", "winter")</code></td><td>直接改季节（spring/summer/autumn/winter）</td></tr>
+    <tr><td><code>TheWorld:PushEvent("ms_nextphase")</code></td><td>跳过当前时间段（白天→黄昏→夜晚）</td></tr>
+    <tr><td><code>TheWorld:PushEvent("ms_forceprecipitation", true)</code></td><td>强制开始下雨（false=停止下雨）</td></tr>
+    <tr><td><code>LongUpdate(480)</code></td><td>快进一段时间（480 秒=一游戏天）</td></tr>
+    <tr><td><code>c_countprefabs("spiderden")</code></td><td>数世界上有多少个蜘蛛巢</td></tr>
+  </tbody></table>
+  <div class="doc-tip">💡 物品代码就是英文物品名（log=木头、rocks=石头、cutgrass=草……），模组的物品代码在模组文件的 <code>scripts/prefabs/</code> 里找。</div>
+
+  <h4>七、日志文件</h4>
+  <h4>7.1 日志文件位置</h4>
+  <table class="grid"><thead><tr><th>文件</th><th>位置</th><th>内容</th></tr></thead><tbody>
+    <tr><td><code>server_log.txt</code></td><td><code>~/.klei/DoNotStarveTogether/MyDediServer/Master/server_log.txt</code></td><td>运行日志：玩家进出、死亡公告、远程命令、报错信息</td></tr>
+    <tr><td><code>server_chat_log.txt</code></td><td>同目录</td><td>聊天记录：公聊、私聊、公告、加入/离开消息</td></tr>
+    <tr><td>Caves 日志</td><td><code>~/.klei/DoNotStarveTogether/MyDediServer/Caves/server_log.txt</code></td><td>洞穴分片的运行/聊天日志（分开记录）</td></tr>
+  </tbody></table>
+
+  <h4>7.2 实时查看日志</h4>
+  <div class="doc-pre"># 实时跟踪日志末尾（Ctrl+C 退出）
+tail -f ~/.klei/DoNotStarveTogether/MyDediServer/Master/server_log.txt
+
+# 只看最近 100 行
+tail -100 ~/.klei/DoNotStarveTogether/MyDediServer/Master/server_log.txt
+
+# 搜索某个玩家名的所有记录
+grep "玩家名" ~/.klei/DoNotStarveTogether/MyDediServer/Master/server_log.txt
+
+# 搜索报错信息
+grep -i error ~/.klei/DoNotStarveTogether/MyDediServer/Master/server_log.txt
+
+# 搜索模组相关日志
+tail -f ~/.klei/DoNotStarveTogether/MyDediServer/Master/server_log.txt | grep -i mod</div>
+  <table class="grid"><thead><tr><th>命令</th><th>含义</th></tr></thead><tbody>
+    <tr><td><code>tail -f</code></td><td>显示文件末尾并持续跟踪新内容（follow），按 Ctrl+C 退出</td></tr>
+    <tr><td><code>tail -100</code></td><td>显示最后 100 行</td></tr>
+    <tr><td><code>grep "关键词"</code></td><td>在文件中搜索包含关键词的行</td></tr>
+    <tr><td><code>grep -i</code></td><td>忽略大小写搜索</td></tr>
+    <tr><td><code>|</code>（管道）</td><td>前一条的输出当后一条的输入</td></tr>
+  </tbody></table>
+  <div class="doc-tip">💡 日志文件会一直追加，重启不清空。找 KU_ID 就去搜 Join Announcement 行；找谁用过控制台就搜 RemoteCommandInput 行。</div>
+
+  <h4>八、备份与恢复</h4>
+  <h4>8.1 手动备份</h4>
+  <div class="doc-pre"># 方法 A：直接复制目录（最简单）
+cp -r ~/.klei/DoNotStarveTogether/MyDediServer ~/dst_backup_$(date +%Y%m%d)
+
+# 方法 B：打包压缩（省空间）
+cd ~/.klei/DoNotStarveTogether
+tar -czf /home/steam/backup_MyDediServer_$(date +%Y%m%d).tar.gz MyDediServer</div>
+  <table class="grid"><thead><tr><th>部分</th><th>含义</th></tr></thead><tbody>
+    <tr><td><code>cp -r</code></td><td>递归复制目录（r=recursive）</td></tr>
+    <tr><td><code>$(date +%Y%m%d)</code></td><td>命令替换：把当天日期（如 20260730）嵌进文件名</td></tr>
+    <tr><td><code>tar -czf</code></td><td>c=创建压缩包、z=gzip 压缩、f=跟输出文件名</td></tr>
+  </tbody></table>
+  <div class="doc-tip">💡 只需备份 <code>.klei</code> 下的集群目录，<b>游戏程序不用备</b>（随时可以用 steamcmd 重下）。</div>
+
+  <h4>8.2 恢复备份</h4>
+  <div class="doc-pre">cd ~/.klei/DoNotStarveTogether
+tar -xzf /home/steam/backup_MyDediServer_20260730.tar.gz
+chown -R steam:steam MyDediServer    # 如果用 root 解压过才需要改属主</div>
+
+  <h4>8.3 回档（rollback 存档机制）</h4>
+  <p>DST 每天自动保存时会生成快照（存档副本），放在 <code>save/session/</code> 目录下，编号越大越新：</p>
+  <div class="doc-pre">cd ~/.klei/DoNotStarveTogether/MyDediServer/Master/save/session/
+ls -la
+# 输出示例：
+# 0000000023  0000000023.meta  0000000024  0000000024.meta  0000000025  0000000025.meta</div>
+  <p><b>在线回档（推荐）</b>：</p>
+  <div class="doc-pre">screen -S dst_master -X stuff $'c_rollback(2)\n'   # 回 2 天</div>
+  <p><b>离线回档</b>（删掉最新的快照）：</p>
+  <div class="doc-pre"># 要回 2 天就删掉最新 2 组：
+rm -rf 0000000024 0000000024.meta 0000000025 0000000025.meta
+# ⚠ 删错无法恢复！先确认编号！
+# 然后启动服务器，它会加载 0000000023（两天前的状态）</div>
+  <table class="grid"><thead><tr><th>概念</th><th>说明</th></tr></thead><tbody>
+    <tr><td><code>0000000024</code>（目录）</td><td>一次完整存档快照（世界全部状态）</td></tr>
+    <tr><td><code>0000000024.meta</code></td><td>该快照的"名片"（天数、时间等信息）</td></tr>
+    <tr><td><code>max_snapshots</code></td><td>cluster.ini 里的快照保留份数（默认 6）；想回更久就调大</td></tr>
+  </tbody></table>
+  <div class="doc-warn">⚠ <b>Caves 也要同步回档！</b> 两个分片各自有 session 目录，回档天数要一致，否则地上地下时间错位。回档操作本身也生成了快照，<b>无法反向回到现在</b>——想后悔得提前备份。</div>
+
+  <h4>8.4 定时自动备份（cron）</h4>
+  <div class="doc-pre">crontab -e</div>
+  <p>加一行（每天凌晨 3:30 自动备份）：</p>
+  <div class="doc-pre">30 3 * * * cd /home/steam/.klei/DoNotStarveTogether && tar -czf /home/steam/backup_$(date +\%Y\%m\%d).tar.gz MyDediServer</div>
+  <div class="doc-warn">⚠ crontab 里的 <code>%</code> 要写成 <code>\%</code>（% 在 cron 里是换行符的意思）。</div>
+</div>`;
+
+// ---- 模组迁移指南 ----
+const HELP_MIGRATE = `
+<div class="card help-doc">
+  <h3>📦 饥荒联机版（DST）专用服务器模组迁移指南</h3>
+  <div class="doc-info">本文档基于对实际文件结构的分析，并结合多方搭建教程整理。适用于将本地（客户端）已订阅/已启用的模组迁移到专用服务器上运行。</div>
+
+  <h4>一、关键概念：本地模组 vs 服务器模组</h4>
+  <table class="grid"><thead><tr><th>类型</th><th>说明</th><th>谁需要安装</th></tr></thead><tbody>
+    <tr><td><b>服务器模组</b></td><td><code>modinfo.lua</code> 中 <code>client_only_mod = false</code>，运行在服务端，影响世界规则、生物、物品等。若 <code>all_clients_require_mod = true</code>，则所有进入服务器的玩家都必须订阅该模组。</td><td>服务器<b>必须</b>安装</td></tr>
+    <tr><td><b>客户端模组</b></td><td><code>modinfo.lua</code> 中 <code>client_only_mod = true</code>，只影响使用它的玩家本地（如 UI 美化、小地图标记等），不影响世界。</td><td>服务器<b>不需要</b>安装，玩家自行订阅即可</td></tr>
+  </tbody></table>
+  <div class="doc-warn">⚠ 迁移时<b>只需要迁移服务器模组</b>；纯客户端模组无需放到服务器。</div>
+
+  <h4>二、模组的两个存放位置</h4>
+  <p>饥荒联机版的 Steam App ID 为 <b>322330</b>。模组在本机有两个相关目录：</p>
+
+  <h5>1. 游戏安装目录下的 mods 文件夹（服务器实际读取的位置）</h5>
+  <div class="doc-pre">D:\\steam\\steamapps\\common\\Don't Starve Together\\mods\\</div>
+  <p>该目录下的模组文件夹以 <b><code>workshop-{模组ID}</code></b> 命名，例如：</p>
+  <div class="doc-pre">mods/
+├── dedicated_server_mods_setup.lua   ← 服务器启动时自动下载模组的配置文件
+├── modsettings.lua                   ← 客户端强制启用/调试用配置
+├── workshop-362175979/               ← 例：Wormhole Marks（虫洞标记）
+│   ├── modinfo.lua
+│   ├── modmain.lua
+│   ├── modicon.xml / modicon.tex
+│   └── scripts/
+└── workshop-1216718131/</div>
+  <div class="doc-info">专用服务器和客户端共享同一个 <code>mods</code> 文件夹。如果你在本机同时安装了客户端和 DST Dedicated Server 工具，它们读取的是同一个目录。</div>
+
+  <h5>2. Steam 创意工坊缓存目录（Steam 自动下载的原始位置）</h5>
+  <div class="doc-pre">D:\\steam\\steamapps\\workshop\\content\\322330\\</div>
+  <p>Steam 订阅模组后，文件首先下载到这里，文件夹名<b>仅为纯数字 ID</b>（无 <code>workshop-</code> 前缀）。</p>
+  <div class="doc-info">Steam 客户端在启动饥荒时会自动把这里的模组同步/解包到上面的 <code>mods\\workshop-{ID}</code> 目录中。<b>专用服务器不会自动做这个同步</b>，所以服务器迁移时需要手动处理。</div>
+
+  <h5>模组 ID 从哪里获取？</h5>
+  <ul>
+    <li>创意工坊页面 URL 末尾的数字即为模组 ID，例如：<br><code>https://steamcommunity.com/sharedfiles/filedetails/?id=362175979</code> → ID 为 <code>362175979</code></li>
+    <li>在游戏内模组列表中右键 → 复制网页链接，同样取末尾数字。</li>
+  </ul>
+
+  <h4>三、模组文件结构分析</h4>
+  <p>每个模组文件夹的核心文件是 <b><code>modinfo.lua</code></b>，它决定了模组的元数据和加载行为。关键字段：</p>
+  <div class="doc-pre">name = "Wormhole Marks"              -- 模组名称
+version = "1.4.5"                    -- 版本号
+api_version = 10                     -- API 版本（10 = DST）
+
+-- ★ 以下三个字段决定了模组在服务器上的行为
+all_clients_require_mod = true       -- true: 所有进服玩家都必须安装此模组
+client_only_mod = false              -- true: 纯客户端模组，服务器无需安装
+dst_compatible = true                -- 是否兼容联机版
+
+configuration_options = { ... }      -- 模组的可配置选项</div>
+  <table class="grid"><thead><tr><th>字段</th><th>值</th><th>含义</th></tr></thead><tbody>
+    <tr><td><code>all_clients_require_mod</code></td><td><code>true</code></td><td>进服玩家必须订阅，否则无法加入</td></tr>
+    <tr><td><code>all_clients_require_mod</code></td><td><code>false</code></td><td>仅服务器需要，玩家可选</td></tr>
+    <tr><td><code>client_only_mod</code></td><td><code>true</code></td><td>纯客户端，<b>服务器不需要装</b></td></tr>
+    <tr><td><code>client_only_mod</code></td><td><code>false</code></td><td>服务器模组，服务器必须装</td></tr>
+  </tbody></table>
+
+  <h4>四、服务器加载模组的三种方式（核心）</h4>
+  <p>专用服务器加载模组涉及<b>两个层面</b>，缺一不可：</p>
+  <div class="doc-pre">┌─────────────────────────────────────────────────────────┐
+│  第一层：模组文件存在于服务器 mods 目录（下载/复制）       │
+│         → 通过 dedicated_server_mods_setup.lua 或手动复制 │
+├─────────────────────────────────────────────────────────┤
+│  第二层：在存档中启用并配置模组                          │
+│         → 通过 modoverrides.lua                          │
+└─────────────────────────────────────────────────────────┘</div>
+  <p>只有文件没有启用，模组不会生效；只有启用配置没有文件，服务器会报错。<b>两者必须同时满足。</b></p>
+
+  <h5>方式一：自动下载（推荐，需服务器能联网 Steam）</h5>
+  <p>编辑服务器 <code>mods</code> 目录下的 <b><code>dedicated_server_mods_setup.lua</code></b>：</p>
+  <div class="doc-pre">-- 每行一个模组 ID，服务器启动时会自动从创意工坊下载
+ServerModSetup("362175979")    -- Wormhole Marks
+ServerModSetup("378160979")    -- Global Player Positions
+ServerModSetup("1216718131")   -- 中文翻译
+
+-- 也可以下载整个创意工坊合集
+-- ServerModCollectionSetup("合集ID")</div>
+  <div class="doc-info">此文件原始内容只有注释模板，需手动添加 <code>ServerModSetup("ID")</code> 行。服务器每次启动都会检查并更新这些模组。</div>
+
+  <h5>方式二：手动复制模组文件夹（服务器无法联网时使用）</h5>
+  <ol>
+    <li>在本机找到模组文件夹（两个位置任选其一）：<br>
+      来源 A：<code>D:\\steam\\steamapps\\common\\Don't Starve Together\\mods\\workshop-{ID}\\</code><br>
+      来源 B：<code>D:\\steam\\steamapps\\workshop\\content\\322330\\{ID}\\</code></li>
+    <li>将该文件夹整体复制到服务器的 mods 目录：<br>
+      目标：<code>服务器安装目录\\mods\\workshop-{ID}\\</code></li>
+    <li>复制完不需要修改 <code>dedicated_server_mods_setup.lua</code>（因为文件已存在，无需下载）。</li>
+  </ol>
+  <div class="doc-warn">⚠ 放到服务器 <code>mods</code> 目录时，文件夹名必须是 <b><code>workshop-{ID}</code></b> 格式（带 <code>workshop-</code> 前缀）。如果来源是创意工坊缓存目录（纯数字 ID），复制后需重命名加上 <code>workshop-</code> 前缀。</div>
+
+  <h5>方式三：在存档中启用并配置模组（必须）</h5>
+  <p>无论用方式一还是方式二把模组文件放好，都还必须通过 <b><code>modoverrides.lua</code></b> 告诉服务器"启用哪些模组、用什么配置"。</p>
+  <p><b><code>modoverrides.lua</code> 的位置（每个世界分片各一份）：</b></p>
+  <div class="doc-pre">存档根目录\\Cluster_1\\
+├── cluster.ini              ← 集群配置（服务器名、密码、人数等）
+├── Master\\                  ← 地表世界分片
+│   ├── server.ini
+│   ├── worldgenoverride.lua
+│   ├── modoverrides.lua     ← ★ 地表模组启用配置
+│   └── save\\
+└── Caves\\                   ← 洞穴世界分片
+    ├── server.ini
+    ├── worldgenoverride.lua
+    ├── modoverrides.lua     ← ★ 洞穴模组启用配置
+    └── save\\</div>
+  <p>存档根目录通常位于：</p>
+  <div class="doc-pre">Windows:  %USERPROFILE%\\Documents\\Klei\\DoNotStarveTogether\\Cluster_1\\
+Linux:    ~/.klei/DoNotStarveTogether/Cluster_1/</div>
+  <p><b><code>modoverrides.lua</code> 格式：</b></p>
+  <div class="doc-pre">return {
+  ["workshop-362175979"] = {
+    configuration_options = {
+      ["Draw over FoW"] = "disabled"     -- 对应 modinfo.lua 中的配置项
+    },
+    enabled = true                        -- ★ true 表示启用
+  },
+
+  ["workshop-378160979"] = {
+    configuration_options = {
+      ENABLEPINGS = true,
+      FIREOPTIONS = 2,
+      SHOWPLAYERICONS = true
+    },
+    enabled = true
+  },
+
+  -- 最简写法（不配置选项，仅启用）：
+  ["workshop-1216718131"] = { enabled = true },
+}</div>
+  <div class="doc-info">Master 和 Caves 两个 <code>modoverrides.lua</code> 的内容通常保持一致。如果模组只在某个分片生效，也可只写在对应分片里。</div>
+
+  <h4>五、完整迁移流程（从本机到远程服务器）</h4>
+
+  <h5>第一步：在本机确认模组列表和配置</h5>
+  <p>最简单的方法是<b>本机新建一个世界 → 在游戏内勾选并配置好所有模组 → 生成世界进入选人界面后退出</b>。这样游戏会自动生成一份完整的 <code>modoverrides.lua</code>。</p>
+
+  <h5>第二步：把模组文件放到服务器</h5>
+  <p><b>如果服务器能联网（推荐方式一）：</b></p>
+  <p>编辑服务器的 <code>mods\\dedicated_server_mods_setup.lua</code>，根据 <code>modoverrides.lua</code> 中所有 <code>workshop-{ID}</code> 的 ID 列表，逐个添加 <code>ServerModSetup("ID")</code>。</p>
+  <p><b>如果服务器不能联网（方式二）：</b></p>
+  <p>把本机 <code>mods\\workshop-{ID}\\</code> 文件夹逐个打包上传到服务器 <code>mods</code> 目录下。</p>
+
+  <h5>第三步：把 modoverrides.lua 放到服务器存档</h5>
+  <p>将第一步得到的 <code>modoverrides.lua</code> 复制到服务器存档的 <b>Master</b> 和 <b>Caves</b> 文件夹中。</p>
+
+  <h5>第四步：启动服务器验证</h5>
+  <p>启动专用服务器，观察日志（<code>master_server_log.txt</code> / <code>server_log.txt</code>）：</p>
+  <ul>
+    <li>出现 <code>Sim paused</code> 表示启动成功。</li>
+    <li>如果模组加载失败，日志会显示缺失的模组 ID 或配置错误。</li>
+  </ul>
+
+  <h4>六、本机实际文件对照表</h4>
+  <table class="grid"><thead><tr><th>文件</th><th>路径</th><th>作用</th></tr></thead><tbody>
+    <tr><td>服务器模组下载配置</td><td><code>mods\\dedicated_server_mods_setup.lua</code></td><td>启动时自动从创意工坊下载模组</td></tr>
+    <tr><td>客户端模组调试配置</td><td><code>mods\\modsettings.lua</code></td><td>开发调试用（ForceEnableMod 等）</td></tr>
+    <tr><td>模组文件夹</td><td><code>mods\\workshop-{ID}\\</code></td><td>服务器实际加载的模组</td></tr>
+    <tr><td>创意工坊缓存</td><td><code>steamapps\\workshop\\content\\322330\\{ID}\\</code></td><td>Steam 自动下载的原始文件</td></tr>
+    <tr><td>模组缓存</td><td><code>cached_mods\\{ID}_0\\</code></td><td>游戏加载后的缓存</td></tr>
+    <tr><td>存档模组启用配置</td><td><code>Documents\\Klei\\DoNotStarveTogether\\Cluster_1\\Master\\modoverrides.lua</code></td><td>启用哪些模组及其配置</td></tr>
+  </tbody></table>
+
+  <h4>七、常见问题</h4>
+
+  <h5>Q1：服务器提示"正在运行旧版本模组"</h5>
+  <p>原因：服务器上的模组版本与本机/创意工坊不一致。</p>
+  <p>解决：</p>
+  <ol>
+    <li>停止服务器；</li>
+    <li>删除服务器 <code>mods\\</code> 目录下所有 <code>workshop-</code> 文件夹；</li>
+    <li>删除 <code>mods\\dedicated_server_mods_setup.lua</code>（或重新编辑）；</li>
+    <li>重新配置 <code>dedicated_server_mods_setup.lua</code> 并启动服务器重新下载。</li>
+  </ol>
+
+  <h5>Q2：玩家进服提示缺少模组</h5>
+  <p>原因：模组的 <code>modinfo.lua</code> 中 <code>all_clients_require_mod = true</code>，但玩家未订阅。</p>
+  <p>解决：玩家需在创意工坊订阅对应模组；或在服务器端使用 <code>modoverrides.lua</code> 配置仅为服务端的模组。</p>
+
+  <h5>Q3：模组文件已在 mods 目录但没生效</h5>
+  <p>原因：忘记写 <code>modoverrides.lua</code>，或对应模组的 <code>enabled</code> 没有设为 <code>true</code>。</p>
+  <p>解决：检查 Master 和 Caves 两个分片的 <code>modoverrides.lua</code>，确保目标模组 <code>enabled = true</code>。</p>
+
+  <h5>Q4：文件夹名前缀问题</h5>
+  <ul>
+    <li><code>mods\\workshop-{ID}\\</code> —— 必须带 <code>workshop-</code> 前缀。</li>
+    <li><code>steamapps\\workshop\\content\\322330\\{ID}\\</code> —— 纯数字，无前缀。</li>
+  </ul>
+  <p>手动复制时注意转换命名格式。</p>
+
+  <h5>Q5：本地客户端模组是否需要迁移？</h5>
+  <p>不需要。<code>client_only_mod = true</code> 的模组（如纯 UI 美化）只影响玩家自己，服务器不加载也不会报错。迁移时通过 <code>modinfo.lua</code> 判断即可。</p>
+
+  <h4>八、参考来源</h4>
+  <ul>
+    <li><a href="https://www.bilibili.com/opus/1028887869946593282" target="_blank">饥荒专用服务器+mod配置 - 哔哩哔哩</a></li>
+    <li><a href="https://blog.csdn.net/X123453ZW/article/details/131622759" target="_blank">饥荒联机版专用服务器搭建教程 - CSDN</a></li>
+    <li><a href="https://cloud.tencent.com/developer/article/2510270" target="_blank">手把手教你搭饥荒专用服务器（三）—MOD及其他高级设置 - 腾讯云</a></li>
+    <li><a href="https://harmonytou.github.io/2024/01/01/start-a-donotstarvetogether-server/" target="_blank">使用Linux搭建饥荒联机版服务器</a></li>
+    <li><a href="https://www.frank9.com/solve-dst-old-mods-tips.html" target="_blank">如何解决：服务器正在运行旧版本模组</a></li>
+    <li><a href="https://blog.csdn.net/violateer/article/details/108293805" target="_blank">搭建steam饥荒专用（本地）服务器 - CSDN</a></li>
+    <li><a href="https://blog.51cto.com/u_13633/13805694" target="_blank">docker搭建饥荒服务器 - 51CTO</a></li>
+  </ul>
+</div>`;
 
 // ============ 启动 ============
 renderTabs();

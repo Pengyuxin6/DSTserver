@@ -488,6 +488,8 @@ label.switch { min-width: 46px; } /* 覆盖 .row label 的 110px */
   font-size: 12px; overflow-x: auto; white-space: pre; margin: 8px 0; line-height: 1.65;
 }
 .doc-warn { border-left: 3px solid var(--red); background: rgba(200, 60, 60, .08); padding: 8px 12px; border-radius: 0 8px 8px 0; margin: 8px 0; color: var(--faq-body); font-size: 13px; line-height: 1.8; }
+.doc-info { border-left: 3px solid var(--amber); background: rgba(232, 163, 61, .08); padding: 8px 12px; border-radius: 0 8px 8px 0; margin: 8px 0; color: var(--faq-body); font-size: 13px; line-height: 1.8; }
+.help-doc h5 { color: var(--label); font-size: 13px; margin: 14px 0 4px; }
 .doc-tip { border-left: 3px solid var(--green); background: rgba(106, 176, 76, .08); padding: 8px 12px; border-radius: 0 8px 8px 0; margin: 8px 0; color: var(--faq-body); font-size: 13px; line-height: 1.8; }
 
 @media (max-width: 900px) {
@@ -558,3 +560,9 @@ body[data-theme="paper"] #pageBg { opacity: .3; }
 /* 设置项图标 */
 .opt-icon { width: 26px; height: 26px; object-fit: contain; vertical-align: -5px; margin-right: 6px; background: rgba(232,163,61,.10); border: 1px solid var(--border); border-radius: 4px; }
 .opt-icon-empty { display: inline-block; }
+
+/* 世界设置项弹窗：radio 选项行 */
+.opt-radio-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
+.opt-radio-row:hover { background: var(--hover-bg); }
+.opt-radio-row:has(input:checked) { background: var(--sel-bg); border-color: var(--amber); }
+.opt-radio-row input { accent-color: var(--amber); }
