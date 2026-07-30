@@ -1860,6 +1860,35 @@ async function api(req: Request, url: URL): Promise<Response> {
       }
     }
     // 应用模组关卡预设（海难/哈姆雷特等）：worldgen_preset=世界类型，settings_preset=模式难度，可分别设置并合并预设自带 overrides
+    const presetOwner = (pid: string): string | null => {
+      for (const [key] of readModOverrides(shard)) {
+        const d = modWorldgenData(key.replace("workshop-", ""));
+        if (d?.presets.some((p) => p.id === pid)) return key;
+      }
+      for (const id of allModIds()) {
+        const d = modWorldgenData(id);
+        if (d?.presets.some((p) => p.id === pid)) return `workshop-${id}`;
+      }
+      return null;
+    };
+    const ensureModEnabled = (wsKey: string): boolean => {
+      const id = wsKey.replace("workshop-", "");
+      let changed = false;
+      for (const sh of listShards()) {
+        const map = readModOverrides(sh.name);
+        const entry = map.get(wsKey);
+        if (!entry?.enabled) {
+          map.set(wsKey, { enabled: true, options: entry?.options || {} });
+          writeFileSync(join(shardDir(sh.name), "modoverrides.lua"), serializeModOverrides(map) + "\n");
+          changed = true;
+        }
+      }
+      if (changed) {
+        const ids = readSetupIds();
+        if (!ids.includes(id)) { ids.push(id); writeSetupIds(ids); }
+      }
+      return changed;
+    };
     const mergePresetOverrides = (pid: string) => {
       for (const [key, e] of readModOverrides(shard)) {
         if (!e.enabled) continue;
@@ -1872,16 +1901,25 @@ async function api(req: Request, url: URL): Promise<Response> {
         }
       }
     };
+    const autoLoaded: string[] = [];
     let presetArg: string | { worldgen?: string; settings?: string } | undefined;
     if (typeof b.preset === "string" && /^[A-Za-z0-9_]{1,64}$/.test(b.preset)) {
       presetArg = b.preset;
       mergePresetOverrides(b.preset);
+      const owner = presetOwner(b.preset);
+      if (owner && ensureModEnabled(owner)) autoLoaded.push(modCache.items[owner.replace("workshop-", "")]?.title || owner);
     } else {
       const wg = typeof b.worldgen_preset === "string" && /^[A-Za-z0-9_]{1,64}$/.test(b.worldgen_preset) ? b.worldgen_preset : "";
       const st = typeof b.settings_preset === "string" && /^[A-Za-z0-9_]{1,64}$/.test(b.settings_preset) ? b.settings_preset : "";
       if (wg) mergePresetOverrides(wg);
       if (st) mergePresetOverrides(st);
       if (wg || st) presetArg = { worldgen: wg || undefined, settings: st || undefined };
+      for (const pid of [wg, st]) {
+        if (pid) {
+          const owner = presetOwner(pid);
+          if (owner && ensureModEnabled(owner) && !autoLoaded.length) autoLoaded.push(modCache.items[owner.replace("workshop-", "")]?.title || owner);
+        }
+      }
       // 模式难度统一同步到 cluster.ini 的 game_mode（轻松/无尽/荒野/暗无天日/生存）
       if (st) {
         const modeMap: [RegExp, string][] = [
@@ -1899,8 +1937,25 @@ async function api(req: Request, url: URL): Promise<Response> {
         }
       }
     }
+    // 模组世界：保存时只保留对应模组的世界设置项与预设自带参数（不混入原版残留项）
+    const finalWg = (typeof presetArg === "object" && presetArg?.worldgen) || (typeof presetArg === "string" ? presetArg : "") || readLevelOverrides(shard).presets.worldgen;
+    if (finalWg && finalWg !== "SURVIVAL_TOGETHER" && finalWg !== "DST_CAVE") {
+      const keep = new Set<string>();
+      const owner = presetOwner(finalWg);
+      if (owner) {
+        const d = modWorldgenData(owner.replace("workshop-", ""));
+        if (d) {
+          for (const o of d.options) keep.add(o.key);
+          const p = d.presets.find((x) => x.id === finalWg);
+          if (p) for (const k of Object.keys(p.overrides)) keep.add(k);
+        }
+      }
+      if (keep.size) {
+        for (const k of Object.keys(current)) if (!keep.has(k)) delete current[k];
+      }
+    }
     writeLevelOverrides(shard, target.isMaster, current, presetArg);
-    return ok(null, `已保存 ${shard} 的世界设置（每设置完一个世界之后，都需要点击保存）`);
+    return ok(null, `已保存 ${shard} 的世界设置（每设置完一个世界之后，都需要点击保存）` + (autoLoaded.length ? `；已自动加载模组: ${autoLoaded.join("、")}` : ""));
   }
 
   // ===== mod 设置 =====

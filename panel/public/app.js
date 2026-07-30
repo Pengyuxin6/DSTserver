@@ -680,7 +680,8 @@ async function loadModWorldgen() {
     </div>
     <div style="max-height:280px;overflow-y:auto"><table class="grid"><thead><tr><th>设置项</th><th>设定值</th><th>分组</th></tr></thead><tbody id="mwTbody_${mi}"></tbody></table></div>
     <div class="row" style="margin-top:8px"><label>设置项</label><select id="mwNewVal_${mi}"><option value="">（先在表格中选择一行）</option></select>
-    <span class="hint">修改后点上方「保存」统一写入</span></div>` : ""}
+    <button class="btn primary" id="saveModOv">保存</button>
+    <span class="hint">模组世界：保存只写入该模组的世界设置项</span></div>` : ""}
   </div>`;
   }).join("");
   // 模组设置项行渲染（支持搜索/分组过滤）
@@ -728,6 +729,12 @@ async function loadModWorldgen() {
     };
   });
   mods.forEach((m, mi) => {
+    const svb = box.querySelector("#saveModOv");
+    if (svb) svb.onclick = async () => {
+      if (!worldState.shard) return toast("请先选择世界", true);
+      const r = await api("world/overrides", { method: "POST", body: { shard: worldState.shard, overrides: worldState.overrides } });
+      toast(r.msg);
+    };
     const wgb = box.querySelector(`[data-wg="${mi}"]`);
     if (wgb) wgb.onclick = async () => {
       const v = $(`#mwWg_${mi}`).value;

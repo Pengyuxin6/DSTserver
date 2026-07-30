@@ -382,7 +382,7 @@ details.faq .faq-body b { color: var(--text); }
 .listbox .item.sel .status-dot { width: 12px; height: 12px; }
 
 /* 悬浮大保存按钮（各页面右下角） */
-#save, #saveOv, #saveSel, #saveCfg {
+#save, #saveOv, #saveSel, #saveCfg, #saveModOv {
   position: fixed; right: 28px; bottom: 28px; z-index: 60;
   padding: 14px 42px; font-size: 16px;
   box-shadow: 0 4px 18px var(--glow);
@@ -419,7 +419,7 @@ body[data-theme="paper"] .btn.primary { box-shadow: 0 2px 8px rgba(185, 122, 23,
   textarea#modIds { width: 100% !important; }
   .mod-grid { grid-template-columns: 1fr; }
   /* 悬浮保存按钮缩小不遮挡 */
-  #save, #saveOv, #saveSel, #saveCfg { right: 14px; bottom: 14px; padding: 10px 22px; font-size: 14px; }
+  #save, #saveOv, #saveSel, #saveCfg, #saveModOv { right: 14px; bottom: 14px; padding: 10px 22px; font-size: 14px; }
   #saveCfg { bottom: 70px; }
   .help-hero { min-height: 120px; }
   .help-hero .hh-inner { padding: 18px; }
