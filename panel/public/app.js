@@ -1396,6 +1396,9 @@ async function pageServer() {
     <div class="row" style="margin-top:10px"><label>自动重启</label>
       <label class="switch" title="每 30 秒检查分片，掉线自动拉起"><input type="checkbox" id="arSwitch" ${d.autorestart ? "checked" : ""}><span class="slider"></span></label>
       <span class="hint">每 30 秒检查一次，分片掉线自动拉起</span></div>
+    <div class="row"><label>汉化检测</label>
+      <label class="switch" title="启动服务器时检测是否启用中文汉化模组"><input type="checkbox" id="langCheckSwitch" ${d.langCheck ? "checked" : ""}><span class="slider"></span></label>
+      <span class="hint">启动时检测汉化模组（1301033176/1418746242），未启用则弹窗提示自动配置为简体中文</span></div>
     <div class="row"><label>世界暂停</label><span id="pauseState" class="hint">查询中…</span> <span class="hint">暂停 = 冻结世界时间（昼夜/作物/生物停止），玩家不被踢出</span></div>
   </div>
   <div class="card">
@@ -1424,7 +1427,26 @@ async function pageServer() {
     <div class="logbox" id="serverLog" style="min-height:200px;max-height:400px"></div>
   </div>`;
   const act = async (path, body = {}) => { const r = await api(path, { method: "POST", body }); toast(r.msg); setTimeout(pageServer, 1500); };
-  $("#start").onclick = () => act("server/start");
+  $("#start").onclick = async () => {
+    // 汉化检测
+    if ($("#langCheckSwitch")?.checked) {
+      const lc = await apiQuiet("server/lang-check");
+      if (lc?.data?.needSetup) {
+        const ok2 = await dlgConfirm(
+          "此服务器尚未启用中文汉化模组。\n\n" +
+          "汉化模组（1301033176）是专用服务器显示中文名称和描述的关键模组，\n" +
+          "1418746242 (Chinese++) 可自动翻译其他模组的中文配置。\n\n" +
+          "是否自动下载并配置为简体中文？",
+          { okText: "自动配置" }
+        );
+        if (ok2) {
+          const r = await api("server/lang-setup", { method: "POST", body: {} });
+          toast(r.msg);
+        }
+      }
+    }
+    act("server/start");
+  };
   $("#stop").onclick = async () => { if (await dlgConfirm("确定关闭服务器？在线玩家将被踢出。", { danger: true })) act("server/stop"); };
   $("#restart").onclick = async () => { if (await dlgConfirm("确定重启服务器？")) act("server/restart"); };
   // 暂停/继续合一按钮：按当前状态切换文案与行为
@@ -1454,6 +1476,11 @@ async function pageServer() {
   $("#arSwitch").onchange = async (e) => {
     const on = e.target.checked;
     const r = await api("server/autorestart", { method: "POST", body: { on } });
+    toast(r.msg);
+  };
+  // 汉化检测开关
+  $("#langCheckSwitch").onchange = async (e) => {
+    const r = await api("server/lang-check-toggle", { method: "POST", body: {} });
     toast(r.msg);
   };
   $$('input[name=mode]').forEach((r) => (r.onchange = () => act("server/mode", { mode: r.value })));

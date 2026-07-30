@@ -325,6 +325,7 @@ interface PanelConfig {
   serverDir: string;
   clusterRoot: string;
   modsDir: string;
+  langCheck: boolean;
 }
 function loadPanelConfig(): PanelConfig {
   try {
@@ -347,9 +348,10 @@ function loadPanelConfig(): PanelConfig {
       serverDir: typeof c.serverDir === "string" && c.serverDir ? c.serverDir : join(HOME, "dst_server"),
       clusterRoot: typeof c.clusterRoot === "string" && c.clusterRoot.startsWith("/") ? c.clusterRoot : DEFAULT_CLUSTER_ROOT,
       modsDir: typeof c.modsDir === "string" && c.modsDir.startsWith("/") ? c.modsDir : DEFAULT_MODS_DIR,
+      langCheck: c.langCheck !== false,
     };
   } catch {
-    return { cluster: "MyDediServer", beta: false, betaBranch: "", mode: "online", autorestart: false, announcements: [], announceAuto: { enabled: false, intervalSec: 300, idx: 0, lastSent: 0 }, itemHistory: [], favorites: [], serverDir: join(HOME, "dst_server"), clusterRoot: DEFAULT_CLUSTER_ROOT, modsDir: DEFAULT_MODS_DIR };
+    return { cluster: "MyDediServer", beta: false, betaBranch: "", mode: "online", autorestart: false, announcements: [], announceAuto: { enabled: false, intervalSec: 300, idx: 0, lastSent: 0 }, itemHistory: [], favorites: [], serverDir: join(HOME, "dst_server"), clusterRoot: DEFAULT_CLUSTER_ROOT, modsDir: DEFAULT_MODS_DIR, langCheck: true };
   }
 }
 let panelConfig = loadPanelConfig();
@@ -2428,7 +2430,7 @@ async function api(req: Request, url: URL): Promise<Response> {
   if (path === "server/status" && method === "GET") {
     const shards = listShards();
     for (const s of shards) s.running = await shardRunning(s.name);
-    return ok({ shards, autorestart: panelConfig.autorestart, mode: panelConfig.mode });
+    return ok({ shards, autorestart: panelConfig.autorestart, mode: panelConfig.mode, langCheck: panelConfig.langCheck });
   }
   if (path === "server/start" && method === "POST") {
     const shards = listShards();
@@ -2467,6 +2469,64 @@ async function api(req: Request, url: URL): Promise<Response> {
     panelConfig.mode = b.mode === "offline" ? "offline" : "online";
     savePanelConfig();
     return ok(null, `已切换为${panelConfig.mode === "offline" ? "离线" : "在线"}模式，重启服务器后生效`);
+  }
+  // ===== 汉化模组检测与配置 =====
+  const LANG_MODS = ["1301033176", "367546858"]; // 服务器汉化 / 客户端汉化（任一启用即可）
+  const LANG_SERVER_MOD = "1301033176";          // 专用服务器汉化（推荐）
+  const LANG_CNPLUS_MOD = "1418746242";          // Chinese++ 模组信息翻译
+  if (path === "server/lang-check" && method === "GET") {
+    const master = listShards().find((s) => s.isMaster) || listShards()[0];
+    if (!master) return ok({ needSetup: false, msg: "没有世界分片" });
+    const ov = readModOverrides(master.name);
+    const enabled: string[] = [];
+    for (const id of LANG_MODS) {
+      const e = ov.get(`workshop-${id}`);
+      if (e?.enabled) enabled.push(id);
+    }
+    const localIds = new Set(localModDirs());
+    const downloaded = [LANG_SERVER_MOD, LANG_CNPLUS_MOD, ...LANG_MODS].filter((id) => localIds.has(id));
+    const langSetting = String(ov.get(`workshop-${LANG_MODS[1]}`)?.options?.LANG || ov.get(`workshop-${LANG_SERVER_MOD}`)?.options?.LANG || "simplified");
+    const needSetup = enabled.length === 0;
+    return ok({ enabled, downloaded, langSetting, needSetup, langCheck: panelConfig.langCheck });
+  }
+  if (path === "server/lang-setup" && method === "POST") {
+    const master = listShards().find((s) => s.isMaster) || listShards()[0];
+    if (!master) return fail("没有世界分片");
+    const localIds = new Set(localModDirs());
+    const msgs: string[] = [];
+    // 1. 下载缺失的模组
+    const toDownload = [LANG_SERVER_MOD, LANG_CNPLUS_MOD].filter((id) => !localIds.has(id));
+    if (toDownload.length) {
+      await ensureSteamCache(toDownload);
+      enqueueDownloads(toDownload);
+      msgs.push(`已加入下载队列：${toDownload.join(", ")}`);
+    }
+    // 2. 启用模组 + 设置 LANG=simplified（所有分片）
+    for (const shard of listShards()) {
+      const map = readModOverrides(shard.name);
+      // 启用服务器汉化
+      const srvEntry = map.get(`workshop-${LANG_SERVER_MOD}`) || { enabled: false, options: {} };
+      srvEntry.enabled = true;
+      srvEntry.options.LANG = "simplified";
+      map.set(`workshop-${LANG_SERVER_MOD}`, srvEntry);
+      // 启用 Chinese++
+      const cppEntry = map.get(`workshop-${LANG_CNPLUS_MOD}`) || { enabled: false, options: {} };
+      cppEntry.enabled = true;
+      map.set(`workshop-${LANG_CNPLUS_MOD}`, cppEntry);
+      writeFileSync(join(shardDir(shard.name), "modoverrides.lua"), serializeModOverrides(map) + "\n");
+    }
+    // 3. 添加到 dedicated_server_mods_setup.lua
+    const setupIds = new Set(readSetupIds());
+    setupIds.add(LANG_SERVER_MOD);
+    setupIds.add(LANG_CNPLUS_MOD);
+    writeSetupIds([...setupIds]);
+    msgs.push("已启用服务器汉化（1301033176）+ Chinese++（1418746242），语言设为简体中文");
+    return ok(null, msgs.join("；"));
+  }
+  if (path === "server/lang-check-toggle" && method === "POST") {
+    panelConfig.langCheck = !panelConfig.langCheck;
+    savePanelConfig();
+    return ok({ on: panelConfig.langCheck }, panelConfig.langCheck ? "已开启汉化检测" : "已关闭汉化检测");
   }
   // 暂停/继续服务器（世界时间冻结/恢复），通过 Master 的 ms_serverpause 事件实现
   if (path === "server/pause" && method === "POST") {
