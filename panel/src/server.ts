@@ -1702,6 +1702,33 @@ function modWorldgenData(id: string): { name: string; options: ModWorldgenOption
   for (const m of mwText.matchAll(/modimport\s+"([^"]*(?:map|worldgen|level)[^"]*)"/g)) {
     if (!worldgenFiles.includes(m[1])) worldgenFiles.push(m[1]);
   }
+  if (!options.length && !presets.length) {
+    // 配置驱动型世界模组（如三合一 Tropical Experience）：
+    // 没有标准的 WORLDGEN_GROUP/LEVELTYPE 定义，世界设置通过 configuration_options 控制
+    // 将与地图/世界相关的配置项作为世界设置项返回
+    if (existsSync(mw)) {
+      const mi = parseModInfo(id);
+      if (mi?.configOptions?.length) {
+        // 筛选与世界/地图相关的配置项（通过名称或 hover 关键词判断）
+        const worldKeywords = /world|map|biome|island|continent|cave|ocean|volcano|hamlet|shipwreck|tropical|frost|moon|season|size|climate|terrain|region|generate|preset|location|start/i;
+        for (const opt of mi.configOptions) {
+          const isWorldRelated = worldKeywords.test(opt.name) || worldKeywords.test(opt.label) || worldKeywords.test(opt.hover);
+          if (isWorldRelated) {
+            options.push({
+              key: opt.name,
+              label: opt.label || opt.name,
+              group: "世界类型",
+              world: "",
+              default: String(opt.default ?? ""),
+              values: opt.options.length ? opt.options.map((op) => ({ v: String(op.data), label: op.description || String(op.data) })) : [{ v: String(opt.default ?? "default"), label: String(opt.default ?? "default") }],
+              img: "",
+              atlas: "",
+            });
+          }
+        }
+      }
+    }
+  }
   if (!options.length && !presets.length) return null;
   const mi = parseModInfo(id);
   const st = modCache.items[id];
@@ -2457,7 +2484,18 @@ async function api(req: Request, url: URL): Promise<Response> {
     const target = listShards().find((s) => s.name === shard);
     if (!target) return fail("世界不存在");
     const { overrides, presets } = readLevelOverrides(shard);
-    return ok({ shard, isMaster: target.isMaster, overrides, presets, options: worldOptionTable(target.isMaster) });
+    // 检测是否有启用的世界生成模组（即使是配置驱动型，如三合一）
+    const hasWorldgenMod = listShards().length > 0 && (() => {
+      for (const s of listShards()) {
+        for (const [key, e] of readModOverrides(s.name)) {
+          if (!e.enabled) continue;
+          const d = modWorldgenData(key.replace("workshop-", ""));
+          if (d && (d.options.length || d.presets.length)) return true;
+        }
+      }
+      return false;
+    })();
+    return ok({ shard, isMaster: target.isMaster, overrides, presets, options: worldOptionTable(target.isMaster), hasWorldgenMod });
   }
   if (path === "world/modworldgen" && method === "GET") {
     const shard = url.searchParams.get("shard") || "";

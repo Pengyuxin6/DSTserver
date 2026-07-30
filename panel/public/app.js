@@ -667,8 +667,9 @@ async function loadWorldOverrides() {
   worldState.presets = j.data.presets || { worldgen: "", settings: "" };
   const preset = j.data.presets?.worldgen || "";
   $("#curShard").textContent = `— ${j.data.shard}（${j.data.isMaster ? "地上" : "地下"}）${preset ? `｜预设: ${preset}` : ""}`;
-  // 启用模组世界（海难/哈姆雷特/火山等）时，原版设置项不适用，直接隐藏（含设置项选择与保存按钮）
-  const isModWorld = !!preset && !["SURVIVAL_TOGETHER", "DST_CAVE", "LAVAARENA", "QUAGMIRE", ""].includes(preset);
+  // 启用模组世界（海难/哈姆雷特/火山/三合一等）时，原版设置项不适用，直接隐藏
+  const hasWorldgenMod = !!j.data.hasWorldgenMod;
+  const isModWorld = (!!preset && !["SURVIVAL_TOGETHER", "DST_CAVE", "LAVAARENA", "QUAGMIRE", ""].includes(preset)) || hasWorldgenMod;
   const filterRow = $("#optFilter")?.closest(".row");
   const tableWrap = $("#optTable")?.parentElement;
   const saveRow = $("#saveOv")?.closest(".btn-row");
