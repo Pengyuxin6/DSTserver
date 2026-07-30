@@ -471,18 +471,22 @@ async function pageBasic() {
   // 令牌复制：如果输入框有值则复制输入框，否则从服务器获取已保存的令牌
   $("#copyToken").onclick = async () => {
     const inp = $("#cluster_token");
-    const val = inp.value.trim();
-    if (val) {
-      try { await navigator.clipboard.writeText(val); toast("已复制到剪贴板"); }
-      catch { inp.select(); document.execCommand("copy"); toast("已复制"); }
-      return;
+    let val = inp.value.trim();
+    if (!val) {
+      // 输入框为空 → 从服务器获取已保存的令牌
+      const r = await apiQuiet("basic/token");
+      val = r?.data?.token || "";
     }
-    // 输入框为空 → 从服务器获取已保存的令牌
-    const r = await apiQuiet("basic/token");
-    const savedToken = r?.data?.token || "";
-    if (!savedToken) return toast("令牌未设置", true);
-    try { await navigator.clipboard.writeText(savedToken); toast("已复制令牌到剪贴板"); }
+    if (!val) return toast("令牌未设置", true);
+    // HTTP 环境下 navigator.clipboard 不可用，用 textarea + execCommand 兜底
+    const ta = document.createElement("textarea");
+    ta.value = val;
+    ta.style.cssText = "position:fixed;left:-9999px;top:-9999px";
+    document.body.appendChild(ta);
+    ta.select();
+    try { document.execCommand("copy"); toast("已复制令牌到剪贴板"); }
     catch { toast("复制失败，请手动复制", true); }
+    document.body.removeChild(ta);
   };
   // 看门狗开关
   const loadGuard = async () => {
