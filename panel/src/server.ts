@@ -1703,27 +1703,32 @@ function modWorldgenData(id: string): { name: string; options: ModWorldgenOption
     if (!worldgenFiles.includes(m[1])) worldgenFiles.push(m[1]);
   }
   if (!options.length && !presets.length) {
-    // 配置驱动型世界模组（如三合一 Tropical Experience）：
+    // 配置驱动型世界模组（如三合一 Tropical Experience / 欧皇模拟器）：
     // 没有标准的 WORLDGEN_GROUP/LEVELTYPE 定义，世界设置通过 configuration_options 控制
-    // 将与地图/世界相关的配置项作为世界设置项返回
+    // 检测条件：有 modworldgenmain.lua + 有 AddLevelPreInitAny（修改世界生成）
     if (existsSync(mw)) {
-      const mi = parseModInfo(id);
-      if (mi?.configOptions?.length) {
-        // 筛选与世界/地图相关的配置项（通过名称或 hover 关键词判断）
-        const worldKeywords = /world|map|biome|island|continent|cave|ocean|volcano|hamlet|shipwreck|tropical|frost|moon|season|size|climate|terrain|region|generate|preset|location|start/i;
-        for (const opt of mi.configOptions) {
-          const isWorldRelated = worldKeywords.test(opt.name) || worldKeywords.test(opt.label) || worldKeywords.test(opt.hover);
-          if (isWorldRelated) {
-            options.push({
-              key: opt.name,
-              label: opt.label || opt.name,
-              group: "世界类型",
-              world: "",
-              default: String(opt.default ?? ""),
-              values: opt.options.length ? opt.options.map((op) => ({ v: String(op.data), label: op.description || String(op.data) })) : [{ v: String(opt.default ?? "default"), label: String(opt.default ?? "default") }],
-              img: "",
-              atlas: "",
-            });
+      const mwText = readText(mw);
+      const modifiesWorldgen = /AddLevelPreInit|GetModConfigData.*world|AddRoom|AddTask|GROUND\./.test(mwText);
+      if (modifiesWorldgen) {
+        const mi = parseModInfo(id);
+        if (mi?.configOptions?.length) {
+          // 筛选与世界/地图生成相关的配置项
+          // 精确匹配：名称包含明确的世界生成关键词
+          const worldKeywords = /^kindofworld|world|biome|island|continent|ocean|volcano|hamlet|shipwreck|tropical|frost_island|moon.*ship|coralbiome|greenworld|gorgeisland|monkeyisland|howmany|continentsize|fillingthe|terrain|islandsize|islandshape|numberofmain|extraisland|islandspac|islandposit|hasocean|worldsize/i;
+          for (const opt of mi.configOptions) {
+            const isWorldRelated = worldKeywords.test(opt.name) || worldKeywords.test(opt.label);
+            if (isWorldRelated) {
+              options.push({
+                key: opt.name,
+                label: opt.label || opt.name,
+                group: "世界类型",
+                world: "",
+                default: String(opt.default ?? ""),
+                values: opt.options.length ? opt.options.map((op) => ({ v: String(op.data), label: op.description || String(op.data) })) : [{ v: String(opt.default ?? "default"), label: String(opt.default ?? "default") }],
+                img: "",
+                atlas: "",
+              });
+            }
           }
         }
       }
