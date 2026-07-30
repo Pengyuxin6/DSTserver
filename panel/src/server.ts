@@ -2489,18 +2489,31 @@ async function api(req: Request, url: URL): Promise<Response> {
     const target = listShards().find((s) => s.name === shard);
     if (!target) return fail("世界不存在");
     const { overrides, presets } = readLevelOverrides(shard);
-    // 检测是否有启用的世界生成模组（即使是配置驱动型，如三合一）
-    const hasWorldgenMod = listShards().length > 0 && (() => {
+    // 检测是否有启用的世界生成模组，区分替换型和兼容型
+    const worldgenModInfo = listShards().length > 0 && (() => {
       for (const s of listShards()) {
         for (const [key, e] of readModOverrides(s.name)) {
           if (!e.enabled) continue;
-          const d = modWorldgenData(key.replace("workshop-", ""));
-          if (d && (d.options.length || d.presets.length)) return true;
+          const modId = key.replace("workshop-", "");
+          const d = modWorldgenData(modId);
+          if (d && (d.options.length || d.presets.length)) {
+            // 判断是否替换型（完全替换世界生成，原版设置不适用）
+            // 替换型：有 AddLevel/AddPreset/LEVELTYPE 定义，或有明确的非原版预设
+            // 兼容型：仅有 AddLevelPreInitAny（在原版基础上扩展），原版设置仍适用
+            const mwPath = join(ugcSharedDir(), modId, "modworldgenmain.lua");
+            const mwText = existsSync(mwPath) ? readText(mwPath) : "";
+            const isReplace = /AddLevel\s*\(\s*LEVELTYPE\.|AddWorldGenLevel\s*\(\s*LEVELTYPE\.|AddPreset\s*\(/.test(mwText)
+              || d.presets.some((p) => !VANILLA_PRESETS.has(p.id));
+            if (isReplace) return { replace: true };
+            return { replace: false, extend: true };
+          }
         }
       }
-      return false;
+      return null;
     })();
-    return ok({ shard, isMaster: target.isMaster, overrides, presets, options: worldOptionTable(target.isMaster), hasWorldgenMod });
+    const hasWorldgenMod = !!worldgenModInfo;
+    const hasReplaceWorldgenMod = worldgenModInfo?.replace === true;
+    return ok({ shard, isMaster: target.isMaster, overrides, presets, options: worldOptionTable(target.isMaster), hasWorldgenMod, hasReplaceWorldgenMod });
   }
   if (path === "world/modworldgen" && method === "GET") {
     const shard = url.searchParams.get("shard") || "";
