@@ -1119,7 +1119,7 @@ function modItems(id: string): { name: string; prefab: string; cat: string }[] {
   return out;
 }
 
-interface ModWorldgenOption { key: string; label: string; group: string; world: string; default: string; values: { v: string; label: string }[]; img?: string; atlas?: string }
+interface ModWorldgenOption { key: string; label: string; group: string; world: string; default: string; values: { v: string; label: string }[]; img?: string; atlas?: string; modConfig?: boolean }
 interface ModWorldgenPreset { id: string; name: string; location: string; overrides: Record<string, string> }
 
 let vanillaStringsMap: Map<string, string> | null = null;
@@ -1727,6 +1727,7 @@ function modWorldgenData(id: string): { name: string; options: ModWorldgenOption
                 values: opt.options.length ? opt.options.map((op) => ({ v: String(op.data), label: op.description || String(op.data) })) : [{ v: String(opt.default ?? "default"), label: String(opt.default ?? "default") }],
                 img: "",
                 atlas: "",
+                modConfig: true,
               });
             }
           }
@@ -1745,6 +1746,18 @@ function enabledModWorldgenOptions(shard: string): Map<string, Set<string>> {
     if (!e.enabled) continue;
     const d = modWorldgenData(key.replace("workshop-", ""));
     if (d) for (const o of d.options) map.set(o.key, new Set(o.values.map((v) => v.v)));
+  }
+  return map;
+}
+// 获取已启用模组的 modConfig 选项（写入 modoverrides.lua 的配置驱动型选项）
+function enabledModConfigOptions(shard: string): Map<string, Set<string>> {
+  const map = new Map<string, Set<string>>();
+  for (const [key, e] of readModOverrides(shard)) {
+    if (!e.enabled) continue;
+    const d = modWorldgenData(key.replace("workshop-", ""));
+    if (d) for (const o of d.options) {
+      if (o.modConfig) map.set(o.key, new Set(o.values.map((v) => v.v)));
+    }
   }
   return map;
 }
@@ -2530,7 +2543,16 @@ async function api(req: Request, url: URL): Promise<Response> {
       if (!e.enabled) continue;
       const id = key.replace("workshop-", "");
       const d = modWorldgenData(id);
-      if (d) mods.push({ id, ...d });
+      if (!d) continue;
+      // 为 modConfig 选项附加当前配置值（从 modoverrides.lua 读取）
+      const enriched = d.options.map((o) => {
+        if (o.modConfig) {
+          const current = e.options[o.key] !== undefined ? e.options[o.key] : o.default;
+          return { ...o, current: String(current) };
+        }
+        return o;
+      });
+      mods.push({ id, ...d, options: enriched });
     }
     return ok({ mods });
   }
@@ -2543,17 +2565,49 @@ async function api(req: Request, url: URL): Promise<Response> {
     const allowed = new Map(table.map((o) => [o.key, new Set(o.values.map((v) => v.v))]));
     // 已启用大型地图模组提供的世界设置项
     const modAllowed = enabledModWorldgenOptions(shard);
+    // 已启用模组的 modConfig 配置驱动型选项（写入 modoverrides.lua）
+    const modConfigAllowed = enabledModConfigOptions(shard);
     const current = readLevelOverrides(shard).overrides;
     const incoming = b.overrides && typeof b.overrides === "object" ? b.overrides : {};
+    // 需要写入 modoverrides.lua 的 modConfig 选项
+    const modConfigUpdates: Record<string, any> = {};
     for (const [k, v] of Object.entries(incoming)) {
-      if (!validKeyVal(k) || !validWorldVal(v)) continue;
+      if (!validKeyVal(k)) continue;
+      // 优先：modConfig 选项（配置驱动型模组，写入 modoverrides.lua）
+      if (modConfigAllowed.has(k)) {
+        // modConfig 值可以是数字/布尔/字符串
+        const val = typeof v === "boolean" || typeof v === "number" ? v : (validWorldVal(String(v)) ? v : null);
+        if (val !== null) modConfigUpdates[k] = val;
+        continue;
+      }
+      // 原版世界设置项
       if (allowed.has(k)) {
+        if (!validWorldVal(String(v))) continue;
         if (allowed.get(k)!.has(String(v))) current[k] = String(v);
         continue;
       }
+      // 模组世界生成选项（写入 worldgenoverride.lua）
       if (modAllowed.has(k)) {
+        if (!validWorldVal(String(v))) continue;
         if (modAllowed.get(k)!.has(String(v))) current[k] = String(v);
         continue;
+      }
+    }
+    // 写入 modConfig 选项到 modoverrides.lua（对应模组）
+    if (Object.keys(modConfigUpdates).length > 0) {
+      for (const [key, e] of readModOverrides(shard)) {
+        if (!e.enabled) continue;
+        const d = modWorldgenData(key.replace("workshop-", ""));
+        if (!d) continue;
+        const hasTarget = d.options.some((o) => o.modConfig && o.key in modConfigUpdates);
+        if (!hasTarget) continue;
+        const map = readModOverrides(shard);
+        const entry = map.get(key) || { enabled: true, options: {} };
+        for (const opt of d.options) {
+          if (opt.modConfig && opt.key in modConfigUpdates) entry.options[opt.key] = modConfigUpdates[opt.key];
+        }
+        map.set(key, entry);
+        writeFileSync(join(shardDir(shard), "modoverrides.lua"), serializeModOverrides(map) + "\n");
       }
     }
     // 应用模组关卡预设（海难/哈姆雷特等）：worldgen_preset=世界类型，settings_preset=模式难度，可分别设置并合并预设自带 overrides

@@ -799,7 +799,8 @@ async function loadModWorldgen() {
     m.options.forEach((o) => {
       if (fg && o.group !== fg) return;
       if (ft && !o.label.toLowerCase().includes(ft) && !o.key.toLowerCase().includes(ft)) return;
-      const cur = worldState.overrides[o.key] || o.default || "default";
+      // modConfig 选项从 modoverrides.lua 读取当前值，worldgen 选项从 worldgenoverride.lua 读取
+      const cur = o.modConfig ? (o.current || o.default || "default") : (worldState.overrides[o.key] || o.default || "default");
       const labelOf = (v) => (o.values.find((x) => x.v === v) || {}).label || v;
       const tr = document.createElement("tr");
       tr.dataset.key = o.key;
@@ -825,11 +826,19 @@ async function loadModWorldgen() {
       tr.classList.add("sel");
       const o = worldState.mwMods[mi].options.find((x) => x.key === tr.dataset.key);
       if (!o) return;
-      const curVal = worldState.overrides[o.key] || o.default || "default";
+      const curVal = o.modConfig ? (o.current || o.default || "default") : (worldState.overrides[o.key] || o.default || "default");
       const iconSrcs = o.img && o.atlas ? [`icons/${o.atlas}/${o.img.replace(/\.tex$/, ".png")}`] : [];
       showWorldOptionPopup(o, curVal, iconSrcs, (val) => {
-        worldState.overrides[o.key] = val;
-        loadWorldOverrides();
+        if (o.modConfig) {
+          // modConfig 选项：直接保存到 modoverrides.lua
+          o.current = val;
+          // 立即触发保存（写入 modoverrides.lua）
+          api("world/overrides", { method: "POST", body: { shard: worldState.shard, overrides: { [o.key]: val } } })
+            .then(() => loadModWorldgen());
+        } else {
+          worldState.overrides[o.key] = val;
+          loadWorldOverrides();
+        }
       });
     };
   });
