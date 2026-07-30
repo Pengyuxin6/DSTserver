@@ -1684,8 +1684,8 @@ function parseModLevelPresets(text: string, modId = ""): ModWorldgenPreset[] {
   }
   return out;
 }
-// 检测并修复 modworldgenmain.lua 中引用了不存在 prefab 的拼写错误
-// 例：模组定义了 "sponge" 但 modworldgenmain 引用 "spongea"（模组作者笔误）
+// 检测并修复模组文件中的常见拼写错误（prefab 名和变量名）
+// 例：spongea → sponge，locks → lotus，keys → kelp
 function fixModworldgenPrefabs(id: string): number {
   const mw = join(ugcSharedDir(), id, "modworldgenmain.lua");
   if (!existsSync(mw)) return 0;
@@ -1736,10 +1736,35 @@ function fixModworldgenPrefabs(id: string): number {
       fixed++;
     }
   }
+  // 修复变量名笔误：检测"定义了 local X 但后续用了 Y"的模式
+  // 常见：local lotus = 1 → 后续用了 locks（应为 lotus）
+  // 或：local kelp = 1 → 后续用了 keys（应为 kelp）
+  const localVars = new Map<string, string>(); // wrongName → correctName
+  for (const m of text.matchAll(/local\s+([a-z_]\w*)\s*=\s*\d+/g)) {
+    const localVar = m[1];
+    // 查找后续代码中使用了与局部变量相似但未定义的名称
+    // 在 for 循环的 pairs() 或比较运算中
+    for (const fm of text.matchAll(/for\s+[^=]+,\s*([a-z_]\w*)\s+in\s+pairs\s*\(/g)) {
+      const loopVar = fm[1];
+      if (loopVar !== localVar && !text.includes(`local ${loopVar} `)) {
+        const dist = levenshtein(localVar, loopVar);
+        if (dist <= 1 && dist > 0) localVars.set(loopVar, localVar);
+      }
+    }
+  }
+  // 全面替换错误变量名（所有独立出现的位置，不影响 LOCKS./KEYS. 表名）
+  for (const [wrong, right] of localVars) {
+    const re = new RegExp(`\\b${wrong}\\b`, "g");
+    const count = (text.match(re) || []).length;
+    if (count > 0) {
+      text = text.replace(re, right);
+      fixed += count;
+    }
+  }
   if (fixed > 0) {
     try {
       writeFileSync(mw, text);
-      console.log(`[自动修复] 模组 ${id} 的 modworldgenmain.lua 修复了 ${fixed} 处 prefab 拼写错误：${[...suspicious].join(", ")}`);
+      console.log(`[自动修复] 模组 ${id} 的 modworldgenmain.lua 修复了 ${fixed} 处拼写错误`);
     } catch {}
   }
   return fixed;
