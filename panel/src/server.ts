@@ -683,15 +683,45 @@ function parseModInfo(id: string): ModInfo | null {
     configOptions: [],
   };
   // 兼容 configuration_options = { / = isCh and { / =\n{ 等写法
-  const cm = /configuration_options\s*=\s*(?:[\w.]+\s+and\s+)?\{/.exec(text);
-  if (cm) {
-    const openIdx = cm.index + cm[0].length - 1;
-    const end = braceMatch(text, openIdx);
-    if (end !== -1) {
-      const body = text.slice(openIdx + 1, end);
-      // 逐项（顶层 {...} 块）解析
-      let i = 0;
-      while (i < body.length) {
+  // 优先处理 X and {...} or {...} 模式（如 Legion 的 L and {英文} or {中文}）
+  let configBody = "";
+  const ternaryHead = /configuration_options\s*=\s*([\w.]+)\s+and\s*\{/.exec(text);
+  if (ternaryHead) {
+    // 解析 and 后的第一个 { ... } 块
+    const andOpen = ternaryHead.index + ternaryHead[0].length - 1;
+    const andEnd = braceMatch(text, andOpen);
+    if (andEnd !== -1) {
+      // 检查后面是否跟着 or {
+      const restAfterAnd = text.slice(andEnd + 1);
+      const trimmedRest = restAfterAnd.trimStart();
+      if (/^or\s*\{/.test(trimmedRest)) {
+        // 在原文中找到 or 后面的 {
+        const orKwIdx = text.indexOf("or", andEnd + 1);
+        const orBraceIdx = text.indexOf("{", orKwIdx);
+        const orEnd = braceMatch(text, orBraceIdx);
+        if (orEnd !== -1) {
+          const orBody = text.slice(orBraceIdx + 1, orEnd);
+          const andBody = text.slice(andOpen + 1, andEnd);
+          // 优先用 or 后面的块（中文），为空则回退 and 后面的块
+          configBody = orBody.trim() !== "" ? orBody : andBody;
+        }
+      } else {
+        configBody = text.slice(andOpen + 1, andEnd);
+      }
+    }
+  } else {
+    const cm = /configuration_options\s*=\s*(?:[\w.]+\s+and\s+)?\{/.exec(text);
+    if (cm) {
+      const openIdx = cm.index + cm[0].length - 1;
+      const end = braceMatch(text, openIdx);
+      if (end !== -1) configBody = text.slice(openIdx + 1, end);
+    }
+  }
+  if (configBody) {
+    const body = configBody;
+    // 逐项（顶层 {...} 块）解析
+    let i = 0;
+    while (i < body.length) {
         const ob = body.indexOf("{", i);
         if (ob === -1) break;
         const oe = braceMatch(body, ob);
@@ -729,8 +759,7 @@ function parseModInfo(id: string): ModInfo | null {
           }
         }
         if (opt.name) info.configOptions.push(opt);
-        i = oe + 1;
-      }
+      i = oe + 1;
     }
   }
   return info;
