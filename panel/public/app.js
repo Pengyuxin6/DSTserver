@@ -1142,7 +1142,12 @@ async function loadModDetail(id) {
     const tr = document.createElement("tr");
     const hasZh = o.label_zh && o.label_zh !== (o.label || o.name);
     const label = hasZh ? o.label_zh : (o.label || o.name);
-    tr.innerHTML = `<td>${esc(label)}${hasZh ? ` <span class="hint">${esc(o.label || o.name)}</span>` : ""}</td><td>${esc(fmt(o.current))}</td><td class="hint">${esc(fmt(o.default))}</td>`;
+    // 当前值/默认值显示中文描述而非原始数据
+    const labelOf = (val) => {
+      const found = o.options.find((op) => JSON.stringify(op.data) === JSON.stringify(val));
+      return found ? (found.description_zh || found.description || fmt(val)) : fmt(val);
+    };
+    tr.innerHTML = `<td>${esc(label)}${hasZh ? ` <span class="hint">${esc(o.label || o.name)}</span>` : ""}</td><td>${esc(labelOf(o.current))} <span class="hint">(${esc(fmt(o.current))})</span></td><td class="hint">${esc(labelOf(o.default))}</td>`;
     tr.onclick = () => {
       $$("tr", tbody).forEach((r) => r.classList.remove("sel"));
       tr.classList.add("sel");
