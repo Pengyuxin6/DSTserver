@@ -1,0 +1,18 @@
+msgid ""
+msgstr ""
+"Content-Type: text/plain; charset=UTF-8\n"
+
+#. STRINGS.NAMES.TWISTER
+msgctxt "STRINGS.NAMES.TWISTER"
+msgid "Twister"
+msgstr "龙卷风"
+
+#. STRINGS.NAMES.TIGERSHARK
+msgctxt "STRINGS.NAMES.TIGERSHARK"
+msgid "Tiger Shark"
+msgstr "虎鲨"
+
+#. STRINGS.NAMES.SWORDFISH
+msgctxt "STRINGS.NAMES.SWORDFISH"
+msgid "Swordfish"
+msgstr "剑鱼"
