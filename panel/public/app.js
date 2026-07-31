@@ -628,7 +628,7 @@ async function pageWorld() {
         </div>
         <div class="btn-row" style="margin-top:6px">
           <button class="btn" id="portResetW">↺ 恢复默认端口（Master 11000 / Caves 11001）</button>
-          <span class="hint">点世界旁的端口号可单独改</span>
+          <span class="hint">点世界旁的端口号可查看冲突详情并修改</span>
         </div>
       </div>
       <div class="card">
@@ -671,17 +671,11 @@ async function pageWorld() {
       const span = document.createElement("span");
       span.className = "port-edit" + (s.running ? " disabled" : "");
       span.textContent = s.port;
-      span.title = s.running ? "运行中不可修改" : "点击修改端口";
+      span.title = s.running ? "运行中不可修改" : "点击查看冲突详情 / 修改端口";
       span.onclick = async (e) => {
         e.stopPropagation();
         if (s.running) return;
-        const v = prompt(`修改 ${s.name} 的玩家连接端口（server_port，1024-65535）：`, s.port);
-        if (v === null) return;
-        const n = Number(v.trim());
-        if (!Number.isInteger(n) || n < 1024 || n > 65535) return toast("端口必须是 1024-65535 的整数", true);
-        const r = await api("server/ports", { method: "POST", body: { shards: { [s.name]: { serverPort: n } } } });
-        toast(r.msg, !r.ok);
-        if (r.ok) pageWorld();
+        showPortEditor(s.name, pageWorld, false);
       };
       div.appendChild(span);
     }
@@ -1577,6 +1571,62 @@ async function resetPortsDefault() {
   return !!r.ok;
 }
 
+// 端口编辑弹窗：显示当前端口、与其他存档的冲突详情（黄色提醒），可直接修改保存
+// shardName=分片名；refresh=保存成功后的刷新回调；running=分片运行中则只读
+async function showPortEditor(shardName, refresh, running) {
+  const pj = await apiQuiet("server/ports");
+  if (!pj) { toast("端口信息读取失败", true); return; }
+  const p = pj.data;
+  const shard = (p.shards || []).find((s) => s.name === shardName);
+  if (!shard) { toast("未找到分片 " + shardName, true); return; }
+  const others = p.others || [];
+  const isDefaultPort = shard.isMaster ? 11000 : 11001;
+  const overlay = document.createElement("div");
+  overlay.className = "dlg-overlay";
+  overlay.innerHTML = `
+    <div class="dlg-card" style="min-width:420px;max-width:560px">
+      <div class="dlg-msg" style="margin-bottom:10px"><b>修改端口 — ${esc(shardName)}</b> <span class="hint">（${shard.isMaster ? "地上·主世界" : "地下/附加层"}）</span></div>
+      ${running ? '<div class="multi-err" style="margin-bottom:10px">分片运行中，端口只读。请先关闭服务器再修改。</div>' : ""}
+      <div class="row"><label style="min-width:200px">玩家连接端口 server_port</label>
+        <input type="number" class="port-input" id="pePort" value="${shard.serverPort}" min="1024" max="65535" ${running ? "disabled" : ""} style="width:120px"></div>
+      <div class="row"><label style="min-width:200px">Steam 查询/认证端口</label>
+        <span class="hint">${shard.masterServerPort} / ${shard.authPort}（在服务器管理·端口设置中修改）</span></div>
+      <div id="peClash" style="margin:10px 0;font-size:13px;line-height:1.8"></div>
+      <div class="btn-row" style="justify-content:flex-end;margin-bottom:0">
+        <button class="btn" id="peCancel">取消</button>
+        ${running ? "" : '<button class="btn" id="peDefault">恢复默认（' + isDefaultPort + "）</button>"}
+        ${running ? "" : '<button class="btn primary" id="peSave">保存</button>'}
+      </div>
+    </div>`;
+  document.body.appendChild(overlay);
+  const input = overlay.querySelector("#pePort");
+  const clashBox = overlay.querySelector("#peClash");
+  const renderClash = () => {
+    const n = Number(input.value);
+    if (!Number.isInteger(n) || n < 1024 || n > 65535) { clashBox.innerHTML = '<span class="multi-err" style="margin:0">端口必须是 1024-65535 的整数</span>'; return; }
+    const hits = others.filter((o) => o.ports.includes(n));
+    if (!hits.length) { clashBox.innerHTML = '<span style="color:var(--green,#6f6)">✓ 没有其他存档使用该端口，无冲突</span>'; return; }
+    clashBox.innerHTML = hits.map((o) =>
+      `<span style="color:var(--amber)">⚠ 端口 ${n} 与${o.running ? "<b>正在运行</b>的" : ""}存档「${esc(o.cluster)}」相同（端口 ${o.ports.join("/")}）——可保留，两个服务器同时启动才会冲突</span>`
+    ).join("<br>");
+  };
+  input.oninput = renderClash;
+  renderClash();
+  const close = () => overlay.remove();
+  overlay.onclick = (e) => { if (e.target === overlay) close(); };
+  overlay.querySelector("#peCancel").onclick = close;
+  const defBtn = overlay.querySelector("#peDefault");
+  if (defBtn) defBtn.onclick = () => { input.value = isDefaultPort; renderClash(); };
+  const saveBtn = overlay.querySelector("#peSave");
+  if (saveBtn) saveBtn.onclick = async () => {
+    const n = Number(input.value);
+    if (!Number.isInteger(n) || n < 1024 || n > 65535) return toast("端口必须是 1024-65535 的整数", true);
+    const r = await api("server/ports", { method: "POST", body: { shards: { [shardName]: { serverPort: n } } } });
+    toast(r.msg, !r.ok);
+    if (r.ok) { close(); refresh(); }
+  };
+}
+
 // ============ 4. 服务器管理 ============
 async function pageServer() {
   const j = await apiQuiet("server/status");
@@ -1589,7 +1639,7 @@ async function pageServer() {
   const canUnlock = blocked && d.canMultiOpen;
   const shardRows = d.shards.map((s) =>
     `<tr><td><span class="status-dot ${s.running ? "on" : "off"}"></span>${esc(s.name)}（${s.isMaster ? "地上·主世界" : "地下"}）</td>
-     <td>${s.running ? "运行中" : "未运行"}</td><td><span class="port-edit${s.running ? " disabled" : ""}" data-shard="${esc(s.name)}" data-port="${esc(s.port || "")}" title="${s.running ? "运行中不可修改" : "点击修改端口"}">${esc(s.port || "默认")}</span></td></tr>`).join("");
+     <td>${s.running ? "运行中" : "未运行"}</td><td><span class="port-edit${s.running ? " disabled" : ""}" data-shard="${esc(s.name)}" data-port="${esc(s.port || "")}" title="${s.running ? "运行中不可修改" : "点击查看冲突详情 / 修改端口"}">${esc(s.port || "默认")}</span></td></tr>`).join("");
   content.innerHTML = `
   <div class="card">
     <h3>服务器控制</h3>
@@ -1615,7 +1665,7 @@ async function pageServer() {
     <table class="grid"><thead><tr><th>分片</th><th>状态</th><th>端口</th></tr></thead><tbody>${shardRows}</tbody></table>
     <div class="btn-row" style="margin-top:8px">
       <button class="btn" id="portReset" ${d.currentRunning ? "disabled" : ""}>↺ 恢复默认端口（Master 11000 / Caves 11001）</button>
-      <span class="hint">点端口号可单独修改；与其他存档端口相同只黄色提醒，不同时启动即可</span>
+      <span class="hint">点端口号查看冲突详情并修改；与其他存档端口相同只黄色提醒，不同时启动即可</span>
     </div>
     <div class="row" style="margin-top:10px"><label>自动重启</label>
       <label class="switch" title="每 30 秒检查分片，掉线自动拉起"><input type="checkbox" id="arSwitch" ${d.autorestart ? "checked" : ""}><span class="slider"></span></label>
@@ -1725,17 +1775,7 @@ async function pageServer() {
   $("#portReset").onclick = async () => { if (await resetPortsDefault()) pageServer(); };
   $$(".port-edit[data-shard]").forEach((el) => {
     if (el.classList.contains("disabled")) return;
-    el.onclick = async () => {
-      const shardName = el.dataset.shard;
-      const cur = el.dataset.port || (shardName === "Caves" ? "11001" : "11000");
-      const v = prompt(`修改 ${shardName} 分片的玩家连接端口（server_port，1024-65535）：`, cur);
-      if (v === null) return;
-      const n = Number(v.trim());
-      if (!Number.isInteger(n) || n < 1024 || n > 65535) return toast("端口必须是 1024-65535 的整数", true);
-      const r = await api("server/ports", { method: "POST", body: { shards: { [shardName]: { serverPort: n } } } });
-      toast(r.msg, !r.ok);
-      if (r.ok) pageServer();
-    };
+    el.onclick = () => showPortEditor(el.dataset.shard, pageServer, false);
   });
   $("#start").onclick = async () => {
     // 汉化检测

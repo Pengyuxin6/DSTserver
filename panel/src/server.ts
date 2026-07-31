@@ -648,19 +648,22 @@ function listShards(): ShardInfo[] {
     const ini = join(dir, "server.ini");
     if (existsSync(ini)) {
       const lines = parseIni(readText(ini));
+      const isMaster = iniGet(lines, "SHARD", "is_master") === "true";
       out.push({
         name: e,
-        isMaster: iniGet(lines, "SHARD", "is_master") === "true",
-        port: iniGet(lines, "NETWORK", "server_port") || "",
+        isMaster,
+        // 未显式配置 server_port 时回退面板默认端口（地上 11000 / 地下 11001），保证世界列表/分片表始终可点改
+        port: iniGet(lines, "NETWORK", "server_port") || (isMaster ? "11000" : "11001"),
         running: false,
         hasIni: true,
       });
     } else if (existsSync(join(dir, "worldgenoverride.lua")) || existsSync(join(dir, "save"))) {
-      // 既有世界文件夹（客户端存档）：按名字推断主/副世界，端口用 Klei 默认
+      // 既有世界文件夹（客户端存档）：按名字推断主/副世界，端口用面板默认
+      const isMaster = /^master$/i.test(e);
       out.push({
         name: e,
-        isMaster: /^master$/i.test(e),
-        port: "",
+        isMaster,
+        port: isMaster ? "11000" : "11001",
         running: false,
         hasIni: false,
       });
