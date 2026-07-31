@@ -1,54 +1,71 @@
 @echo off
 REM ============================================================
-REM  DSTserver ç®¡ç†é¢æ¿ï¼ˆWindows ç‰ˆï¼‰
-REM  å…¨éƒ¨ä½¿ç”¨ Windows è‡ªå¸¦å‘½ä»¤ï¼ˆcmd + PowerShellï¼‰ï¼Œæ— éœ€ç¬¬ä¸‰æ–¹è½¯ä»¶
-REM  åŠŸèƒ½ï¼šå¯åŠ¨é¢æ¿ / æ‰“åŒ… exeï¼ˆè¯¢é—®ç®¡ç†å‘˜æƒé™ï¼‰/ é˜²ç«å¢™è§„åˆ™ / å®‰è£… DST æœåŠ¡ç«¯
+REM  DSTserver ¹ÜÀíÃæ°å£¨Windows °æ£©
+REM  È«²¿Ê¹ÓÃ Windows ×Ô´øÃüÁî£¨cmd + PowerShell£©£¬ÎŞĞèµÚÈı·½Èí¼ş
+REM  ¹¦ÄÜ£ºÆô¶¯Ãæ°å / ´ò°ü exe£¨Ñ¯ÎÊ¹ÜÀíÔ±È¨ÏŞ£©/ ·À»ğÇ½¹æÔò / °²×° DST ·şÎñ¶Ë
+REM  ×¢Òâ£º±¾ÎÄ¼ş±ØĞëÎª GBK(ANSI) ±àÂë + CRLF »»ĞĞ£¬·ñÔòÖĞÎÄ cmd ½âÎö»á´íÂÒ
 REM ============================================================
-setlocal EnableExtensions
-cd /d "%~dp0"
-title DSTserver ç®¡ç†é¢æ¿
+setlocal EnableExtensions EnableDelayedExpansion
+title DSTserver ¹ÜÀíÃæ°å
 
-REM å†…éƒ¨å…¥å£ï¼ˆç®¡ç†å‘˜æ¨¡å¼å›è°ƒï¼‰
+REM ---------- ¶¨Î»ÏîÄ¿¸ùÄ¿Â¼£¨bat ¿É·ÅÔÚÏîÄ¿¸ùÄ¿Â¼»ò windows\ ×ÓÄ¿Â¼£© ----------
+set "ROOT=%~dp0"
+if not exist "%ROOT%panel\src\server.ts" (
+  if exist "%ROOT%..\panel\src\server.ts" set "ROOT=%ROOT%..\"
+)
+cd /d "%ROOT%"
+
+REM ÄÚ²¿Èë¿Ú£¨¹ÜÀíÔ±Ä£Ê½»Øµ÷£©
 if "%~1"==":dobuild" goto dobuild
 if "%~1"==":dofw" goto dofw
 
-REM ---------- æ£€æŸ¥ Bunï¼ˆé¢æ¿è¿è¡Œæ—¶ï¼Œå†…å­˜/CPU å ç”¨æå°ï¼‰ ----------
+REM ---------- ¼ì²é Bun£¨Ãæ°åÔËĞĞÊ±£¬ÄÚ´æ/CPU Õ¼ÓÃ¼«Ğ¡£© ----------
 where bun >nul 2>nul
 if errorlevel 1 (
   if exist "%USERPROFILE%\.bun\bin\bun.exe" (
     set "PATH=%USERPROFILE%\.bun\bin;%PATH%"
   ) else (
-    echo [DSTserver] æœªæ£€æµ‹åˆ° Bunï¼Œæ­£åœ¨é€šè¿‡ PowerShell å®‰è£…ï¼ˆä»…é¦–æ¬¡ï¼‰...
-    powershell -NoProfile -ExecutionPolicy Bypass -Command "irm bun.sh/install.ps1 | iex"
+    echo [DSTserver] Î´¼ì²âµ½ Bun£¬ÕıÔÚ´Ó¹úÄÚ¾µÏñ°²×°£¨½öÊ×´Î£¬Ô¼ 30MB£©...
+    powershell -NoProfile -ExecutionPolicy Bypass -File "%ROOT%windows\install_bun.ps1"
+    if errorlevel 1 (
+      echo [DSTserver] Bun °²×°Ê§°Ü£¬Çë¼ì²éÍøÂçºóÖØÊÔ¡£
+      pause
+      exit /b 1
+    )
     set "PATH=%USERPROFILE%\.bun\bin;%PATH%"
   )
 )
 
 if not exist panel\src\server.ts (
-  echo [DSTserver] æœªæ‰¾åˆ° panel\src\server.tsï¼Œè¯·ç¡®è®¤æœ¬ bat ä½äº DSTserver é¡¹ç›®æ ¹ç›®å½•ã€‚
+  echo [DSTserver] Î´ÕÒµ½ panel\src\server.ts£¬ÇëÈ·ÈÏ±¾ bat Î»ÓÚ DSTserver ÏîÄ¿ÄÚ¡£
   pause
   exit /b 1
 )
 
-REM ---------- é¦–æ¬¡è¿è¡Œï¼šè®¾ç½®é¢æ¿å¯†ç  ----------
+REM ---------- Ê×´ÎÔËĞĞ£ºÉèÖÃÃæ°åÃÜÂë ----------
 if not exist panel\.panel_password (
-  echo [DSTserver] é¦–æ¬¡è¿è¡Œï¼Œè¯·è®¾ç½®é¢æ¿è®¿é—®å¯†ç ï¼ˆç™»å½•ç½‘é¡µç®¡ç†é¢æ¿ç”¨ï¼‰ï¼š
-  set /p PANELPW=å¯†ç :
-  > panel\.panel_password echo %PANELPW%
+  echo [DSTserver] Ê×´ÎÔËĞĞ£¬ÇëÉèÖÃÃæ°å·ÃÎÊÃÜÂë£¨µÇÂ¼ÍøÒ³¹ÜÀíÃæ°åÓÃ£©£º
+  set /p PANELPW=ÃÜÂë:
+  if "!PANELPW!"=="" (
+    echo [DSTserver] ÃÜÂë²»ÄÜÎª¿Õ£¬ÇëÖØĞÂÔËĞĞ±¾³ÌĞò¡£
+    pause
+    exit /b 1
+  )
+  > panel\.panel_password echo !PANELPW!
 )
 
 :menu
 cls
-echo ================== DSTserver ç®¡ç†é¢æ¿ ==================
+echo ================== DSTserver ¹ÜÀíÃæ°å ==================
 echo.
-echo   1. å¯åŠ¨ç®¡ç†é¢æ¿ ( http://localhost:5323/ )
-echo   2. æ‰“åŒ…ä¸º DSTserver.exe ( è¯¢é—®ç®¡ç†å‘˜æƒé™ )
-echo   3. æ·»åŠ é˜²ç«å¢™è§„åˆ™ ( DST UDP 10999-11001, éœ€ç®¡ç†å‘˜ )
-echo   4. å®‰è£…/æ›´æ–° DST ä¸“ç”¨æœåŠ¡å™¨ ( SteamCMD, çº¦ 3GB )
-echo   0. é€€å‡º
+echo   1. Æô¶¯¹ÜÀíÃæ°å ( http://localhost:5323/ )
+echo   2. ´ò°üÎª DSTserver.exe ( Ñ¯ÎÊ¹ÜÀíÔ±È¨ÏŞ )
+echo   3. Ìí¼Ó·À»ğÇ½¹æÔò ( DST UDP 10999-11001, Ğè¹ÜÀíÔ± )
+echo   4. °²×°/¸üĞÂ DST ×¨ÓÃ·şÎñÆ÷ ( SteamCMD, Ô¼ 3GB )
+echo   0. ÍË³ö
 echo.
 echo ======================================================
-set /p choice=è¯·é€‰æ‹© [0-4]:
+set /p choice=ÇëÑ¡Ôñ [0-4]:
 if "%choice%"=="1" goto run
 if "%choice%"=="2" goto build
 if "%choice%"=="3" goto firewall
@@ -57,71 +74,70 @@ if "%choice%"=="0" exit /b 0
 goto menu
 
 :run
-echo [DSTserver] å¯åŠ¨ç®¡ç†é¢æ¿: http://localhost:5323/  (å…³é—­æœ¬çª—å£å³åœæ­¢é¢æ¿)
+echo [DSTserver] Æô¶¯¹ÜÀíÃæ°å: http://localhost:5323/  (¹Ø±Õ±¾´°¿Ú¼´Í£Ö¹Ãæ°å)
 start "" "http://localhost:5323/"
 cd panel
 bun run src/server.ts
-cd /d "%~dp0"
+cd /d "%ROOT%"
 pause
 goto menu
 
 :build
-echo [DSTserver] æ‰“åŒ…éœ€è¦ç®¡ç†å‘˜æƒé™ï¼ˆå°†å¼¹å‡º UAC ç¡®è®¤æ¡†ï¼‰...
+echo [DSTserver] ´ò°üĞèÒª¹ÜÀíÔ±È¨ÏŞ£¨½«µ¯³ö UAC È·ÈÏ¿ò£©...
 powershell -NoProfile -Command "Start-Process -Verb RunAs -Wait cmd -ArgumentList '/c \"\"%~f0\" :dobuild\"'"
 goto menu
 
 :dobuild
-cd /d "%~dp0"
-title DSTserver æ‰“åŒ…ï¼ˆç®¡ç†å‘˜ï¼‰
+title DSTserver ´ò°ü£¨¹ÜÀíÔ±£©
 set "PATH=%USERPROFILE%\.bun\bin;%PATH%"
 where bun >nul 2>nul
 if errorlevel 1 (
-  echo æœªæ‰¾åˆ° Bunï¼Œè¯·å…ˆåœ¨æ™®é€šæ¨¡å¼è¿è¡Œä¸€æ¬¡æœ¬ç¨‹åºå®Œæˆ Bun å®‰è£…ã€‚
+  echo Î´ÕÒµ½ Bun£¬ÇëÏÈÔÚÆÕÍ¨Ä£Ê½ÔËĞĞÒ»´Î±¾³ÌĞòÍê³É Bun °²×°¡£
   pause
   exit /b 1
 )
 if not exist dist mkdir dist
-echo æ­£åœ¨ç¼–è¯‘ DSTserver.exe ...
+echo ÕıÔÚ±àÒë DSTserver.exe ...
 bun build --compile panel\src\server.ts --outfile dist\DSTserver.exe
 if errorlevel 1 (
-  echo æ‰“åŒ…å¤±è´¥ï¼Œè¯·æ£€æŸ¥é”™è¯¯ä¿¡æ¯ã€‚
+  echo ´ò°üÊ§°Ü£¬Çë¼ì²é´íÎóĞÅÏ¢¡£
   pause
   exit /b 1
 )
-echo å¤åˆ¶é¢æ¿èµ„æºï¼ˆpublic / dataï¼‰...
+echo ¸´ÖÆÃæ°å×ÊÔ´£¨public / data£©...
 xcopy /E /I /Y /Q panel\public dist\public >nul
 xcopy /E /I /Y /Q panel\data dist\data >nul
 if exist panel\.panel_password copy /Y panel\.panel_password dist\.panel_password >nul
 echo.
-echo æ‰“åŒ…å®Œæˆ: dist\DSTserver.exe
-echo åŒå‡»å³ç”¨ï¼ˆèµ„æºå·²é…å¥—æ”¾åœ¨ dist ç›®å½•ï¼‰ï¼Œé¢æ¿åœ°å€ http://localhost:5323/
+echo ´ò°üÍê³É: dist\DSTserver.exe
+echo Ë«»÷¼´ÓÃ£¨×ÊÔ´ÒÑÅäÌ×·ÅÔÚ dist Ä¿Â¼£©£¬Ãæ°åµØÖ· http://localhost:5323/
 pause
 exit /b 0
 
 :firewall
-echo [DSTserver] æ·»åŠ é˜²ç«å¢™è§„åˆ™éœ€è¦ç®¡ç†å‘˜æƒé™ï¼ˆå°†å¼¹å‡º UAC ç¡®è®¤æ¡†ï¼‰...
+echo [DSTserver] Ìí¼Ó·À»ğÇ½¹æÔòĞèÒª¹ÜÀíÔ±È¨ÏŞ£¨½«µ¯³ö UAC È·ÈÏ¿ò£©...
 powershell -NoProfile -Command "Start-Process -Verb RunAs -Wait cmd -ArgumentList '/c \"\"%~f0\" :dofw\"'"
 goto menu
 
 :dofw
-title DSTserver é˜²ç«å¢™è§„åˆ™ï¼ˆç®¡ç†å‘˜ï¼‰
+title DSTserver ·À»ğÇ½¹æÔò£¨¹ÜÀíÔ±£©
 for %%P in (10999 11000 11001) do (
   netsh advfirewall firewall add rule name="DST UDP %%P" dir=in action=allow protocol=UDP localport=%%P >nul 2>nul
-  echo å·²æ”¾è¡Œ UDP %%P
+  echo ÒÑ·ÅĞĞ UDP %%P
 )
-echo é˜²ç«å¢™è§„åˆ™æ·»åŠ å®Œæˆã€‚
+echo ·À»ğÇ½¹æÔòÌí¼ÓÍê³É¡£
 pause
 exit /b 0
 
 :steamcmd
 if not exist panel\steamcmd\steamcmd.exe (
-  echo [DSTserver] ä¸‹è½½ SteamCMD ...
+  echo [DSTserver] ÏÂÔØ SteamCMD ...
   if not exist panel\steamcmd mkdir panel\steamcmd
   powershell -NoProfile -Command "Invoke-WebRequest -Uri 'https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip' -OutFile \"$env:TEMP\steamcmd.zip\""
-  powershell -NoProfile -Command "Expand-Archive -Force \"$env:TEMP\steamcmd.zip\" '%~dp0panel\steamcmd'"
+  powershell -NoProfile -Command "Expand-Archive -Force \"$env:TEMP\steamcmd.zip\" '%ROOT%panel\steamcmd'"
 )
-echo [DSTserver] å®‰è£…/æ›´æ–° DST ä¸“ç”¨æœåŠ¡å™¨ï¼ˆapp 343050ï¼‰åˆ° panel\dst_server ...
-panel\steamcmd\steamcmd.exe +force_install_dir "%~dp0panel\dst_server" +login anonymous +app_update 343050 validate +quit
-echo å®Œæˆã€‚å¯åŠ¨é¢æ¿ååœ¨ã€ŒåŸºæœ¬è®¾ç½®ã€ç¡®è®¤æœåŠ¡å™¨ç›®å½•: %~dp0panel\dst_server
+echo [DSTserver] °²×°/¸üĞÂ DST ×¨ÓÃ·şÎñÆ÷£¨app 343050£©µ½ panel\dst_server ...
+panel\steamcmd\steamcmd.exe +force_install_dir "%ROOT%panel\dst_server" +login anonymous +app_update 343050 validate +quit
+echo Íê³É¡£Æô¶¯Ãæ°åºóÔÚ¡¸»ù±¾ÉèÖÃ¡¹È·ÈÏ·şÎñÆ÷Ä¿Â¼: %ROOT%panel\dst_server
 pause
 goto menu

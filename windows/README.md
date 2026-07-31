@@ -4,7 +4,8 @@ Windows 版与网页版功能一致：基本设置、编辑世界、mod 设置�
 
 ## 快速开始
 
-1. 把 `DSTserver.bat` 放在 DSTserver 项目根目录（与 `panel/` 同级）。
+1. 双击 `windows/DSTserver.bat` 即可（自动定位项目根目录；也可以复制到项目根目录使用）。
+   注意：bat 文件为 GBK(ANSI) 编码 + CRLF 换行，请勿用编辑器另存为 UTF-8，否则中文 cmd 会解析错乱。
 2. 双击运行，菜单选择：
    - **1. 启动管理面板** — 开发模式（`bun run`），自动打开 http://localhost:5323/
    - **2. 打包为 DSTserver.exe** — 弹出 UAC 询问管理员权限，生成 `dist/DSTserver.exe`（单文件 + 配套 public/data 资源，双击即用，无需安装环境）
@@ -12,7 +13,7 @@ Windows 版与网页版功能一致：基本设置、编辑世界、mod 设置�
    - **4. 安装/更新 DST 专用服务器** — 用 SteamCMD 下载 app 343050 到 `panel/dst_server`
 3. 首次运行会要求设置面板密码（存 `panel/.panel_password`）。
 
-只使用 Windows 自带命令（cmd + PowerShell），运行时仅需 Bun（首次自动安装到 `%USERPROFILE%\.bun`）。面板进程为 Bun 单进程，内存/CPU 占用极小（空闲时内存 < 100MB）。
+只使用 Windows 自带命令（cmd + PowerShell），运行时仅需 Bun（首次经 `windows/install_bun.ps1` 自动安装到 `%USERPROFILE%\.bun`，优先走 npmmirror 国内镜像，失败自动回退官方脚本）。面板进程为 Bun 单进程，内存/CPU 占用极小（空闲时内存 < 100MB）。
 
 ## Windows 专属功能
 
