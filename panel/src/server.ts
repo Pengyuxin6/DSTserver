@@ -44,16 +44,14 @@ function sleep(ms: number) {
 // 系统资源检测：启动服务器前检查剩余内存和 CPU
 function checkResources(): { ok: boolean; msg: string } {
   try {
-    const memText = readText("/proc/meminfo");
-    const memAvail = /MemAvailable:\s+(\d+)/.exec(memText);
-    const availMB = memAvail ? Math.floor(Number(memAvail[1]) / 1024) : 0;
+    const sysMem = getSystemMemory();
+    if (sysMem.avail > 0 && sysMem.avail < 512) {
+      return { ok: false, msg: `系统可用内存仅 ${sysMem.avail}MB，请关闭其他服务后再启动` };
+    }
     const loadText = readText("/proc/loadavg");
     const load1 = parseFloat(loadText.split(/\s+/)[0]) || 0;
     const cpuCount = (require("node:os") as any).cpus ? (require("node:os").cpus().length || 4) : 4;
     const cpuPct = Math.round((load1 / cpuCount) * 100);
-    if (availMB > 0 && availMB < 256) {
-      return { ok: false, msg: `系统可用内存仅 ${availMB}MB，请关闭其他服务后再启动` };
-    }
     if (cpuPct > 90) {
       return { ok: false, msg: `CPU 负载过高（${cpuPct}%），建议等待负载降低后再启动` };
     }
@@ -3676,15 +3674,14 @@ const server = Bun.serve({
 console.log(`DST 管理面板已启动: http://127.0.0.1:${PORT}/  (当前存档: ${panelConfig.cluster})`);
 
 // ---------- 定时任务 ----------
-// 自动重启：每 30 秒检查分片 + 系统内存保护
+// 自动重启：每 10 秒检查分片 + 系统内存保护
 setInterval(async () => {
   if (!panelConfig.autorestart) return;
   try {
-    // 系统内存保护：当系统可用内存低于 256MB 时终止 DST（防止系统崩溃）
+    // 系统内存保护：当系统可用内存低于 512MB 时终止 DST（防止系统崩溃）
     const sysMem = getSystemMemory();
-    if (sysMem.avail > 0 && sysMem.avail < 256) {
-      const mem = getDstProcessMemory();
-      console.log(`[内存保护] 系统可用内存仅 ${sysMem.avail}MB（DST 占用 ${mem}MB），正在终止 DST 防止系统崩溃...`);
+    if (sysMem.avail > 0 && sysMem.avail < 512) {
+      console.log(`[内存保护] 系统可用内存仅 ${sysMem.avail}MB，正在终止 DST 防止系统崩溃...`);
       for (const s of listShards()) await stopShard(s.name);
       try { Bun.spawnSync(["sh", "-c", "echo 1 > /proc/sys/vm/drop_caches 2>/dev/null || true"]); } catch {}
       console.log("[内存保护] DST 服务器已终止，可手动重新启动");
