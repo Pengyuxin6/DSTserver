@@ -3671,10 +3671,10 @@ console.log(`DST 管理面板已启动: http://127.0.0.1:${PORT}/  (当前存档
 setInterval(async () => {
   if (!panelConfig.autorestart) return;
   try {
-    // 系统内存保护：当系统可用内存低于 512MB 时终止 DST（防止系统崩溃）
+    // 内存保护：系统可用内存低于 512MB 时终止 DST
     const sysMem = getSystemMemory();
     if (sysMem.avail > 0 && sysMem.avail < 512) {
-      console.log(`[内存保护] 系统可用内存仅 ${sysMem.avail}MB，正在终止 DST 防止系统崩溃...`);
+      console.log(`[内存保护] 系统可用内存仅 ${sysMem.avail}MB，正在终止 DST...`);
       for (const s of listShards()) await stopShard(s.name);
       try { Bun.spawnSync(["sh", "-c", "echo 1 > /proc/sys/vm/drop_caches 2>/dev/null || true"]); } catch {}
       console.log("[内存保护] DST 服务器已终止，可手动重新启动");
