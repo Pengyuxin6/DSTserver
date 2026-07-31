@@ -474,12 +474,13 @@ async function startShard(shard: string): Promise<string> {
     extraArgs.push("-persistent_storage_root", parent, "-conf_dir", conf);
   }
   if (panelConfig.mode === "offline") extraArgs.push("-offline");
-  // 使用 systemd-run --scope 在独立 cgroup 中启动，通过 MemoryMax 硬性限制实际内存使用
-  const screenCmd = `screen -dmS ${screenSession(shard)} ${BIN} -cluster ${panelConfig.cluster} -shard ${shard} ${extraArgs.join(" ")}`.trim();
-  const sdArgs = memLimitMB > 0
-    ? ["systemd-run", "--scope", `-p`, `MemoryMax=${memLimitMB}M`, `--unit=dst-${shard.toLowerCase()}`, "sh", "-c", screenCmd]
-    : ["screen", "-dmS", screenSession(shard), BIN, "-cluster", panelConfig.cluster, "-shard", shard, ...extraArgs];
-  const r = await run(sdArgs, { cwd: BIN_DIR });
+  // 通过 sudo 调用 cgroup 启动脚本，限制 DST 进程实际内存
+  const args = [
+    "sudo", "/usr/local/bin/dst-shard-launch.sh",
+    shard, screenSession(shard), BIN, BIN_DIR, panelConfig.cluster,
+    String(memLimitMB), ...extraArgs,
+  ];
+  const r = await run(args, { cwd: BIN_DIR });
   return r.code === 0 ? "ok" : r.out;
 }
 async function stopShard(shard: string): Promise<void> {
