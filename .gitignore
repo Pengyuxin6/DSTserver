@@ -1,3 +1,12 @@
 .DS_Store
 Thumbs.db
 *.log
+# Windows 本地运行产物（不提交）
+dist/
+panel/.panel_password
+panel/.panel_salt
+panel/panel_config.json
+panel/mod_cache.json
+panel/dst_mods/
+panel/dst_server/
+panel/steamcmd/
