@@ -1,19 +1,40 @@
-# Windows 版说明（开发中）
+# DSTserver 管理面板（Windows 版）
 
-## 当前状态
+Windows 版与网页版功能一致：基本设置、编辑世界、mod 设置、服务器管理、控制台、聊天记录、日志、公告，外加 Windows 专属能力。
 
-`DSTserver.bat` 是一个本地启动器：双击后自动安装 Bun（如缺失）、启动 Web 管理面板并打开浏览器（http://localhost:5323/）。
+## 快速开始
 
-## 路线图
+1. 把 `DSTserver.bat` 放在 DSTserver 项目根目录（与 `panel/` 同级）。
+2. 双击运行，菜单选择：
+   - **1. 启动管理面板** — 开发模式（`bun run`），自动打开 http://localhost:5323/
+   - **2. 打包为 DSTserver.exe** — 弹出 UAC 询问管理员权限，生成 `dist/DSTserver.exe`（单文件 + 配套 public/data 资源，双击即用，无需安装环境）
+   - **3. 添加防火墙规则** — 放行 DST UDP 10999-11001（管理员）
+   - **4. 安装/更新 DST 专用服务器** — 用 SteamCMD 下载 app 343050 到 `panel/dst_server`
+3. 首次运行会要求设置面板密码（存 `panel/.panel_password`）。
 
-Windows 完整支持分两步走：
+只使用 Windows 自带命令（cmd + PowerShell），运行时仅需 Bun（首次自动安装到 `%USERPROFILE%\.bun`）。面板进程为 Bun 单进程，内存/CPU 占用极小（空闲时内存 < 100MB）。
 
-1. **第一阶段（当前）**：面板可在 Windows 本地运行，用于管理**远程 Linux 服务器**（面板内的服务器目录/存档目录等路径配置项指向远程）。
-2. **第二阶段（计划中）**：完整 Windows 部署——
-   - 使用 Windows 版 SteamCMD 下载 `Don't Starve Together Dedicated Server` 工具
-   - 面板路径/进程管理适配 Windows（计划任务替代 systemd、防火墙规则脚本化）
-   - 打包为单一可执行应用（计划用 Bun 的 `bun build --compile` 生成 `DSTserver.exe`，双击即用，无需安装环境）
+## Windows 专属功能
 
-## 为什么先用 .bat
+- **进程直连**：启动/停止 DST 服务器无需 screen/systemd，面板直接拉起 `dontstarve_dedicated_server_nullrenderer.exe`，控制台命令经 stdin 注入。
+- **资源监控**：服务器管理页实时显示 CPU 使用率、系统内存、DST 进程内存（PowerShell Get-Process 汇总）。
+- **本地模组库**（mod 设置页顶部）：自动扫描本机 Steam 库（含 `libraryfolders.vdf` 里的附加库）中已下载的 DST 模组：
+  - 创意工坊缓存 `steamapps/workshop/content/322330/<id>`
+  - 游戏/专用服务器 `steamapps/common/.../mods/workshop-<id>`
+  - 一键「复用到服务器」，复制到面板模组统一目录并写入 `SOURCE.txt` 标明来源地址，可直接开房间。
+  - 模组统一存放目录（默认 `panel/dst_mods`）内含 `_模组存放目录说明.txt` 标明地址，面板界面也显示该地址，可一键打开文件夹。
+- **图片解析**：模组物品图标（KTEX → PNG）在 Windows 上同样可用，与网页版一致。
+- **多开保护**：空余内存不足 4G 时禁止多开；端口冲突时列出需要修改的端口、配置文件与键名。
 
-面板后端（`panel/src/server.ts`）目前硬编码了 Linux 路径（`/home/steam`）与 screen/systemd 进程模型，直接跑在 Windows 上无法管理游戏服务端。在第二阶段完成前，**推荐的生产部署方式仍是 Linux 一键脚本**（见项目根 README）。
+## 打包说明
+
+`bun build --compile` 生成单 exe，但面板网页资源不内嵌：`DSTserver.exe` 需与 `public/`、`data/` 同目录（打包脚本已自动复制到 `dist/`）。分发时整个 `dist/` 目录一起拷贝即可。
+
+## 默认路径
+
+| 内容 | 路径 |
+| --- | --- |
+| 存档根目录 | `文档\Klei\DoNotStarveTogether` |
+| 模组统一目录 | `panel/dst_mods`（exe 版：`dist/dst_mods`） |
+| DST 服务端 | `panel/dst_server`（菜单 4 安装，可在基本设置修改） |
+| 面板密码/配置 | `panel/.panel_password`、`panel/panel_config.json` |

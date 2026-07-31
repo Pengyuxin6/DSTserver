@@ -6,11 +6,12 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const content = $("#content");
 
 
-// 设置项图标：<img> 带备选链（srcs 依次尝试，全部失败则隐藏）
-function optIcon(srcs) {
+// 设置项图标：<img> 带备选链（srcs 依次尝试，全部失败则显示首字符占位块）
+function optIcon(srcs, ch) {
   const list = srcs.filter(Boolean);
-  if (!list.length) return "";
-  return `<img class="opt-icon" src="${list[0]}" data-fb="${list.slice(1).join(",")}" loading="lazy" onerror="optIconErr(this)">`;
+  const c = (ch || "").trim().slice(0, 1);
+  if (!list.length) return c ? `<span class="opt-icon opt-icon-empty" data-ch="${esc(c)}"></span>` : "";
+  return `<img class="opt-icon" src="${list[0]}" data-fb="${list.slice(1).join(",")}" data-ch="${esc(c)}" loading="lazy" onerror="optIconErr(this)">`;
 }
 function optIconErr(img) {
   const rest = (img.dataset.fb || "").split(",").filter(Boolean);
@@ -19,7 +20,8 @@ function optIconErr(img) {
     img.dataset.fb = rest.slice(1).join(",");
   } else {
     img.onerror = null;
-    img.outerHTML = '<span class="opt-icon opt-icon-empty"></span>';
+    const ch = img.dataset.ch || "";
+    img.outerHTML = `<span class="opt-icon opt-icon-empty"${ch ? ` data-ch="${esc(ch)}"` : ""}></span>`;
   }
 }
 function esc(s) {
@@ -293,6 +295,10 @@ const TABS = [
 ];
 let currentTab = "basic";
 function renderTabs() {
+  // 先清空 ☰ 下拉容器：否则上次被收纳的按钮会在 layoutTabs 中被移回主栏，
+  // 与 innerHTML 重建的新按钮并存，导致下拉里出现重复/多个被压缩的选项
+  const more = $("#tabsMore");
+  if (more) more.innerHTML = "";
   $("#tabs").innerHTML = TABS.map(([k, label]) =>
     `<button data-tab="${k}" class="${k === currentTab ? "active" : ""}">${label}</button>`).join("");
   $$("#tabs button").forEach((b) => (b.onclick = () => {
@@ -356,12 +362,24 @@ function route() {
   }[currentTab];
   renderCrumbs();
   content.innerHTML = '<div class="skeleton sk-lg"></div><div class="skeleton sk-sm"></div><div class="skeleton sk-sm"></div>';
-  fn().catch((e) => { if (!e.handled) content.innerHTML = `<div class="card">加载失败: ${esc(e.message)}</div>`; });
+  fn().catch((e) => { if (!e.handled) renderLoadFail(e.message || "未知错误"); });
+}
+// 数据加载失败兜底：保留页面框架（顶栏/标签/面包屑），内容区显示错误卡 + 重试按钮
+function renderLoadFail(msg) {
+  content.innerHTML = `
+  <div class="card" style="text-align:center;padding:36px 20px">
+    <div style="font-size:40px;margin-bottom:10px">⚠️</div>
+    <h3 style="margin-bottom:8px">数据加载失败</h3>
+    <div class="hint" style="margin-bottom:16px">${esc(msg)}（可能是服务器连接中断或面板重启中）</div>
+    <button class="btn primary" id="loadRetry">🔄 重试</button>
+  </div>`;
+  $("#loadRetry").onclick = route;
 }
 
 // ============ 1. 基本设置 ============
 async function pageBasic() {
-  const j = await api("basic");
+  const j = await apiQuiet("basic");
+  if (!j) return renderLoadFail("基本设置接口无响应");
   const d = j.data;
   const ini = d.ini;
   const sel = (id, opts, cur) =>
@@ -383,7 +401,7 @@ async function pageBasic() {
       ${(d.clusterList || d.clusters.map((c) => ({ name: c, mtime: 0 }))).map((c) => `<tr class="${c.name === d.cluster ? "sel" : ""}">
         <td>${esc(c.name)}</td>
         <td>${fmtTime(c.mtime)}</td>
-        <td>${c.name === d.cluster ? '<span class="tag on">当前</span>' : ""}</td>
+        <td>${c.name === d.cluster ? '<span class="tag on">当前</span>' : ""}${(d.runningClusters || []).includes(c.name) ? ' <span class="tag on">运行中</span>' : ""}</td>
         <td>
           <button class="btn" data-sel="${esc(c.name)}" ${c.name === d.cluster ? "disabled" : ""}>选择</button>
           <button class="btn" data-ren="${esc(c.name)}">重命名</button>
@@ -571,7 +589,8 @@ function showWorldOptionPopup(option, currentVal, iconSrcs, onSelect) {
 }
 
 async function pageWorld() {
-  const j = await api("worlds");
+  const j = await apiQuiet("worlds");
+  if (!j) return renderLoadFail("世界列表接口无响应");
   const shards = j.data;
   content.innerHTML = `
   <div class="card" id="worldSysCard">
@@ -622,7 +641,9 @@ async function pageWorld() {
   shards.forEach((s, i) => {
     const div = document.createElement("div");
     div.className = "item" + (worldState.shard === s.name ? " sel" : "");
-    div.innerHTML = `<span class="status-dot ${s.running ? "on" : "off"}"></span>#${i + 1} ${esc(s.name)}（${s.isMaster ? "地上" : "地下"}，端口 ${esc(s.port)}）`;
+    // 经典两层 = Master(主世界)+Caves；其余为附加层（多开层），面板不维护其设置
+    const isExtra = s.name !== "Master" && s.name !== "Caves";
+    div.innerHTML = `<span class="status-dot ${s.running ? "on" : "off"}"></span>#${i + 1} ${esc(s.name)}（${s.isMaster ? "地上·主世界" : "地下"}，端口 ${esc(s.port)}）${isExtra ? ' <span class="tag warn">附加层·不维护</span>' : ""}`;
     div.onclick = () => { worldState.shard = s.name; worldState.selKey = null; loadWorldOverrides(); pageWorldHighlight(); };
     wlist.appendChild(div);
   });
@@ -703,7 +724,9 @@ async function loadWorldOverrides() {
   worldState.isMaster = j.data.isMaster;
   worldState.presets = j.data.presets || { worldgen: "", settings: "" };
   const preset = j.data.presets?.worldgen || "";
-  $("#curShard").textContent = `— ${j.data.shard}（${j.data.isMaster ? "地上" : "地下"}）${preset ? `｜预设: ${preset}` : ""}`;
+  // 附加层（多开层）提示：面板不维护其设置，仅供参考
+  const isExtraShard = !["Master", "Caves"].includes(j.data.shard);
+  $("#curShard").textContent = `— ${j.data.shard}（${j.data.isMaster ? "地上" : "地下"}）${preset ? `｜预设: ${preset}` : ""}${isExtraShard ? "｜附加层·面板不维护其设置" : ""}`;
   // 只有替换型世界模组（海难/哈姆雷特等完全替换世界生成）才隐藏原版设置
   // 兼容型模组（三合一等在原版基础上扩展）保留原版设置 + 额外显示模组设置
   const hasReplaceWorldgenMod = !!j.data.hasReplaceWorldgenMod;
@@ -918,10 +941,12 @@ function stopPoll() { if (modsState.pollTimer) { clearInterval(modsState.pollTim
 async function renderModsLocal() {
   const body = $("#modsBody");
   body.innerHTML = '<div class="loading">加载模组列表…</div>';
-  const j = await api("mods");
+  const j = await apiQuiet("mods");
+  if (!j) { body.innerHTML = `<div class="card" style="text-align:center;padding:30px"><h3>模组列表加载失败</h3><div class="hint" style="margin:10px 0 16px">接口无响应，可能是面板重启中或网络中断</div><button class="btn primary" onclick="renderModsLocal()">🔄 重试</button></div>`; return; }
   modsState.mods = j.data.mods;
   modsState.checked = new Set(modsState.mods.filter((m) => m.enabled).map((m) => m.id));
   body.innerHTML = `
+  ${j.data.isWin ? '<div id="localSteamBox"></div>' : ""}
   <div class="card">
     <h3>本地Mod ${j.data.steamOk ? "" : '<span class="hint">（Steam API 不可用，仅显示本地信息）</span>'}</h3>
     <div class="btn-row">
@@ -1017,6 +1042,38 @@ async function renderModsLocal() {
     toast(`补全完成：${ok}/${need.length} 个成功`);
     renderModsLocal();
   };
+  // Windows 版：本地 Steam 模组库（一键复用本机模组开房间）
+  if (j.data.isWin) renderLocalSteamBox(j.data.modsDir || "");
+}
+// Windows 本地模组库卡片：扫描本机 Steam 已下载模组，显示来源地址，一键复用到面板模组目录
+async function renderLocalSteamBox(modsDir) {
+  const box = $("#localSteamBox");
+  if (!box) return;
+  box.innerHTML = `<div class="card"><h3>本地模组库 <span class="hint">（扫描本机 Steam…）</span></h3></div>`;
+  const j = await apiQuiet("mods/local-steam");
+  if (!j || !j.data) { box.innerHTML = ""; return; }
+  const mods = j.data.mods || [];
+  const inner = !mods.length
+    ? '<div class="hint">未在本机 Steam 库中找到已下载的 DST 模组（可先在游戏里订阅下载，再来这里复用）。</div>'
+    : `<div style="max-height:260px;overflow-y:auto"><table class="grid"><thead><tr><th>ID</th><th>来源（本机地址）</th><th>状态</th><th>操作</th></tr></thead><tbody>` +
+      mods.map((m) => `<tr><td>${esc(m.id)}</td><td style="font-size:12px">${esc(m.source)}<div class="hint" style="font-family:monospace;word-break:break-all">${esc(m.path)}</div></td>
+        <td>${m.hasInfo ? '<span class="tag on">完整</span>' : '<span class="tag warn">缺modinfo</span>'}</td>
+        <td><button class="btn primary" data-imp="${esc(m.id)}" data-path="${esc(m.path)}" ${m.hasInfo ? "" : "disabled"}>复用到服务器</button></td></tr>`).join("") +
+      `</tbody></table></div>`;
+  box.innerHTML = `<div class="card">
+    <h3>本地模组库 <span class="hint">（Windows 本机 Steam 模组，可直接复用开房间）</span></h3>
+    <div class="hint" style="margin-bottom:8px">模组统一存放目录：<b style="font-family:monospace">${esc(j.data.modsDir || modsDir)}</b>
+      <button class="btn" id="openModsDir">打开文件夹</button> ｜ 复用后模组内含 SOURCE.txt 标明来源地址</div>
+    ${inner}</div>`;
+  $("#openModsDir").onclick = async () => {
+    const r = await apiQuiet("util/open-folder", { method: "POST", body: { which: "mods" } });
+    if (r) toast(r.msg);
+  };
+  $$("#localSteamBox [data-imp]").forEach((b) => (b.onclick = async () => {
+    b.disabled = true;
+    const r = await apiQuiet("mods/import-local", { method: "POST", body: { id: b.dataset.imp, path: b.dataset.path } });
+    if (r) { toast(r.msg, !r.ok); if (r.ok) renderModsLocal(); else b.disabled = false; }
+  }));
 }
 
 // 模组配置项弹窗（带说明文字）
@@ -1439,19 +1496,32 @@ function renderModsDownload() {
 
 // ============ 4. 服务器管理 ============
 async function pageServer() {
-  const j = await api("server/status");
+  const j = await apiQuiet("server/status");
+  if (!j) return renderLoadFail("服务器状态接口无响应");
   const d = j.data;
+  // 多开状态：其他存档在跑且当前存档未运行 → 控制置灰；满足条件（内存≥4G 且端口无冲突）可手动解锁多开
+  const multi = (d.otherRunning && d.otherRunning.length) ? d.otherRunning : null;
+  const conflicts = d.portConflicts || [];
+  const blocked = !!multi && !d.currentRunning;
+  const canUnlock = blocked && d.canMultiOpen && !conflicts.length;
   const shardRows = d.shards.map((s) =>
-    `<tr><td><span class="status-dot ${s.running ? "on" : "off"}"></span>${esc(s.name)}（${s.isMaster ? "地上" : "地下"}）</td>
+    `<tr><td><span class="status-dot ${s.running ? "on" : "off"}"></span>${esc(s.name)}（${s.isMaster ? "地上·主世界" : "地下"}）</td>
      <td>${s.running ? "运行中" : "未运行"}</td><td>${esc(s.port)}</td></tr>`).join("");
   content.innerHTML = `
   <div class="card">
     <h3>服务器控制</h3>
+    ${multi ? `<div class="multi-open-box">
+      <b>⚠ 检测到其他存档的服务器正在运行：</b>${multi.map((m) => `「${esc(m.cluster)}」（${m.shards.map((x) => esc(x)).join("、")}）`).join("，")}
+      ${blocked ? `<div class="hint" style="margin-top:4px">当前切换的是另一个存档，服务器控制已置灰。多开需同时满足：空余内存 ≥ 4G、端口互不冲突。</div>` : ""}
+      ${blocked && !d.canMultiOpen ? `<div class="multi-err">✖ 空余内存不足 4G（当前可用 ${d.sys.avail}MB），不允许多开</div>` : ""}
+      ${conflicts.length ? `<div class="multi-err">✖ 端口冲突，请先修改以下配置再启动：<br>${conflicts.map((c) => `端口 ${c.port} — ${esc(c.file)} 的 ${esc(c.key)}（与「${esc(c.other)}」冲突）`).join("<br>")}</div>` : ""}
+      ${canUnlock ? `<button class="btn" id="multiOpenAllow" style="margin-top:8px">仍然多开（内存 ${d.sys.avail}MB ≥ 4G，端口无冲突）</button>` : ""}
+    </div>` : ""}
     <div class="btn-row">
-      <button class="btn primary" id="start">▶ 启动服务器</button>
-      <button class="btn danger" id="stop">⏹ 关闭服务器</button>
-      <button class="btn" id="restart">🔁 重启服务器</button>
-      <button class="btn" id="pauseBtn">⏸ 暂停服务器</button>
+      <button class="btn primary" id="start" ${blocked ? "disabled" : ""}>▶ 启动服务器</button>
+      <button class="btn danger" id="stop" ${blocked ? "disabled" : ""}>⏹ 关闭服务器</button>
+      <button class="btn" id="restart" ${blocked ? "disabled" : ""}>🔁 重启服务器</button>
+      <button class="btn" id="pauseBtn" ${blocked ? "disabled" : ""}>⏸ 暂停服务器</button>
       <button class="btn" id="reStatus">🔄 刷新状态</button>
     </div>
     <div class="row" style="margin-bottom:4px"><label>自动刷新状态</label>
@@ -1494,6 +1564,13 @@ async function pageServer() {
     <div class="logbox" id="serverLog" style="min-height:200px;max-height:none"></div>
   </div>`;
   const act = async (path, body = {}) => { const r = await api(path, { method: "POST", body }); toast(r.msg); setTimeout(pageServer, 1500); };
+  // 多开解锁：用户确认内存/端口条件满足后，解除控制置灰
+  const unlockBtn = $("#multiOpenAllow");
+  if (unlockBtn) unlockBtn.onclick = () => {
+    for (const id of ["start", "stop", "restart", "pauseBtn"]) { const b = $("#" + id); if (b) b.disabled = false; }
+    unlockBtn.remove();
+    toast("已解锁多开控制，请注意内存占用");
+  };
   $("#start").onclick = async () => {
     // 汉化检测
     if ($("#langCheckSwitch")?.checked) {
@@ -1934,7 +2011,7 @@ async function pageConsole() {
     const batch = itemView.slice(itemShown, itemShown + ITEM_BATCH);
     itemTable.insertAdjacentHTML("beforeend", batch.map((it) => {
       const iconSrcs = it.icon ? [`icons/${it.icon}/${it.prefab}.png`] : (it.modId ? [`mod-icon?id=${it.modId}&prefab=${it.prefab}`] : [""]);
-      return `<div class="item-row" data-p="${it.prefab}"><span class="item-name">${optIcon(iconSrcs)}${esc(it.name)}</span><span class="hint"><span class="tag">${esc(it.cat || "其他")}</span> ${it.prefab}</span></div>`;
+      return `<div class="item-row" data-p="${it.prefab}"><span class="item-name">${optIcon(iconSrcs, it.name)}${esc(it.name)}</span><span class="hint"><span class="tag">${esc(it.cat || "其他")}</span> ${it.prefab}</span></div>`;
     }).join(""));
     itemShown += batch.length;
     if (itemShown < itemView.length) {
@@ -2117,7 +2194,8 @@ async function pageConsole() {
 
 // ============ 6. 聊天记录（含玩家记录分区） ============
 async function pageChat() {
-  const [j, pl] = await Promise.all([api("chatlog"), apiQuiet("playerlog")]);
+  const [j, pl] = await Promise.all([apiQuiet("chatlog"), apiQuiet("playerlog")]);
+  if (!j) return renderLoadFail("聊天记录接口无响应");
   const lines = j.data.lines;
   const players = pl?.data?.players || [];
   content.innerHTML = `

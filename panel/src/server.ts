@@ -1,37 +1,56 @@
 // DST 专用服务器管理面板 —— Bun 单文件后端
-// 运行: bun run src/server.ts  (监听 127.0.0.1:5322)
+// Linux: bun run src/server.ts  (监听 127.0.0.1:5323)
+// Windows: bun run src/server.ts 或打包后的 DSTserver.exe（进程直连模式，无需 screen）
 import { createHmac, createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, rmSync, renameSync, statSync, lstatSync, symlinkSync, readlinkSync, unlinkSync } from "node:fs";
 import { join, basename, dirname } from "node:path";
+import { gzipSync } from "node:zlib";
+import os from "node:os";
 import { ITEMS } from "./items";
 import { FOREST_OPTIONS, CAVE_OPTIONS } from "./worldgen";
 
-// ---------- 路径常量 ----------
-const HOME = "/home/steam";
-const PANEL_DIR = join(HOME, "dst_panel");
+// ---------- 平台适配（Linux / Windows） ----------
+const IS_WIN = process.platform === "win32";
+// Windows 打包为 exe 时，面板目录 = exe 所在目录；开发运行时 = src/ 的上一级（panel/）
+const IS_COMPILED = IS_WIN && /\.exe$/i.test(process.execPath) && !/bun(\\.x)?\.exe$/i.test(process.execPath);
+const HOME = IS_WIN ? (process.env.USERPROFILE || os.homedir()) : "/home/steam";
+const PANEL_DIR = IS_WIN ? (IS_COMPILED ? dirname(process.execPath) : join(import.meta.dir, "..")) : join(HOME, "dst_panel");
 const PUBLIC_DIR = join(PANEL_DIR, "public");
 const PASSWORD_FILE = join(PANEL_DIR, ".panel_password");
 const PANEL_CONFIG_FILE = join(PANEL_DIR, "panel_config.json");
 const MOD_CACHE_FILE = join(PANEL_DIR, "mod_cache.json");
+const isAbsPath = (p: string) => p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p);
 function readServerDirFromConfig(): string {
   try { const c = JSON.parse(readText(PANEL_CONFIG_FILE)); if (c.serverDir && typeof c.serverDir === "string") return c.serverDir; } catch {}
-  return join(HOME, "dst_server");
+  return IS_WIN ? join(PANEL_DIR, "dst_server") : join(HOME, "dst_server");
 }
 const SERVER_DIR = readServerDirFromConfig();
-const BIN_DIR = join(SERVER_DIR, "bin64");
-const BIN = join(BIN_DIR, "dontstarve_dedicated_server_nullrenderer_x64");
+// Windows 版 Dedicated Server 可执行文件在 bin/ 下；Linux 在 bin64/ 下
+function detectBin(): { binDir: string; bin: string } {
+  const names = IS_WIN
+    ? ["dontstarve_dedicated_server_nullrenderer_x64.exe", "dontstarve_dedicated_server_nullrenderer.exe"]
+    : ["dontstarve_dedicated_server_nullrenderer_x64"];
+  for (const d of [join(SERVER_DIR, "bin64"), join(SERVER_DIR, "bin")]) {
+    for (const n of names) { const p = join(d, n); if (existsSync(p)) return { binDir: d, bin: p }; }
+  }
+  const bd = IS_WIN && existsSync(join(SERVER_DIR, "bin")) ? join(SERVER_DIR, "bin") : join(SERVER_DIR, "bin64");
+  return { binDir: bd, bin: join(bd, names[0]) };
+}
+const { binDir: BIN_DIR, bin: BIN } = detectBin();
 const MODS_DIR = join(SERVER_DIR, "mods");
 const SETUP_LUA = join(MODS_DIR, "dedicated_server_mods_setup.lua");
-const DEFAULT_CLUSTER_ROOT = join(HOME, ".klei", "DoNotStarveTogether");
-const DEFAULT_MODS_DIR = join(HOME, "dst_mods");
+const DEFAULT_CLUSTER_ROOT = IS_WIN ? join(HOME, "Documents", "Klei", "DoNotStarveTogether") : join(HOME, ".klei", "DoNotStarveTogether");
+const DEFAULT_MODS_DIR = IS_WIN ? join(PANEL_DIR, "dst_mods") : join(HOME, "dst_mods");
 // 原版预设白名单：这些预设使用原版世界设置项，不是模组世界
 const VANILLA_PRESETS = new Set(["", "SURVIVAL_TOGETHER", "DST_CAVE", "LAVAARENA", "QUAGMIRE"]);
 // 存档根目录 / 模组存放目录可在面板「基本设置」修改（存 panelConfig）
 function clusterRoot(): string { return panelConfig.clusterRoot || DEFAULT_CLUSTER_ROOT; }
 function modsStoreDir(): string { return panelConfig.modsDir || DEFAULT_MODS_DIR; }
-const STEAMCMD = join(HOME, "steamcmd", "steamcmd.sh");
-const STEAMCMD_WORKSHOP = join(HOME, "steamcmd", "steamapps", "workshop", "content", "322330");
+const STEAMCMD = IS_WIN ? join(PANEL_DIR, "steamcmd", "steamcmd.exe") : join(HOME, "steamcmd", "steamcmd.sh");
+const STEAMCMD_WORKSHOP = IS_WIN ? join(PANEL_DIR, "steamcmd", "steamapps", "workshop", "content", "322330") : join(HOME, "steamcmd", "steamapps", "workshop", "content", "322330");
 const PORT = 5323;
+// 多开内存门槛：已有服务器在跑时，空余内存低于该值禁止再开（MB）
+const MULTI_OPEN_MIN_MEM = 4096;
 
 // ---------- 小工具 ----------
 const enc = new TextEncoder();
@@ -48,10 +67,7 @@ function checkResources(): { ok: boolean; msg: string } {
     if (sysMem.avail > 0 && sysMem.avail < 512) {
       return { ok: false, msg: `系统可用内存仅 ${sysMem.avail}MB，请关闭其他服务后再启动` };
     }
-    const loadText = readText("/proc/loadavg");
-    const load1 = parseFloat(loadText.split(/\s+/)[0]) || 0;
-    const cpuCount = (require("node:os") as any).cpus ? (require("node:os").cpus().length || 4) : 4;
-    const cpuPct = Math.round((load1 / cpuCount) * 100);
+    const cpuPct = getCpuUsage();
     if (cpuPct > 90) {
       return { ok: false, msg: `CPU 负载过高（${cpuPct}%），建议等待负载降低后再启动` };
     }
@@ -61,8 +77,44 @@ function checkResources(): { ok: boolean; msg: string } {
   }
 }
 
+// CPU 使用率（%）：Linux 读 loadavg；Windows 采样 os.cpus() 时间片
+let cpuSample: { idle: number; total: number; usage: number; time: number } | null = null;
+function getCpuUsage(): number {
+  if (!IS_WIN) {
+    try {
+      const loadText = readText("/proc/loadavg");
+      const load1 = parseFloat(loadText.split(/\s+/)[0]) || 0;
+      const cpuCount = os.cpus()?.length || 4;
+      return Math.round((load1 / cpuCount) * 100);
+    } catch { return 0; }
+  }
+  try {
+    let idle = 0, total = 0;
+    for (const c of os.cpus()) { idle += c.times.idle; total += c.times.user + c.times.nice + c.times.sys + c.times.idle + c.times.irq; }
+    const now = Date.now();
+    if (cpuSample) {
+      const dTotal = total - cpuSample.total, dIdle = idle - cpuSample.idle;
+      const usage = dTotal > 0 ? Math.round((1 - dIdle / dTotal) * 100) : cpuSample.usage;
+      cpuSample = { idle, total, usage, time: now };
+      return usage;
+    }
+    cpuSample = { idle, total, usage: 0, time: now };
+    return 0;
+  } catch { return 0; }
+}
+
 // 获取 DST 服务进程的内存占用（RSS MB）
 function getDstProcessMemory(): number {
+  if (IS_WIN) {
+    // Windows：汇总本面板启动的 DST 进程内存（PowerShell 查询）
+    try {
+      const pids = [...winProcs.values()].map((p) => p.pid).filter(Boolean);
+      if (!pids.length) return 0;
+      const r = Bun.spawnSync(["powershell", "-NoProfile", "-Command", `(Get-Process -Id ${pids.join(",")} -ErrorAction SilentlyContinue | Measure-Object WorkingSet64 -Sum).Sum`], { stdout: "pipe" });
+      const bytes = Number(new Response(r.stdout).text().trim()) || 0;
+      return Math.round(bytes / 1048576);
+    } catch { return 0; }
+  }
   try {
     const r = Bun.spawnSync(["pgrep", "-f", "dontstarve_dedicated_server_nullrenderer"], { stdout: "pipe" });
     let totalRSS = 0;
@@ -78,6 +130,13 @@ function getDstProcessMemory(): number {
 }
 // 获取系统内存信息（MB）
 function getSystemMemory(): { total: number; avail: number; used: number } {
+  if (IS_WIN) {
+    try {
+      const total = Math.round(os.totalmem() / 1048576);
+      const avail = Math.round(os.freemem() / 1048576);
+      return { total, avail, used: total - avail };
+    } catch { return { total: 0, avail: 0, used: 0 }; }
+  }
   try {
     const text = readText("/proc/meminfo");
     const total = /MemTotal:\s+(\d+)/.exec(text);
@@ -86,6 +145,81 @@ function getSystemMemory(): { total: number; avail: number; used: number } {
   } catch {
     return { total: 0, avail: 0, used: 0 };
   }
+}
+// 正在运行的全部 DST 进程（所有存档）：[{cluster, shard}]
+async function runningDstAll(): Promise<{ cluster: string; shard: string }[]> {
+  if (IS_WIN) {
+    // 只认本面板启动的进程（面板重启后无法追踪外部进程，符合 Windows 单机使用场景）
+    const out: { cluster: string; shard: string }[] = [];
+    for (const [key, p] of winProcs) {
+      if (p.exitCode === null) { const [cluster, shard] = key.split("::"); out.push({ cluster, shard }); }
+    }
+    return out;
+  }
+  try {
+    const r = await run(["pgrep", "-af", "dontstarve_dedicated_server_nullrenderer"]);
+    const out: { cluster: string; shard: string }[] = [];
+    for (const line of r.out.split("\n")) {
+      const c = /-cluster\s+(\S+)/.exec(line);
+      const s = /-shard\s+(\S+)/.exec(line);
+      if (c && s) out.push({ cluster: c[1], shard: s[1] });
+    }
+    return out;
+  } catch { return []; }
+}
+
+// ---------- Windows 本地模组复用 ----------
+function copyDirSync(src: string, dst: string): void {
+  mkdirSync(dst, { recursive: true });
+  for (const e of readdirSync(src)) {
+    const s = join(src, e), d = join(dst, e);
+    const st = statSync(s);
+    if (st.isDirectory()) copyDirSync(s, d);
+    else writeFileSync(d, readFileSync(s));
+  }
+}
+// 扫描本机 Steam 库中的 DST 模组（创意工坊缓存 + 游戏/专用服务器的 mods 目录），可直接复用开房间
+function scanLocalSteamMods(): { id: string; source: string; path: string; hasInfo: boolean }[] {
+  if (!IS_WIN) return [];
+  const out: { id: string; source: string; path: string; hasInfo: boolean }[] = [];
+  const seen = new Set<string>();
+  // 解析 Steam 库目录：默认库 + libraryfolders.vdf 里的附加库
+  const libs: string[] = [];
+  const defLib = "C:\\Program Files (x86)\\Steam";
+  if (existsSync(defLib)) libs.push(defLib);
+  try {
+    const vdf = readText(join(defLib, "steamapps", "libraryfolders.vdf"));
+    for (const m of vdf.matchAll(/"path"\s+"([^"]+)"/g)) {
+      const p = m[1].replace(/\\\\/g, "\\");
+      if (existsSync(p) && !libs.includes(p)) libs.push(p);
+    }
+  } catch {}
+  const push = (id: string, source: string, p: string) => {
+    if (!/^\d{4,15}$/.test(id) || seen.has(id)) return;
+    seen.add(id);
+    out.push({ id, source, path: p, hasInfo: existsSync(join(p, "modinfo.lua")) });
+  };
+  for (const lib of libs) {
+    // 创意工坊下载缓存: steamapps/workshop/content/322330/<id>
+    const ws = join(lib, "steamapps", "workshop", "content", "322330");
+    try { for (const d of readdirSync(ws)) { const p = join(ws, d); if (statSync(p).isDirectory()) push(d, "Steam创意工坊缓存", p); } } catch {}
+    // 游戏本体/专用服务器的 mods: steamapps/common/<game>/mods/workshop-<id>
+    for (const game of ["Don't Starve Together", "Don't Starve Together Dedicated Server"]) {
+      const md = join(lib, "steamapps", "common", game, "mods");
+      try { for (const d of readdirSync(md)) { const m = /^workshop-(\d+)$/.exec(d); if (m) push(m[1], game + "\\mods", join(md, d)); } } catch {}
+    }
+  }
+  out.sort((a, b) => a.id.localeCompare(b.id));
+  return out;
+}
+// Windows 版启动时：在模组存放目录写说明文件（标明地址，方便用户维护与程序调用）
+function writeModsDirReadme(): void {
+  if (!IS_WIN) return;
+  try {
+    mkdirSync(modsStoreDir(), { recursive: true });
+    writeFileSync(join(modsStoreDir(), "_模组存放目录说明.txt"),
+      `这是 DST 服务器面板的模组统一存放目录。\r\n\r\n地址: ${modsStoreDir()}\r\n\r\n规则:\r\n- 每个子文件夹名 = 创意工坊模组 ID（纯数字）\r\n- 可直接把本地 Steam 的模组复制到这里开房间（面板「mod设置」页有「本地模组库」一键复用）\r\n- 从本地复用的模组内含 SOURCE.txt，标明来源地址\r\n- 不要手动修改子文件夹名，否则服务器无法识别\r\n`);
+  } catch {}
 }
 
 function json(data: any, status = 200, headers: Record<string, string> = {}) {
@@ -394,13 +528,13 @@ function loadPanelConfig(): PanelConfig {
       },
       itemHistory: Array.isArray(c.itemHistory) ? c.itemHistory.map(String) : [],
       favorites: Array.isArray(c.favorites) ? c.favorites.map(String) : [],
-      serverDir: typeof c.serverDir === "string" && c.serverDir ? c.serverDir : join(HOME, "dst_server"),
-      clusterRoot: typeof c.clusterRoot === "string" && c.clusterRoot.startsWith("/") ? c.clusterRoot : DEFAULT_CLUSTER_ROOT,
-      modsDir: typeof c.modsDir === "string" && c.modsDir.startsWith("/") ? c.modsDir : DEFAULT_MODS_DIR,
+      serverDir: typeof c.serverDir === "string" && c.serverDir ? c.serverDir : readServerDirFromConfig(),
+      clusterRoot: typeof c.clusterRoot === "string" && isAbsPath(c.clusterRoot) ? c.clusterRoot : DEFAULT_CLUSTER_ROOT,
+      modsDir: typeof c.modsDir === "string" && isAbsPath(c.modsDir) ? c.modsDir : DEFAULT_MODS_DIR,
       langCheck: c.langCheck !== false,
     };
   } catch {
-    return { cluster: "MyDediServer", beta: false, betaBranch: "", mode: "online", autorestart: false, announcements: [], announceAuto: { enabled: false, intervalSec: 300, idx: 0, lastSent: 0 }, itemHistory: [], favorites: [], serverDir: join(HOME, "dst_server"), clusterRoot: DEFAULT_CLUSTER_ROOT, modsDir: DEFAULT_MODS_DIR, langCheck: true };
+    return { cluster: "MyDediServer", beta: false, betaBranch: "", mode: "online", autorestart: false, announcements: [], announceAuto: { enabled: false, intervalSec: 300, idx: 0, lastSent: 0 }, itemHistory: [], favorites: [], serverDir: readServerDirFromConfig(), clusterRoot: DEFAULT_CLUSTER_ROOT, modsDir: DEFAULT_MODS_DIR, langCheck: true };
   }
 }
 let panelConfig = loadPanelConfig();
@@ -451,64 +585,141 @@ function clearAllClusterCache() {
   modAtlasCache.clear();
   modItemsCache.clear();
 }
+// 模组文件变动（下载/删除/导入）后清除模组相关缓存
+function clearModCaches() {
+  modAtlasCache.clear();
+  modItemsCache.clear();
+  modStrCache.clear();
+  modLuaFilesCache.clear();
+  modTransCache.clear();
+  modWorldgenDataCache.clear();
+  modIconPngCache.clear();
+  itemsApiCache = { key: "", data: [] };
+  // 模组图标磁盘缓存一并清除（模组更新后图标可能变化）
+  try { rmSync(join(PUBLIC_DIR, "modicons"), { recursive: true, force: true }); } catch {}
+}
 
-// ---------- screen 控制 ----------
+// ---------- 进程控制（Linux: screen/systemd；Windows: 直连进程） ----------
+// Windows 下由本面板直接启动的 DST 进程表："cluster::shard" -> Subprocess
+const winProcs = new Map<string, any>();
 async function screenList(): Promise<string> {
+  if (IS_WIN) return "";
   const r = await run(["screen", "-ls"]);
   return r.out;
 }
+// 分片的 screen 会话名：Master/Caves 沿用旧名（兼容历史），其余分片 dst_<名>；
+// 多开（其他存档在运行）时统一加存档前缀，避免会话冲突
+function screenSessionCandidates(shard: string, otherRunning: boolean): string[] {
+  const s = shard.toLowerCase();
+  const legacy = s === "master" ? "dst_master" : s === "caves" ? "dst_caves" : `dst_${s}`;
+  const multi = `dst_${panelConfig.cluster.toLowerCase()}_${s}`;
+  return otherRunning ? [multi, legacy] : [legacy, multi];
+}
 async function shardRunning(shard: string): Promise<boolean> {
+  if (IS_WIN) {
+    const p = winProcs.get(`${panelConfig.cluster}::${shard}`);
+    return !!p && p.exitCode === null;
+  }
   // 优先检查 systemd transient service（cgroup 启动方式）
   const unit = `dst-${shard.toLowerCase()}`;
   const svc = await run(["systemctl", "is-active", "--quiet", unit]);
   if (svc.code === 0) return true;
-  // 检查 screen 会话
-  const sess = shard.toLowerCase() === "master" ? "dst_master" : shard.toLowerCase() === "caves" ? "dst_caves" : `dst_${shard.toLowerCase()}`;
+  // 检查 screen 会话（兼容旧名与多开名）
+  const others = (await runningDstAll()).filter((x) => x.cluster !== panelConfig.cluster);
   const ls = await screenList();
-  if (new RegExp(`\\.${sess}\\b`).test(ls)) return true;
-  // pgrep 跨用户检测
-  const pg = await run(["pgrep", "-f", `dontstarve_dedicated_server_nullrenderer.*-shard ${shard}`]);
-  return pg.code === 0 && pg.out.trim().length > 0;
-}
-function screenSession(shard: string): string {
-  return shard.toLowerCase() === "caves" ? "dst_caves" : "dst_master";
+  for (const sess of screenSessionCandidates(shard, others.length > 0)) {
+    if (new RegExp(`\\.${sess}\\b`).test(ls)) return true;
+  }
+  // pgrep 跨用户检测（带存档名，避免其他存档的同名分片误判）
+  const pg = await run(["pgrep", "-f", `dontstarve_dedicated_server_nullrenderer.*-cluster ${panelConfig.cluster}.*-shard ${shard}\\b`]);
+  if (pg.code === 0 && pg.out.trim().length > 0) return true;
+  // 兼容旧格式（无 -cluster 参数顺序差异）
+  const pg2 = await run(["pgrep", "-f", `dontstarve_dedicated_server_nullrenderer.*-shard ${shard}\\b`]);
+  return pg2.code === 0 && pg2.out.trim().length > 0;
 }
 async function startShard(shard: string): Promise<string> {
   const extraArgs: string[] = [];
   if (clusterRoot() !== DEFAULT_CLUSTER_ROOT) {
-    const parent = clusterRoot().replace(/\/[^/]+$/, "") || "/";
-    const conf = clusterRoot().split("/").pop()!;
+    const parent = clusterRoot().replace(/[\\/][^\\/]+$/, "") || (IS_WIN ? "C:\\" : "/");
+    const conf = clusterRoot().split(/[\\/]/).pop()!;
     extraArgs.push("-persistent_storage_root", parent, "-conf_dir", conf);
   }
   if (panelConfig.mode === "offline") extraArgs.push("-offline");
+  if (IS_WIN) {
+    // Windows：直接拉起进程，stdin 管道用于控制台命令注入
+    const key = `${panelConfig.cluster}::${shard}`;
+    const old = winProcs.get(key);
+    if (old && old.exitCode === null) return "ok";
+    try {
+      const proc = Bun.spawn([BIN, "-cluster", panelConfig.cluster, "-shard", shard, ...extraArgs, "-console"], {
+        cwd: BIN_DIR, stdin: "pipe", stdout: "ignore", stderr: "ignore",
+      });
+      winProcs.set(key, proc);
+      // 进程退出后自动清理
+      proc.exited.finally(() => { try { const p = winProcs.get(key); if (p === proc) winProcs.delete(key); } catch {} });
+      await sleep(4000);
+      return (await shardRunning(shard)) ? "ok" : "启动失败（进程已退出，请检查端口冲突/令牌/模组）";
+    } catch (e: any) {
+      return "启动失败: " + (e?.message || e);
+    }
+  }
+  const others = (await runningDstAll()).filter((x) => x.cluster !== panelConfig.cluster);
+  const sess = screenSessionCandidates(shard, others.length > 0)[0];
   const args = [
     "sudo", "/usr/local/bin/dst-shard-launch.sh",
-    shard, screenSession(shard), BIN, BIN_DIR, panelConfig.cluster, ...extraArgs,
+    shard, sess, BIN, BIN_DIR, panelConfig.cluster, ...extraArgs,
   ];
   const r = await run(args, { cwd: BIN_DIR });
   await sleep(2000);
   return (await shardRunning(shard)) ? "ok" : (r.out || "启动失败");
 }
 async function stopShard(shard: string): Promise<void> {
+  if (IS_WIN) {
+    const key = `${panelConfig.cluster}::${shard}`;
+    const p = winProcs.get(key);
+    if (p && p.exitCode === null) {
+      try { p.stdin.write('c_shutdown()\n'); p.stdin.flush?.(); } catch {}
+      // 最多等 12 秒优雅退出，超时强杀
+      const deadline = Date.now() + 12000;
+      while (p.exitCode === null && Date.now() < deadline) await sleep(500);
+      if (p.exitCode === null) { try { p.kill(); } catch {} }
+    }
+    winProcs.delete(key);
+    return;
+  }
   // 先停 systemd transient service（清理 cgroup）
   const unit = `dst-${shard.toLowerCase()}`;
   await run(["systemctl", "stop", unit]);
   await run(["systemctl", "reset-failed", unit]);
-  // 再清理 screen 和残留进程
-  await run(["screen", "-S", screenSession(shard), "-X", "quit"]);
-  await run(["pkill", "-f", `dontstarve_dedicated_server_nullrenderer.*-shard ${shard}`]);
+  // 再清理 screen（两种命名都尝试）和残留进程（限定本存档）
+  const others = (await runningDstAll()).filter((x) => x.cluster !== panelConfig.cluster);
+  for (const sess of screenSessionCandidates(shard, others.length > 0)) {
+    await run(["screen", "-S", sess, "-X", "quit"]);
+  }
+  await run(["pkill", "-f", `dontstarve_dedicated_server_nullrenderer.*-cluster ${panelConfig.cluster}.*-shard ${shard}\\b`]);
+  await run(["pkill", "-f", `dontstarve_dedicated_server_nullrenderer.*-shard ${shard}\\b`]);
 }
 async function sendLua(shard: string, lua: string): Promise<boolean> {
   if (!(await shardRunning(shard))) return false;
   // 注意：screen -X stuff 会把反斜杠当转义符（\ooo 八进制等），因此命令里不能含反斜杠转义序列；
   // UTF-8 中文可直接传输（hardcopy 显示为乱码只是屏幕渲染，服务器端实际接收正确）。
   const clean = lua.replace(/\r/g, "").replace(/\n+/g, " ").slice(0, 4000);
-  const r = await run(["screen", "-S", screenSession(shard), "-X", "stuff", clean + "\n"]);
+  if (IS_WIN) {
+    const p = winProcs.get(`${panelConfig.cluster}::${shard}`);
+    if (!p || p.exitCode !== null) return false;
+    try { p.stdin.write(clean + "\n"); p.stdin.flush?.(); return true; } catch { return false; }
+  }
+  const others = (await runningDstAll()).filter((x) => x.cluster !== panelConfig.cluster);
+  const sess = screenSessionCandidates(shard, others.length > 0)[0];
+  const r = await run(["screen", "-S", sess, "-X", "stuff", clean + "\n"]);
   return r.code === 0;
 }
 async function hardcopy(shard: string): Promise<string> {
-  const file = `/tmp/dst_dump_${screenSession(shard)}.txt`;
-  await run(["screen", "-S", screenSession(shard), "-X", "hardcopy", "-h", file]);
+  if (IS_WIN) return "";
+  const others = (await runningDstAll()).filter((x) => x.cluster !== panelConfig.cluster);
+  const sess = screenSessionCandidates(shard, others.length > 0)[0];
+  const file = `/tmp/dst_dump_${sess}.txt`;
+  await run(["screen", "-S", sess, "-X", "hardcopy", "-h", file]);
   await sleep(200);
   return readText(file);
 }
@@ -873,10 +1084,11 @@ function itemIconAtlas(): Map<string, string> {
   const dir = join(PANEL_DIR, "data", "invicons");
   try {
     for (const f of readdirSync(dir)) {
-      const m = /^inventoryimages(\d+)\.xml$/.exec(f);
+      // 支持原版物品图集 inventoryimages1-4.xml 和 minimap.xml（世界实体小地图图标索引，补无图物品）
+      const m = /^(inventoryimages\d+|minimap)\.xml$/.exec(f);
       if (!m) continue;
-      const atlas = "inventoryimages" + m[1];
-      for (const mm of readText(join(dir, f)).matchAll(/<Element name="([^"]+)\.tex"/g)) {
+      const atlas = m[1];
+      for (const mm of readText(join(dir, f)).matchAll(/<Element name="([^"]+)\.(?:tex|png)"/g)) {
         if (!map.has(mm[1])) map.set(mm[1], atlas);
       }
     }
@@ -897,10 +1109,10 @@ function decodeKTEX(buf: Buffer): { width: number; height: number; png: Buffer }
   const mip0H = buf.readUInt16LE(10);
   let mip0Size = buf.readUInt16LE(14);
   if (mip0W === 0 || mip0H === 0 || mip0W > 4096 || mip0H > 4096) return null;
-  // mip0Size 可能为 0（某些 KTEX 格式），按 DXT 块大小自动计算
+  // mip0Size 可能为 0（某些 KTEX 格式），按格式自动计算
   if (mip0Size === 0) {
     const blocks = Math.ceil(mip0W / 4) * Math.ceil(mip0H / 4);
-    mip0Size = (fmt === 0 ? 8 : 16) * blocks; // DXT1=8 bytes/block, DXT5=16 bytes/block
+    mip0Size = fmt === 4 ? mip0W * mip0H * 4 : (fmt === 0 ? 8 : 16) * blocks; // DXT1=8, DXT5=16 bytes/block
   }
   // 数 mip 级别数来计算 data 偏移（验证每级尺寸合理：≤上级且为正）
   let dataOffset = 8;
@@ -916,8 +1128,12 @@ function decodeKTEX(buf: Buffer): { width: number; height: number; png: Buffer }
   }
   if (dataOffset + mip0Size > buf.length) return null;
   const pixelData = buf.subarray(dataOffset, dataOffset + mip0Size);
-  let rgba: Buffer;
-  if (fmt === 0) {
+  let rgba: Buffer | null;
+  if (fmt === 4) {
+    // 未压缩 RGBA8：直接拷贝（KTEX 像素自上而下，与 PNG 行序一致）
+    rgba = Buffer.alloc(mip0W * mip0H * 4);
+    pixelData.copy(rgba, 0, 0, Math.min(pixelData.length, rgba.length));
+  } else if (fmt === 0) {
     rgba = decodeDXT1(pixelData, mip0W, mip0H);
   } else {
     rgba = decodeDXT5(pixelData, mip0W, mip0H);
@@ -943,15 +1159,19 @@ function decodeDXT(data: Buffer, width: number, height: number, dxt5: boolean): 
       const bo = (by * blocksX + bx) * blockSize;
       if (bo + blockSize > data.length) continue;
       let alphas: number[] = [];
+      let aLo = 0, aHi = 0;
       if (dxt5) {
         const a0 = data[bo], a1 = data[bo + 1];
-        const aBits = data.readUInt32LE(bo + 2);
+        // 48 位 alpha 索引（每像素 3 位）：bytes2-5 低 32 位 + bytes6-7 高 16 位
+        aLo = data.readUInt32LE(bo + 2);
+        aHi = data.readUInt16LE(bo + 6);
         alphas = [a0, a1];
         if (a0 > a1) { for (let i = 0; i < 6; i++) alphas.push(Math.floor(((6 - i) * a0 + (i + 1) * a1) / 7)); }
-        else { alphas.push(Math.floor((2 * a0 + a1) / 3), Math.floor((a0 + 2 * a1) / 3), 0, 255, 0, 0); }
-        // 修正 alpha 索引
-        alphas[6] = a0 > a1 ? Math.floor((1 * a0 + 6 * a1) / 7) : 0;
-        alphas[7] = a0 > a1 ? Math.floor((0 * a0 + 7 * a1) / 7) : 255;
+        else {
+          // a0 <= a1: 4 个插值 + 0 + 255
+          for (let i = 0; i < 4; i++) alphas.push(Math.floor(((4 - i) * a0 + (i + 1) * a1) / 5));
+          alphas.push(0, 255);
+        }
       }
       const c0 = data.readUInt16LE(bo + colorOffset);
       const c1 = data.readUInt16LE(bo + colorOffset + 2);
@@ -970,9 +1190,16 @@ function decodeDXT(data: Buffer, width: number, height: number, dxt5: boolean): 
         for (let px = 0; px < 4; px++) {
           const yi = by * 4 + py, xi = bx * 4 + px;
           if (yi >= height || xi >= width) continue;
-          const ci = (cBits >> ((py * 4 + px) * 4)) & 3;
+          // 颜色索引：每像素 2 位（cBits 为 32 位，16 像素 × 2 位）
+          const ci = (cBits >>> ((py * 4 + px) * 2)) & 3;
           const [r, g, b] = colors[ci];
-          const a = dxt5 ? alphas[(data.readUInt32LE(bo + 2) >> ((py * 4 + px) * 3)) & 7] : 255;
+          // alpha 索引：每像素 3 位，48 位 = aLo(低32) + aHi(高16)
+          let a = 255;
+          if (dxt5) {
+            const shift = (py * 4 + px) * 3;
+            const aBits = aLo + aHi * 0x100000000;
+            a = alphas[Math.floor(aBits / Math.pow(2, shift)) & 7];
+          }
           const o = (yi * width + xi) * 4;
           rgba[o] = r; rgba[o + 1] = g; rgba[o + 2] = b; rgba[o + 3] = a;
         }
@@ -1066,7 +1293,7 @@ function buildModAtlasIndex(id: string): Map<string, { texPath: string; u1: numb
     if (existsSync(imgDir)) {
       // 一次性扫描所有 .tex 和 .xml 文件
       const scan = (dir: string, depth: number) => {
-        if (depth > 3) return;
+        if (depth > 5) return;
         let entries: string[];
         try { entries = readdirSync(dir); } catch { return; }
         // 独立 .tex 文件
@@ -1097,13 +1324,21 @@ function buildModAtlasIndex(id: string): Map<string, { texPath: string; u1: numb
           const texPath = join(dir, texMatch[1]);
           if (!existsSync(texPath)) continue;
           const elementCount = (xmlText.match(/<Element/g) || []).length;
-          // 解析所有 Element
-          for (const em of xmlText.matchAll(/<Element\s+name="([^"]+)"\s+u1="([\d.]+)"\s+u2="([\d.]+)"\s+v1="([\d.]+)"\s+v2="([\d.]+)"/g)) {
-            const elemName = em[1].replace(/\.tex$/, "");
+          // 解析所有 Element（属性顺序无关，兼容不同工具生成的图集）
+          const attrOf = (tag: string, name: string): string => {
+            const m = new RegExp(`${name}="([^"]+)"`).exec(tag);
+            return m ? m[1] : "";
+          };
+          for (const em of xmlText.matchAll(/<Element\s+([^>]*?)\/>/g)) {
+            const attrs = em[1];
+            const elemName = attrOf(attrs, "name").replace(/\.tex$/, "");
+            const u1 = parseFloat(attrOf(attrs, "u1")), u2 = parseFloat(attrOf(attrs, "u2"));
+            const v1 = parseFloat(attrOf(attrs, "v1")), v2 = parseFloat(attrOf(attrs, "v2"));
+            if (!elemName || [u1, u2, v1, v2].some((v) => !Number.isFinite(v))) continue;
             const existing = index.get(elemName);
             // 优先选择元素数少的图集（专用 > 通用）
             if (!existing || existing.elementCount > elementCount) {
-              index.set(elemName, { texPath, u1: parseFloat(em[2]), u2: parseFloat(em[3]), v1: parseFloat(em[4]), v2: parseFloat(em[5]), elementCount });
+              index.set(elemName, { texPath, u1, u2, v1, v2, elementCount });
             }
           }
         }
@@ -1126,16 +1361,18 @@ function findModIcon(id: string, prefab: string): { texPath: string; u1: number;
   return buildModAtlasIndex(id).get(prefab) || null;
 }
 
-// 从图集 XML 中解析指定元素的 UV 坐标
+// 从图集 XML 中解析指定元素的 UV 坐标（属性顺序无关）
 function parseAtlasUV(xml: string, elementName: string): { u1: number; u2: number; v1: number; v2: number } | null {
   // Element name 可以是 "xxx.tex" 或 "xxx"
-  const patterns = [
-    new RegExp(`<Element\\s+name="${elementName.replace(/\./g, "\\.")}"\\s+u1="([\\d.]+)"\\s+u2="([\\d.]+)"\\s+v1="([\\d.]+)"\\s+v2="([\\d.]+)"`),
-    new RegExp(`<Element\\s+name="${elementName.replace(/\\.tex$/, "").replace(/\./g, "\\.")}"\\s+u1="([\\d.]+)"\\s+u2="([\\d.]+)"\\s+v1="([\\d.]+)"\\s+v2="([\\d.]+)"`),
-  ];
-  for (const re of patterns) {
-    const m = re.exec(xml);
-    if (m) return { u1: parseFloat(m[1]), u2: parseFloat(m[2]), v1: parseFloat(m[3]), v2: parseFloat(m[4]) };
+  const names = [elementName, elementName.replace(/\.tex$/, "")];
+  for (const em of xml.matchAll(/<Element\s+([^>]*?)\/>/g)) {
+    const attrs = em[1];
+    const nm = (/name="([^"]+)"/.exec(attrs) || [])[1] || "";
+    if (!names.includes(nm)) continue;
+    const num = (k: string) => parseFloat((new RegExp(`${k}="([\\d.]+)"`).exec(attrs) || [])[1] || "NaN");
+    const u1 = num("u1"), u2 = num("u2"), v1 = num("v1"), v2 = num("v2");
+    if ([u1, u2, v1, v2].some((v) => !Number.isFinite(v))) continue;
+    return { u1, u2, v1, v2 };
   }
   return null;
 }
@@ -1424,15 +1661,12 @@ const PRESET_CN: [RegExp, string][] = [
 ];
 // 从模组自身文件中查找字符串定义（模组自定义的 STRINGS，如火山的 PRESETLEVELS.VOLCANO）
 const modStrCache = new Map<string, Map<string, string>>();
-function modStringLookup(id: string, key: string, prefix = ""): string {
-  let cache = modStrCache.get(id);
-  if (!cache) { cache = new Map(); modStrCache.set(id, cache); }
-  const cacheKey = prefix + "." + key;
-  if (cache.has(cacheKey)) return cache.get(cacheKey)!;
+// 模组 lua 文件清单缓存（避免每次字符串查找都重新递归遍历模组目录，大模组 1000+ 文件时差距明显）
+const modLuaFilesCache = new Map<string, string[]>();
+function modLuaFiles(id: string): string[] {
+  const cached = modLuaFilesCache.get(id);
+  if (cached) return cached;
   const dir = join(ugcSharedDir(), id);
-  const reDotted = new RegExp(`${prefix ? prefix + "\\." : ""}\\b${key}\\s*=\\s*"((?:[^"\\\\]|\\\\.){1,100})"`);
-  const reBare = new RegExp(`\\b${key}\\s*=\\s*"((?:[^"\\\\]|\\\\.){1,100})"`, "g");
-  // 收集 lua 文件：字符串/语言类文件优先（大模组文件多，避免被上限截断）
   const luaFiles: string[] = [];
   const collect = (d: string, depth: number): void => {
     if (depth > 5 || luaFiles.length > 1200) return;
@@ -1447,7 +1681,19 @@ function modStringLookup(id: string, key: string, prefix = ""): string {
     }
   };
   collect(dir, 0);
+  // 字符串/语言类文件优先
   luaFiles.sort((a, b) => Number(!/string|lang|chs|cn_|names|zh/i.test(a)) - Number(!/string|lang|chs|cn_|names|zh/i.test(b)));
+  modLuaFilesCache.set(id, luaFiles);
+  return luaFiles;
+}
+function modStringLookup(id: string, key: string, prefix = ""): string {
+  let cache = modStrCache.get(id);
+  if (!cache) { cache = new Map(); modStrCache.set(id, cache); }
+  const cacheKey = prefix + "." + key;
+  if (cache.has(cacheKey)) return cache.get(cacheKey)!;
+  const reDotted = new RegExp(`${prefix ? prefix + "\\." : ""}\\b${key}\\s*=\\s*"((?:[^"\\\\]|\\\\.){1,100})"`);
+  const reBare = new RegExp(`\\b${key}\\s*=\\s*"((?:[^"\\\\]|\\\\.){1,100})"`, "g");
+  const luaFiles = modLuaFiles(id);
   const hits: string[] = [];
   for (const p of luaFiles.slice(0, 800)) {
     const text = readText(p);
@@ -2008,6 +2254,17 @@ async function buildModList(forceRefresh = false) {
 }
 
 // ---------- 模组下载任务（并行队列：CDN 直链优先，steamcmd 兜底串行） ----------
+const TMP_DIR = os.tmpdir();
+// 跨平台解压 zip（Linux 用系统 unzip；Windows 用 PowerShell Expand-Archive）
+async function unzipTo(zip: string, dest: string): Promise<boolean> {
+  if (IS_WIN) {
+    const z = zip.replace(/'/g, "''"), d = dest.replace(/'/g, "''");
+    const r = await run(["powershell", "-NoProfile", "-Command", `Expand-Archive -Force -LiteralPath '${z}' -DestinationPath '${d}'`], { timeoutMs: 180000 });
+    return r.code === 0;
+  }
+  const r = await run(["unzip", "-o", "-q", zip, "-d", dest]);
+  return r.code <= 1;
+}
 interface Task {
   id: string;
   modId: string;
@@ -2025,15 +2282,15 @@ const MAX_PARALLEL = 3;
 const downloadQueue: string[] = [];
 // 每个并行槽位一个独立 HOME，steamcmd 实例互不干扰，可真正并行
 const slotBusy: boolean[] = new Array(MAX_PARALLEL).fill(false);
-const slotHome = (s: number) => `/tmp/dst_dl_home_${s}`;
+const slotHome = (s: number) => join(TMP_DIR, `dst_dl_home_${s}`);
 
 async function downloadOneMod(id: string, task: Task, slot: number): Promise<boolean> {
   const home = slotHome(slot);
   mkdirSync(home, { recursive: true });
   task.log += `\n===== steamcmd 下载模组 ${id}（并行槽位 ${slot + 1}）=====\n`;
   const r = await run([STEAMCMD, "+login", "anonymous", "+workshop_download_item", "322330", id, "+quit"], {
-    cwd: join(HOME, "steamcmd"),
-    env: { HOME: home },
+    cwd: IS_WIN ? dirname(STEAMCMD) : join(HOME, "steamcmd"),
+    env: IS_WIN ? undefined : { HOME: home },
     timeoutMs: 10 * 60 * 1000,
   });
   task.log += r.out.slice(-4000) + `\n(exit=${r.code})\n`;
@@ -2058,21 +2315,21 @@ async function downloadOneMod(id: string, task: Task, slot: number): Promise<boo
     if (legacyBins.length > 0) {
       mkdirSync(dst, { recursive: true });
       for (const bin of legacyBins) {
-        const uz = await run(["unzip", "-o", "-q", join(src, bin), "-d", dst]);
-        if (uz.code > 1) {
-          task.log += `[失败] 解压 ${bin} 失败: ${uz.out.slice(-2000)}\n`;
+        const good = await unzipTo(join(src, bin), dst);
+        if (!good) {
+          task.log += `[失败] 解压 ${bin} 失败\n`;
           return false;
         }
       }
     } else {
-      const cp = await run(["cp", "-r", src, dst]);
-      if (cp.code !== 0) {
-        task.log += `[失败] 复制失败: ${cp.out}\n`;
+      try { copyDirSync(src, dst); } catch (e: any) {
+        task.log += `[失败] 复制失败: ${e?.message || e}\n`;
         return false;
       }
     }
     if (modCache.items[id]) { modCache.items[id].downloadedAt = Date.now(); saveModCache(); }
     task.log += `[完成] 已安装到 ${dst}\n`;
+    clearModCaches(); // 模组内容变了，图标/物品/字符串缓存重建
     return true;
   } catch (e: any) {
     task.log += `[失败] ${e?.message || e}\n`;
@@ -2083,8 +2340,8 @@ async function downloadOneMod(id: string, task: Task, slot: number): Promise<boo
 async function downloadViaCdn(id: string, task: Task): Promise<boolean> {
   const st = modCache.items[id];
   if (!st?.file_url) { task.log += "[提示] 无 CDN 直链，转 steamcmd 下载\n"; return false; }
-  const zipPath = `/tmp/dst_mod_${id}.zip`;
-  const tmpDir = `/tmp/dst_mod_${id}_x`;
+  const zipPath = join(TMP_DIR, `dst_mod_${id}.zip`);
+  const tmpDir = join(TMP_DIR, `dst_mod_${id}_x`);
   try {
     task.totalBytes = st.file_size || 0;
     task.log += `[CDN] ${st.title || id}（${(st.file_size / 1048576).toFixed(1)} MB）\n${st.file_url}\n`;
@@ -2100,8 +2357,8 @@ async function downloadViaCdn(id: string, task: Task): Promise<boolean> {
     task.log += `[CDN] 下载完成，解压中…\n`;
     rmSync(tmpDir, { recursive: true, force: true });
     mkdirSync(tmpDir, { recursive: true });
-    const uz = await run(["unzip", "-o", "-q", zipPath, "-d", tmpDir]);
-    if (uz.code > 1) { task.log += `[失败] 解压失败: ${uz.out.slice(-2000)}\n`; return false; }
+    const uzOk = await unzipTo(zipPath, tmpDir);
+    if (!uzOk) { task.log += `[失败] 解压失败\n`; return false; }
     let root = tmpDir;
     if (!existsSync(join(root, "modinfo.lua"))) {
       const entries = readdirSync(root);
@@ -2113,10 +2370,10 @@ async function downloadViaCdn(id: string, task: Task): Promise<boolean> {
     ensureUgcLayout();
   const dst = join(ugcSharedDir(), id);
     rmSync(dst, { recursive: true, force: true });
-    const cp = await run(["cp", "-r", root, dst]);
-    if (cp.code !== 0) { task.log += `[失败] 复制失败: ${cp.out}\n`; return false; }
+    try { copyDirSync(root, dst); } catch (e: any) { task.log += `[失败] 复制失败: ${e?.message || e}\n`; return false; }
     if (modCache.items[id]) { modCache.items[id].downloadedAt = Date.now(); saveModCache(); }
     task.log += `[完成] 已安装到 ${dst}\n`;
+    clearModCaches(); // 模组内容变了，图标/物品/字符串缓存重建
     return true;
   } catch (e: any) {
     task.log += `[失败] ${e?.message || e}\n`;
@@ -2132,8 +2389,8 @@ async function downloadViaCdn(id: string, task: Task): Promise<boolean> {
 async function fetchModInfoLua(id: string): Promise<boolean> {
   const st = modCache.items[id];
   if (!st?.file_url) return false;
-  const zipPath = `/tmp/dst_modinfo_${id}.zip`;
-  const tmpDir = `/tmp/dst_modinfo_${id}_x`;
+  const zipPath = join(TMP_DIR, `dst_modinfo_${id}.zip`);
+  const tmpDir = join(TMP_DIR, `dst_modinfo_${id}_x`);
   try {
     const res = await fetch(st.file_url, { signal: AbortSignal.timeout(20000) });
     if (!res.ok) return false;
@@ -2142,8 +2399,7 @@ async function fetchModInfoLua(id: string): Promise<boolean> {
     writeFileSync(zipPath, new Uint8Array(buf));
     rmSync(tmpDir, { recursive: true, force: true });
     mkdirSync(tmpDir, { recursive: true });
-    const uz = await run(["unzip", "-o", "-q", zipPath, "-d", tmpDir]);
-    if (uz.code > 1) return false;
+    if (!(await unzipTo(zipPath, tmpDir))) return false;
     // 查找 modinfo.lua（可能在子目录）
     let infoFile = join(tmpDir, "modinfo.lua");
     if (!existsSync(infoFile)) {
@@ -2354,6 +2610,91 @@ function worldOptionTable(isMaster: boolean) {
   return isMaster ? FOREST_OPTIONS : CAVE_OPTIONS;
 }
 
+// ---------- 物品分类修正 ----------
+// 数据表由游戏脚本自动生成，部分分类明显错分（舞台剧/代币/生物/世界实体被归为"建筑"等），在此统一纠正
+let itemsApiCache: { key: string; data: any[] } = { key: "", data: [] };
+const ITEM_CATEGORY_FIX_EXACT: Record<string, string> = {
+  stafflight: "其他", staffcoldlight: "其他", // 矮星/极光是召唤光实体，不是建筑
+  shadowhand: "生物", shadowhand_arm: "生物",
+  quagmire_goatkid: "生物", quagmire_goatmum: "生物",
+  lavaarena_bernie: "生物", boarrior: "生物", beetletaur: "生物",
+  waveyjones: "生物", charlie_npc: "生物", charlie_heckler: "生物",
+  waxwell_shadowstriker: "生物", waxwell_shadowminer: "生物", waxwell_shadowlumber: "生物", waxwell_shadowdigger: "生物",
+  alterguardian_phase3dead: "生物",
+  lavaarena_lucy: "工具", // 熔炉版露西斧
+  quagmire_hoe: "工具", pocket_scale: "工具",
+  blowdart_lava: "武器", fireballstaff: "武器",
+  gemsocket: "其他", telebase: "其他", animal_track: "其他", dirtpile: "其他",
+  pond: "其他", pond_mos: "其他", pond_cave: "其他", wormhole: "其他",
+  cave_entrance: "其他", cave_entrance_ruins: "其他", cave_entrance_open: "其他", cave_exit: "其他",
+  grotto_pool_big: "其他", grotto_pool_small: "其他", watertree_pillar: "其他", watertree_root: "其他",
+  marbletree: "植物", marblebean: "植物", marblebean_sapling: "植物", marbleshrub: "植物",
+  pinecone_sapling: "植物", mushroomsprout: "植物",
+  quagmire_pot: "其他", quagmire_grill: "其他", quagmire_casseroledish: "其他", quagmire_crate_grill: "其他",
+  quagmire_safe: "其他", quagmire_altar_ivy: "其他",
+};
+const ITEM_CATEGORY_FIX_RULES: [RegExp, string][] = [
+  [/^playbill(_|$)/, "其他"],       // 舞台剧剧本/道具
+  [/^carnival_gametoken/, "资源"],  // 鸦年华代币
+  [/^carnival_prize/, "资源"],      // 鸦年华奖票
+  [/_sketch$/, "资源"],             // 雕塑草图
+  [/^turf_/, "资源"],               // 地皮
+  [/^quagmire_rubble_/, "其他"],    // 暴食废墟（世界实体）
+  [/^quagmire_spotspice_/, "植物"], // 斑点香料灌木/枝
+  [/^boatfragment/, "其他"],        // 船碎片（漂浮残骸）
+];
+function fixItemCategory(prefab: string, cat: string): string {
+  const exact = ITEM_CATEGORY_FIX_EXACT[prefab];
+  if (exact) return exact;
+  for (const [re, c] of ITEM_CATEGORY_FIX_RULES) if (re.test(prefab)) return c;
+  return cat || "其他";
+}
+
+// ---------- 多开端口工具 ----------
+// 收集指定存档占用的全部端口（分片 server_port / steam 端口 / cluster.ini 的 master_port）
+function clusterPorts(name: string): { port: number; file: string; key: string }[] {
+  const out: { port: number; file: string; key: string }[] = [];
+  const cdir = join(clusterRoot(), name);
+  const ci = parseIni(readText(join(cdir, "cluster.ini")));
+  const mp = Number(iniGet(ci, "SHARD", "master_port") || 0);
+  if (mp) out.push({ port: mp, file: join(cdir, "cluster.ini"), key: "[SHARD] master_port" });
+  let shardNames: string[] = [];
+  try { shardNames = readdirSync(cdir).filter((d) => existsSync(join(cdir, d, "server.ini"))); } catch {}
+  for (const sn of shardNames) {
+    const f = join(cdir, sn, "server.ini");
+    const lines = parseIni(readText(f));
+    const sp = Number(iniGet(lines, "NETWORK", "server_port") || 0);
+    if (sp) out.push({ port: sp, file: f, key: "[NETWORK] server_port" });
+    const msp = Number(iniGet(lines, "STEAM", "master_server_port") || 0);
+    if (msp) out.push({ port: msp, file: f, key: "[STEAM] master_server_port" });
+    const ap = Number(iniGet(lines, "STEAM", "authentication_port") || 0);
+    if (ap) out.push({ port: ap, file: f, key: "[STEAM] authentication_port" });
+  }
+  return out;
+}
+// 当前存档与运行中的其他存档之间的端口冲突清单（列出需要修改的端口、文件与键名）
+function findPortConflicts(others: Map<string, string[]>): { port: number; file: string; key: string; other: string }[] {
+  const mine = clusterPorts(panelConfig.cluster);
+  const conflicts: { port: number; file: string; key: string; other: string }[] = [];
+  for (const [other] of others) {
+    const theirs = new Set(clusterPorts(other).map((p) => p.port));
+    for (const m of mine) {
+      if (theirs.has(m.port) && !conflicts.some((c) => c.port === m.port && c.file === m.file)) conflicts.push({ ...m, other });
+    }
+  }
+  return conflicts;
+}
+// 其他存档（非当前控制存档）的运行进程分组
+function groupOtherRunning(all: { cluster: string; shard: string }[]): Map<string, string[]> {
+  const map = new Map<string, string[]>();
+  for (const r of all) {
+    if (r.cluster === panelConfig.cluster) continue;
+    if (!map.has(r.cluster)) map.set(r.cluster, []);
+    map.get(r.cluster)!.push(r.shard);
+  }
+  return map;
+}
+
 async function api(req: Request, url: URL): Promise<Response> {
   const path = url.pathname.replace(/^\/api\/?/, "");
   const method = req.method;
@@ -2381,6 +2722,8 @@ async function api(req: Request, url: URL): Promise<Response> {
     const master0 = listShards().find((s) => s.isMaster) || listShards()[0];
     const langOv = master0 ? readModOverrides(master0.name).get("workshop-367546858") : undefined;
     const langSetting = String(langOv?.options?.LANG || "simplified");
+    // 运行中的存档清单（用于存档列表标记"运行中"）
+    const runningClusters = [...new Set((await runningDstAll()).map((r) => r.cluster))];
     return ok({
       clusterRoot: clusterRoot(),
       modsDir: modsStoreDir(),
@@ -2391,6 +2734,9 @@ async function api(req: Request, url: URL): Promise<Response> {
       beta: panelConfig.beta,
       betaBranch: panelConfig.betaBranch,
       lang: langSetting,
+      runningClusters,
+      isWin: IS_WIN,
+      multiOpenMinMem: MULTI_OPEN_MIN_MEM,
       // 凭证永不下发：只返回是否已设置，不返回内容
       has_token: !!token,
       has_cluster_password: !!roomPwd,
@@ -2455,12 +2801,12 @@ async function api(req: Request, url: URL): Promise<Response> {
     }
     if (typeof b.clusterRoot === "string" && b.clusterRoot.trim()) {
       const dir = b.clusterRoot.trim();
-      if (!dir.startsWith("/")) return fail("存档根目录必须是绝对路径");
+      if (!isAbsPath(dir)) return fail("存档根目录必须是绝对路径");
       try { mkdirSync(dir, { recursive: true }); panelConfig.clusterRoot = dir; } catch { return fail("无法创建存档根目录: " + dir); }
     }
     if (typeof b.modsDir === "string" && b.modsDir.trim()) {
       const dir = b.modsDir.trim();
-      if (!dir.startsWith("/")) return fail("模组存放目录必须是绝对路径");
+      if (!isAbsPath(dir)) return fail("模组存放目录必须是绝对路径");
       try { mkdirSync(dir, { recursive: true }); panelConfig.modsDir = dir; } catch { return fail("无法创建模组存放目录: " + dir); }
     }
     clearAllClusterCache();
@@ -2514,10 +2860,21 @@ async function api(req: Request, url: URL): Promise<Response> {
     if (existsSync(dir)) return fail("已存在同名存档: " + name);
     mkdirSync(join(dir, "Master"), { recursive: true });
     mkdirSync(join(dir, "Caves"), { recursive: true });
-    writeFileSync(join(dir, "cluster.ini"), `[GAMEPLAY]\ngame_mode = survival\nmax_players = 6\npvp = false\npause_when_empty = true\nvote_kick_enabled = true\n\n[NETWORK]\ncluster_name = ${name}\ncluster_description = A dedicated server\ncluster_password =\n\n[MISC]\nconsole_enabled = true\n\n[SHARD]\nshard_enabled = true\nbind_ip = 127.0.0.1\nmaster_ip = 127.0.0.1\nmaster_port = 10889\ncluster_key = supersecretkey\n`);
+    // 端口自动分配：避开其他存档已占用的端口（为以后多开留好余地）
+    const usedPorts = new Set<number>();
+    try {
+      for (const c of readdirSync(clusterRoot())) {
+        try { if (c !== name && statSync(join(clusterRoot(), c)).isDirectory()) for (const p of clusterPorts(c)) usedPorts.add(p.port); } catch {}
+      }
+    } catch {}
+    const alloc = (start: number) => { let p = start; while (usedPorts.has(p)) p++; usedPorts.add(p); return p; };
+    const masterPort = alloc(10889);
+    const mServer = alloc(11000), mSteam = alloc(27018), mAuth = alloc(8768);
+    const cServer = alloc(11001), cSteam = alloc(27019), cAuth = alloc(8769);
+    writeFileSync(join(dir, "cluster.ini"), `[GAMEPLAY]\ngame_mode = survival\nmax_players = 6\npvp = false\npause_when_empty = true\nvote_kick_enabled = true\n\n[NETWORK]\ncluster_name = ${name}\ncluster_description = A dedicated server\ncluster_password =\n\n[MISC]\nconsole_enabled = true\n\n[SHARD]\nshard_enabled = true\nbind_ip = 127.0.0.1\nmaster_ip = 127.0.0.1\nmaster_port = ${masterPort}\ncluster_key = supersecretkey\n`);
     writeFileSync(join(dir, "cluster_token.txt"), "# 在此粘贴 Klei 服务器令牌（必须填写才能开服）\n");
-    writeFileSync(join(dir, "Master", "server.ini"), `[NETWORK]\nserver_port = 11000\n\n[SHARD]\nis_master = true\n\n[STEAM]\nmaster_server_port = 27018\nauthentication_port = 8768\n\n[ACCOUNT]\nencode_user_path = true\n`);
-    writeFileSync(join(dir, "Caves", "server.ini"), `[NETWORK]\nserver_port = 11001\n\n[SHARD]\nis_master = false\nname = Caves\n\n[STEAM]\nmaster_server_port = 27019\nauthentication_port = 8769\n\n[ACCOUNT]\nencode_user_path = true\n`);
+    writeFileSync(join(dir, "Master", "server.ini"), `[NETWORK]\nserver_port = ${mServer}\n\n[SHARD]\nis_master = true\n\n[STEAM]\nmaster_server_port = ${mSteam}\nauthentication_port = ${mAuth}\n\n[ACCOUNT]\nencode_user_path = true\n`);
+    writeFileSync(join(dir, "Caves", "server.ini"), `[NETWORK]\nserver_port = ${cServer}\n\n[SHARD]\nis_master = false\nname = Caves\n\n[STEAM]\nmaster_server_port = ${cSteam}\nauthentication_port = ${cAuth}\n\n[ACCOUNT]\nencode_user_path = true\n`);
     panelConfig.cluster = name;
     clearAllClusterCache();
     savePanelConfig();
@@ -2560,8 +2917,6 @@ async function api(req: Request, url: URL): Promise<Response> {
     const b = await bodyJson(req);
     const shards = listShards();
     const wantMaster = b.type === "forest";
-    const exists = shards.some((s) => s.isMaster === wantMaster);
-    if (exists) return fail(wantMaster ? "地上世界已存在，仅支持各一个" : "地下世界已存在，仅支持各一个");
     // 检查是否有不兼容洞穴的地图模组已启用
     if (!wantMaster) {
       const master = shards.find((s) => s.isMaster);
@@ -2580,15 +2935,39 @@ async function api(req: Request, url: URL): Promise<Response> {
         }
       }
     }
-    const name = wantMaster ? "Master" : "Caves";
+    // 命名：第一个地上=Master、第一个地下=Caves，之后 Forest2/Caves2/Forest3…（支持多加世界）
+    let name = wantMaster ? "Master" : "Caves";
+    if (shards.some((s) => s.name === name)) {
+      const prefix = wantMaster ? "Forest" : "Caves";
+      let n = 2;
+      while (shards.some((s) => s.name === `${prefix}${n}`)) n++;
+      name = `${prefix}${n}`;
+    }
+    // 主世界标记：一个存档只有一个主世界（第一个地上世界），其余都是附加层
+    const hasMaster = shards.some((s) => s.isMaster);
+    const isMaster = wantMaster && !hasMaster;
+    // 附加层 = 超出经典「地上+地下」组合的多开层，面板不维护其设置
+    const isExtraLayer = !isMaster && (shards.length >= 2 || (wantMaster && hasMaster));
+    // 自动分配未占用端口（扫描全部存档的已用端口）
+    const usedPorts = new Set<number>();
+    try {
+      for (const c of readdirSync(clusterRoot())) {
+        try { if (statSync(join(clusterRoot(), c)).isDirectory()) for (const p of clusterPorts(c)) usedPorts.add(p.port); } catch {}
+      }
+    } catch {}
+    const alloc = (start: number) => { let p = start; while (usedPorts.has(p)) p++; usedPorts.add(p); return p; };
+    const serverPort = alloc(11000);
+    const steamPort = alloc(27018);
+    const authPort = alloc(8768);
     const dir = shardDir(name);
     if (existsSync(dir)) return fail("目录已存在: " + name);
     mkdirSync(dir, { recursive: true });
-    const ini = wantMaster
-      ? `[NETWORK]\nserver_port = 11000\n\n[SHARD]\nis_master = true\n\n[STEAM]\nmaster_server_port = 27018\nauthentication_port = 8768\n\n[ACCOUNT]\nencode_user_path = true\n`
-      : `[NETWORK]\nserver_port = 11001\n\n[SHARD]\nis_master = false\nname = Caves\n\n[STEAM]\nmaster_server_port = 27019\nauthentication_port = 8769\n\n[ACCOUNT]\nencode_user_path = true\n`;
+    const ini = `[NETWORK]\nserver_port = ${serverPort}\n\n[SHARD]\nis_master = ${isMaster}\n${isMaster ? "" : `name = ${name}\n`}\n[STEAM]\nmaster_server_port = ${steamPort}\nauthentication_port = ${authPort}\n\n[ACCOUNT]\nencode_user_path = true\n`;
     writeFileSync(join(dir, "server.ini"), ini);
-    return ok(null, `已创建${wantMaster ? "地上" : "地下"}世界 ${name}，请记得保存世界设置`);
+    clearShardListCache();
+    return ok({ name, isMaster, ports: { server: serverPort, steam: steamPort, auth: authPort } },
+      `已创建${wantMaster ? "地上" : "地下"}世界 ${name}${isMaster ? "（主世界）" : ""}，端口 ${serverPort}/${steamPort}/${authPort} 已自动分配，请记得保存世界设置`
+      + (isExtraLayer ? `。注意：一个存档只有一个主世界（已标记），${name} 属于附加层，面板不维护附加层的世界设置` : ""));
   }
   if (path === "worlds/delete" && method === "POST") {
     const b = await bodyJson(req);
@@ -2596,7 +2975,10 @@ async function api(req: Request, url: URL): Promise<Response> {
     const target = listShards().find((s) => s.name === shard);
     if (!target) return fail("世界不存在");
     if (await shardRunning(shard)) return fail("该世界正在运行，禁止删除，请先关闭服务器");
+    // 主世界在其他世界仍存在时禁止删除（从属世界需要主世界才能连接）
+    if (target.isMaster && listShards().length > 1) return fail("这是主世界，其他世界还依赖它。请先删除其他世界，最后才能删除主世界");
     rmSync(shardDir(shard), { recursive: true, force: true });
+    clearShardListCache();
     return ok(null, `已删除世界 ${shard}`);
   }
   if (path === "world/overrides" && method === "GET") {
@@ -2811,7 +3193,7 @@ async function api(req: Request, url: URL): Promise<Response> {
   if (path === "mods" && method === "GET") {
     const force = url.searchParams.get("refresh") === "1";
     const { list, steamOk } = await buildModList(force);
-    return ok({ mods: list, steamOk, cacheTime: modCache.time });
+    return ok({ mods: list, steamOk, cacheTime: modCache.time, isWin: IS_WIN, modsDir: modsStoreDir() });
   }
   if (path === "mods/query" && method === "POST") {
     const b = await bodyJson(req);
@@ -3067,6 +3449,37 @@ async function api(req: Request, url: URL): Promise<Response> {
     const success = await fetchModInfoLua(String(b.id));
     return ok({ success }, success ? "modinfo.lua 已下载" : "下载失败（无 CDN 直链或网络问题）");
   }
+  // ===== Windows 本地模组复用（本地模组直接开房间） =====
+  if (path === "mods/local-steam" && method === "GET") {
+    if (!IS_WIN) return fail("该功能仅 Windows 版可用");
+    return ok({ mods: scanLocalSteamMods(), modsDir: modsStoreDir() });
+  }
+  if (path === "mods/import-local" && method === "POST") {
+    if (!IS_WIN) return fail("该功能仅 Windows 版可用");
+    const b = await bodyJson(req);
+    const id = String(b.id || "");
+    const src = String(b.path || "");
+    if (!validId(id)) return fail("非法模组 ID");
+    if (!src || src.includes("..") || !existsSync(src)) return fail("来源路径不存在");
+    if (!existsSync(join(src, "modinfo.lua"))) return fail("来源目录缺少 modinfo.lua，不是有效的模组目录");
+    const dst = join(modsStoreDir(), id);
+    mkdirSync(modsStoreDir(), { recursive: true });
+    rmSync(dst, { recursive: true, force: true });
+    copyDirSync(src, dst);
+    // 标明来源地址，方便程序调用和用户维护
+    writeFileSync(join(dst, "SOURCE.txt"), `该模组从本地复用\r\n模组ID: ${id}\r\n来源: ${src}\r\n时间: ${new Date().toLocaleString("zh-CN")}\r\n`);
+    if (modCache.items[id]) { modCache.items[id].downloadedAt = Date.now(); saveModCache(); }
+    clearModCaches();
+    return ok(null, `已复用本地模组 ${id} → ${dst}`);
+  }
+  if (path === "util/open-folder" && method === "POST") {
+    if (!IS_WIN) return fail("该功能仅 Windows 版可用");
+    const b = await bodyJson(req);
+    const target = b.which === "saves" ? clusterRoot() : modsStoreDir();
+    try { mkdirSync(target, { recursive: true }); } catch {}
+    try { Bun.spawn(["explorer", target]); } catch {}
+    return ok(null, "已打开文件夹: " + target);
+  }
   if (path === "mods/download" && method === "POST") {
     const b = await bodyJson(req);
     const ids: string[] = Array.isArray(b.ids) ? b.ids.map(String) : (validId(b.id) ? [String(b.id)] : []);
@@ -3146,13 +3559,41 @@ async function api(req: Request, url: URL): Promise<Response> {
     for (const s of shards) s.running = await shardRunning(s.name);
     const sysMem = getSystemMemory();
     const dstMem = getDstProcessMemory();
-    const loadText = readText("/proc/loadavg");
-    const cpuPct = Math.round((parseFloat(loadText.split(/\s+/)[0]) || 0) / ((require("node:os") as any).cpus?.().length || 4) * 100);
-    return ok({ shards, autorestart: panelConfig.autorestart, mode: panelConfig.mode, langCheck: panelConfig.langCheck, sys: { avail: sysMem.avail, total: sysMem.total, dstMem, cpu: cpuPct } });
+    const cpuPct = getCpuUsage();
+    // 多开信息：其他存档运行状态、内存门禁（空余 ≥4G 才允许多开）、端口冲突清单
+    const otherMap = groupOtherRunning(await runningDstAll());
+    const otherRunning = [...otherMap.entries()].map(([cluster, shards]) => ({ cluster, shards }));
+    const portConflicts = otherRunning.length ? findPortConflicts(otherMap) : [];
+    return ok({
+      shards, autorestart: panelConfig.autorestart, mode: panelConfig.mode, langCheck: panelConfig.langCheck,
+      sys: { avail: sysMem.avail, total: sysMem.total, dstMem, cpu: cpuPct },
+      currentRunning: shards.some((s) => s.running),
+      otherRunning,
+      canMultiOpen: sysMem.avail <= 0 || sysMem.avail >= MULTI_OPEN_MIN_MEM,
+      multiOpenMinMem: MULTI_OPEN_MIN_MEM,
+      portConflicts,
+      isWin: IS_WIN,
+    });
   }
   if (path === "server/start" && method === "POST") {
     const shards = listShards();
     if (!shards.length) return fail("当前存档没有任何世界分片");
+    // 多开检测：已有其他存档的服务器在运行时，需要过内存门禁与端口冲突检测
+    const otherMap = groupOtherRunning(await runningDstAll());
+    if (otherMap.size) {
+      const names = [...otherMap.keys()].map((n) => `「${n}」`).join("、");
+      // 内存门禁：空余不足 4G 不准多开
+      const sysMem = getSystemMemory();
+      if (sysMem.avail > 0 && sysMem.avail < MULTI_OPEN_MIN_MEM) {
+        return fail(`存档 ${names} 的服务器正在运行，当前空余内存仅 ${sysMem.avail}MB，不足 4G，不允许再开新服务器。请先在对应存档关闭服务器或释放内存后再试。`);
+      }
+      // 端口冲突检测：冲突时列出需要修改的端口、文件与键名
+      const conflicts = findPortConflicts(otherMap);
+      if (conflicts.length) {
+        const detail = conflicts.map((c) => `端口 ${c.port}（${c.file} 的 ${c.key}，与「${c.other}」冲突）`).join("；");
+        return fail(`检测到与运行中存档 ${names} 的端口冲突，无法多开：${detail}。请把当前存档的对应端口改成未占用的值后再启动（每个存档的 server_port / master_server_port / authentication_port / master_port 都必须唯一）。`);
+      }
+    }
     // 资源检查
     const res = checkResources();
     if (!res.ok) return fail(res.msg, 200);
@@ -3323,15 +3764,22 @@ async function api(req: Request, url: URL): Promise<Response> {
   // ===== 控制台 =====
   if (path === "items" && method === "GET") {
     // 原版物品 + 当前存档已启用模组新增的物品（分类：模组物品），附带物品图集位置
-    const all: any[] = [...ITEMS];
-    const iconMap = itemIconAtlas();
-    for (const it of all) (it as any).icon = iconMap.get(it.prefab) || "";
-    const seen = new Set(ITEMS.map((i) => i.prefab));
-    const enabled = new Set<string>();
+    // 结果缓存：键 = 存档 + 启用模组集合 + 模组缓存版本，切存档/启停模组/下载模组后自动失效
+    const enabledIds: string[] = [];
     for (const shard of listShards()) {
-      for (const [key, e] of readModOverrides(shard.name)) if (e.enabled) enabled.add(key.replace("workshop-", ""));
+      for (const [key, e] of readModOverrides(shard.name)) if (e.enabled) enabledIds.push(key.replace("workshop-", ""));
     }
-    for (const id of enabled) {
+    enabledIds.sort();
+    const itemsCacheKey = panelConfig.cluster + "|" + enabledIds.join(",") + "|" + modCache.time;
+    if (itemsApiCache.key === itemsCacheKey) return ok(itemsApiCache.data);
+    const all: any[] = ITEMS.map((it) => ({ ...it }));
+    const iconMap = itemIconAtlas();
+    for (const it of all) {
+      it.icon = iconMap.get(it.prefab) || "";
+      it.cat = fixItemCategory(it.prefab, it.cat);
+    }
+    const seen = new Set(ITEMS.map((i) => i.prefab));
+    for (const id of enabledIds) {
       for (const it of modItems(id)) {
         if (!seen.has(it.prefab)) {
           seen.add(it.prefab);
@@ -3340,6 +3788,7 @@ async function api(req: Request, url: URL): Promise<Response> {
         }
       }
     }
+    itemsApiCache = { key: itemsCacheKey, data: all };
     return ok(all);
   }
   // ===== 物品使用历史 =====
@@ -3578,10 +4027,24 @@ const MIME: Record<string, string> = {
   ".gif": "image/gif",
   ".ico": "image/x-icon",
 };
-function serveFile(path: string): Response {
+function serveFile(path: string, req?: Request): Response {
   try {
     const ext = path.slice(path.lastIndexOf("."));
-    return new Response(Bun.file(path), { headers: { "Content-Type": MIME[ext] || "application/octet-stream" } });
+    const mime = MIME[ext] || "application/octet-stream";
+    const headers: Record<string, string> = { "Content-Type": mime };
+    // 图标/图片内容稳定，长缓存减少重复请求（模组图标与世界设置图标量大）
+    if (/\.(png|jpg|jpeg|webp|gif|ico)$/.test(ext)) headers["Cache-Control"] = "public, max-age=604800, immutable";
+    else if (/\.(css|js)$/.test(ext)) headers["Cache-Control"] = "public, max-age=3600";
+    // 文本类资源 gzip（app.js 体积大，压缩后传输约 1/4，加快已加载页面的二次打开速度）
+    if (req && /\.(html|css|js|svg)$/.test(ext) && (req.headers.get("accept-encoding") || "").includes("gzip")) {
+      const buf = readFileSync(path);
+      if (buf.length > 1024) {
+        headers["Content-Encoding"] = "gzip";
+        headers["Vary"] = "Accept-Encoding";
+        return new Response(gzipSync(buf), { headers });
+      }
+    }
+    return new Response(Bun.file(path), { headers });
   } catch {
     return new Response("Not Found", { status: 404 });
   }
@@ -3631,19 +4094,24 @@ const server = Bun.serve({
       }
     }
     if (path === "/" || path === "/index.html") {
-      return serveFile(join(PUBLIC_DIR, checkAuth(req) ? "index.html" : "login.html"));
+      return serveFile(join(PUBLIC_DIR, checkAuth(req) ? "index.html" : "login.html"), req);
     }
     // 动态模组物品图标：/mod-icon?id=<modId>&prefab=<prefab> → PNG（支持图集 UV 切片）
     if (path === "/mod-icon" && req.method === "GET") {
       const modId = url.searchParams.get("id") || "";
       const prefab = url.searchParams.get("prefab") || "";
       if (!/^\d{4,15}$/.test(modId) || !/^[a-z0-9_]+$/.test(prefab)) return new Response("Bad request", { status: 400 });
+      const pngHeaders = { "Content-Type": "image/png", "Cache-Control": "public, max-age=604800, immutable" };
+      // 磁盘缓存：首次解码后写入 public/modicons/<modId>/，之后按静态文件直接返回（改变加载方式，秒开）
+      const diskDir = join(PUBLIC_DIR, "modicons", modId);
+      const diskFile = join(diskDir, prefab + ".png");
+      if (existsSync(diskFile)) return new Response(Bun.file(diskFile), { status: 200, headers: pngHeaders });
       const icon = findModIcon(modId, prefab);
       if (!icon) return new Response("Not found", { status: 404 });
-      // 缓存 key = modId:prefab，避免重复解码
+      // 内存缓存 key = modId:prefab，避免重复解码
       const cacheKey = `${modId}:${prefab}`;
       const cached = modIconPngCache.get(cacheKey);
-      if (cached) return new Response(cached, { status: 200, headers: { "Content-Type": "image/png", "Cache-Control": "public, max-age=604800" } });
+      if (cached) return new Response(cached, { status: 200, headers: pngHeaders });
       try {
         const buf = readFileSync(icon.texPath);
         const result = decodeKTEX(buf);
@@ -3651,14 +4119,15 @@ const server = Bun.serve({
         let png = result.png;
         const isFullUV = icon.u1 === 0 && icon.u2 === 1 && icon.v1 === 0 && icon.v2 === 1;
         if (!isFullUV) png = cropPNG(result, icon.u1, icon.u2, icon.v1, icon.v2);
-        // 缓存（限制总数 + 总量防止内存溢出，200 个约 2MB）
+        // 内存缓存（限制总数 + 总量防止内存溢出，200 个约 2MB）
         if (modIconPngCache.size > 200) {
           const keys = [...modIconPngCache.keys()].slice(0, 50);
           for (const k of keys) modIconPngCache.delete(k);
         }
-        // 限制单个缓存不超过 100KB
         if (png.length < 100_000) modIconPngCache.set(cacheKey, png);
-        return new Response(png, { status: 200, headers: { "Content-Type": "image/png", "Cache-Control": "public, max-age=604800" } });
+        // 写磁盘缓存
+        try { mkdirSync(diskDir, { recursive: true }); writeFileSync(diskFile, png); } catch {}
+        return new Response(png, { status: 200, headers: pngHeaders });
       } catch {
         return new Response("Error", { status: 500 });
       }
@@ -3666,7 +4135,7 @@ const server = Bun.serve({
     // 静态资源（相对路径引用，无敏感数据；允许 bg/ 等一层子目录，禁止 .. 穿越）
     if (/^\/[\w.\-/]+$/.test(path) && !path.includes("..")) {
       const fp = join(PUBLIC_DIR, path);
-      try { if (existsSync(fp) && statSync(fp).isFile()) return serveFile(fp); } catch {}
+      try { if (existsSync(fp) && statSync(fp).isFile()) return serveFile(fp, req); } catch {}
     }
     // Steam CDN 图片代理（解决国内无法直连 steamusercontent.com 的问题）
     if (path === "/img-proxy" && req.method === "GET") {
@@ -3688,6 +4157,7 @@ const server = Bun.serve({
 });
 
 console.log(`DST 管理面板已启动: http://127.0.0.1:${PORT}/  (当前存档: ${panelConfig.cluster})`);
+writeModsDirReadme(); // Windows 版：模组存放目录写地址说明文件
 
 // ---------- 定时任务 ----------
 // 内存保护：每 10 秒检查（独立于自动重启，始终运行）

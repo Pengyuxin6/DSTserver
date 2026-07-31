@@ -546,6 +546,10 @@ body[data-theme="paper"] #pageBg { opacity: .3; }
 #tabsMore button:hover { color: var(--text); background: var(--hover-bg); }
 #tabsMore button.active { color: var(--amber); border-left-color: var(--amber); background: var(--hover-bg); font-weight: bold; }
 #topbar { position: relative; }
+/* 多开提示框 */
+.multi-open-box { background: rgba(232,163,61,.08); border: 1px solid var(--amber); border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; font-size: 13px; line-height: 1.7; }
+.multi-open-box .multi-err { color: var(--red); margin-top: 6px; }
+.btn:disabled { opacity: .45; cursor: not-allowed; filter: grayscale(.6); }
 @media (max-width: 1200px) {
   #topbar { flex-wrap: nowrap; }
   #tabs { order: 0; flex-basis: auto; flex-wrap: nowrap; overflow: hidden; }
@@ -559,7 +563,8 @@ body[data-theme="paper"] #pageBg { opacity: .3; }
 
 /* 设置项图标 */
 .opt-icon { width: 26px; height: 26px; object-fit: contain; vertical-align: -5px; margin-right: 6px; background: rgba(232,163,61,.10); border: 1px solid var(--border); border-radius: 4px; }
-.opt-icon-empty { display: inline-block; }
+.opt-icon-empty { display: inline-flex; align-items: center; justify-content: center; font-size: 13px; font-weight: bold; color: var(--amber); opacity: .75; vertical-align: -5px; }
+.opt-icon-empty::before { content: attr(data-ch); }
 
 /* 世界设置项弹窗：radio 选项行 */
 .opt-radio-row { display: flex; align-items: center; gap: 8px; padding: 6px 10px; border-radius: 6px; cursor: pointer; border: 1px solid transparent; }
