@@ -3141,12 +3141,19 @@ async function api(req: Request, url: URL): Promise<Response> {
     const res = checkResources();
     if (!res.ok) return fail(res.msg, 200);
     const msgs: string[] = [];
+    let hasFailure = false;
     for (const s of shards) {
       if (await shardRunning(s.name)) { msgs.push(`${s.name}: 已在运行`); continue; }
       const r = await startShard(s.name);
-      msgs.push(`${s.name}: ${r === "ok" ? "已启动" : "启动失败 " + r}`);
+      const ok = r === "ok";
+      if (!ok) hasFailure = true;
+      msgs.push(`${s.name}: ${ok ? "已启动" : "启动失败 " + r}`);
     }
-    return ok(null, msgs.join("；"));
+    let msg = msgs.join("；");
+    if (hasFailure) {
+      msg += "。💡 如果反复启动失败，很可能是内存不足。可尝试：1) 关闭其他服务释放内存 2) 减少启用的模组数量 3) 检查 dst.slice 内存限制";
+    }
+    return ok(null, msg);
   }
   if (path === "server/stop" && method === "POST") {
     for (const s of listShards()) await stopShard(s.name);
