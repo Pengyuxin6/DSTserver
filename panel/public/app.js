@@ -349,6 +349,7 @@ function renderCrumbs() {
 }
 function route() {
   if (window._serverLogTimer) { clearInterval(window._serverLogTimer); window._serverLogTimer = null; }
+  if (window._statusTimer) { clearInterval(window._statusTimer); window._statusTimer = null; }
   const fn = {
     basic: pageBasic, world: pageWorld, mods: pageMods, server: pageServer,
     console: pageConsole, chat: pageChat, help: pageHelp,
@@ -1429,6 +1430,9 @@ async function pageServer() {
       <button class="btn" id="pauseBtn">⏸ 暂停服务器</button>
       <button class="btn" id="reStatus">🔄 刷新状态</button>
     </div>
+    <div class="row" style="margin-bottom:4px"><label>自动刷新状态</label>
+      <label class="switch" title="每 10 秒自动刷新分片状态"><input type="checkbox" id="autoStatusSwitch"><span class="slider"></span></label>
+      <span class="hint">开启后自动刷新，关闭后需手动点击「刷新状态」查看最新状态</span></div>
     <table class="grid"><thead><tr><th>分片</th><th>状态</th><th>端口</th></tr></thead><tbody>${shardRows}</tbody></table>
     <div class="row" style="margin-top:10px"><label>自动重启</label>
       <label class="switch" title="每 30 秒检查分片，掉线自动拉起"><input type="checkbox" id="arSwitch" ${d.autorestart ? "checked" : ""}><span class="slider"></span></label>
@@ -1590,6 +1594,28 @@ async function pageServer() {
   // 页面切换时清除定时器
   if (window._serverLogTimer) clearInterval(window._serverLogTimer);
   window._serverLogTimer = logTimer;
+
+  // 分片状态自动刷新（每 10 秒，不重绘整个页面，只更新分片表格）
+  let statusPolling = true;
+  if (window._statusTimer) clearInterval(window._statusTimer);
+  const refreshStatusRows = async () => {
+    const j = await apiQuiet("worlds");
+    if (!j) return;
+    const tbody = document.querySelector("#content table.grid tbody");
+    if (!tbody) return;
+    const newShards = j.data;
+    tbody.innerHTML = "";
+    newShards.forEach((s, i) => {
+      const tr = document.createElement("tr");
+      tr.innerHTML = `<td><span class="status-dot ${s.running ? "on" : "off"}"></span>${esc(s.name)}（${s.isMaster ? "地上" : "地下"}）</td>
+        <td>${s.running ? "运行中" : "未运行"}</td><td>${esc(s.port)}</td>`;
+      tbody.appendChild(tr);
+    });
+  };
+  window._statusTimer = setInterval(() => { if (statusPolling) refreshStatusRows(); }, 10_000);
+  $("#autoStatusSwitch").onchange = (e) => {
+    statusPolling = e.target.checked;
+  };
 }
 
 // ============ 5. 控制台 ============
