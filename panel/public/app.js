@@ -574,6 +574,12 @@ async function pageWorld() {
   const j = await api("worlds");
   const shards = j.data;
   content.innerHTML = `
+  <div class="card" id="worldSysCard">
+    <h3>系统资源</h3>
+    <div class="row"><span id="worldSysRes" class="hint">加载中…</span></div>
+    <div class="hint" id="worldMemHint">💡 可用内存低于 <span style="color:var(--red)">512MB</span> 时自动终止服务器</div>
+  </div>
+
   <div class="cols">
     <div class="left">
       <div class="card">
@@ -626,6 +632,24 @@ async function pageWorld() {
   if (!worldState.shard && shards.length) worldState.shard = shards[0].name;
   if (worldState.shard) { pageWorldHighlight(); loadWorldOverrides(); }
 
+  // 系统资源
+  apiQuiet("server/status").then((j) => {
+    if (!j) return;
+    const d = j.data;
+    if (d.sys) {
+      const cpuColor = d.sys.cpu > 80 ? "color:var(--red)" : d.sys.cpu > 50 ? "color:var(--amber)" : "";
+      const memUsed = d.sys.total - d.sys.avail;
+      const memPct = d.sys.total ? Math.round(memUsed / d.sys.total * 100) : 0;
+      const el = $("#worldSysRes");
+      if (el) el.innerHTML = `CPU <span style="${cpuColor}">${d.sys.cpu}%</span> | 内存 ${memUsed}MB / ${d.sys.total}MB (${memPct}%)${d.sys.dstMem > 0 ? ` | DST <span class="tag">${d.sys.dstMem}MB</span>` : ""}`;
+      const hint = $("#worldMemHint");
+      if (hint) {
+        const availColor = d.sys.avail < 1024 ? "var(--red)" : d.sys.avail < 2048 ? "var(--amber)" : "var(--green)";
+        hint.innerHTML = `可用 <span style="color:${availColor}">${d.sys.avail}MB</span>，低于 <span style="color:var(--red)">512MB</span> 时自动终止服务器`;
+      }
+    }
+  });
+
   $("#optFilter").oninput = (e) => { worldState.filterText = e.target.value; loadWorldOverrides(); };
   $("#optGroup").onchange = (e) => { worldState.filterGroup = e.target.value; loadWorldOverrides(); };
 
@@ -651,7 +675,7 @@ async function pageWorld() {
     const box = $("#wSaveList");
     box.innerHTML = '<div class="hint">加载中…</div>';
     const j = await apiQuiet("saves/list");
-    if (!j) return;
+    if (!j) { box.innerHTML = '<div class="hint" style="color:var(--red)">加载存档失败，请检查服务器连接</div>'; return; }
     const saves = j.data.saves || [];
     if (!saves.length) { box.innerHTML = '<div class="hint">暂无存档数据</div>'; return; }
     const latestDay = j.data.latestDay;
@@ -1431,7 +1455,7 @@ async function pageServer() {
       <button class="btn" id="reStatus">🔄 刷新状态</button>
     </div>
     <div class="row" style="margin-bottom:4px"><label>自动刷新状态</label>
-      <label class="switch" title="每 10 秒自动刷新分片状态"><input type="checkbox" id="autoStatusSwitch"><span class="slider"></span></label>
+      <label class="switch" title="每 10 秒自动刷新分片状态"><input type="checkbox" id="autoStatusSwitch" checked><span class="slider"></span></label>
       <span class="hint">开启后每 10 秒自动刷新分片状态和系统资源</span></div>
     <div class="row" style="margin-bottom:8px"><span id="sysRes" class="hint">加载中…</span></div>
     <div class="hint" id="memHint" style="margin-bottom:8px">💡 系统可用内存低于 <span style="color:var(--red)">512MB</span> 时自动终止服务器</div>
@@ -1655,6 +1679,12 @@ async function pageConsole() {
   const histJ = await apiQuiet("item-history");
   if (histJ) consoleState.itemHistory = histJ.data.history;
   content.innerHTML = `
+  <div class="card" id="sysCard">
+    <h3>系统资源</h3>
+    <div class="row"><span id="consoleSysRes" class="hint">加载中…</span></div>
+    <div class="hint" id="consoleMemHint">💡 可用内存低于 <span style="color:var(--red)">512MB</span> 时自动终止服务器</div>
+  </div>
+
   <div class="cols">
     <div class="left">
       <div class="card">
@@ -1848,6 +1878,7 @@ async function pageConsole() {
     if (!j) return;
     consoleState.cachedWorld = j.data;
     renderWorld(j.data);
+    renderSaves();
   };
 
   $("#mkAdmin").onclick = async () => {
@@ -1977,7 +2008,7 @@ async function pageConsole() {
     const box = $("#saveList");
     box.innerHTML = '<div class="hint">加载中…</div>';
     const j = await apiQuiet("saves/list");
-    if (!j) return;
+    if (!j) { box.innerHTML = '<div class="hint" style="color:var(--red)">加载存档失败，请检查服务器连接</div>'; return; }
     const saves = j.data.saves || [];
     if (!saves.length) { box.innerHTML = '<div class="hint">暂无存档数据</div>'; return; }
     const latestDay = j.data.latestDay;
@@ -1997,6 +2028,23 @@ async function pageConsole() {
   };
   $("#refreshSaves").onclick = renderSaves;
   renderSaves(); // 进入控制台自动加载存档列表
+  // 系统资源
+  apiQuiet("server/status").then((j) => {
+    if (!j) return;
+    const d = j.data;
+    if (d.sys) {
+      const cpuColor = d.sys.cpu > 80 ? "color:var(--red)" : d.sys.cpu > 50 ? "color:var(--amber)" : "";
+      const memUsed = d.sys.total - d.sys.avail;
+      const memPct = d.sys.total ? Math.round(memUsed / d.sys.total * 100) : 0;
+      const el = $("#consoleSysRes");
+      if (el) el.innerHTML = `CPU <span style="${cpuColor}">${d.sys.cpu}%</span> | 内存 ${memUsed}MB / ${d.sys.total}MB (${memPct}%)${d.sys.dstMem > 0 ? ` | DST <span class="tag">${d.sys.dstMem}MB</span>` : ""}`;
+      const hint = $("#consoleMemHint");
+      if (hint) {
+        const availColor = d.sys.avail < 1024 ? "var(--red)" : d.sys.avail < 2048 ? "var(--amber)" : "var(--green)";
+        hint.innerHTML = `可用 <span style="color:${availColor}">${d.sys.avail}MB</span>，低于 <span style="color:var(--red)">512MB</span> 时自动终止服务器`;
+      }
+    }
+  });
 
   $("#killAll").onclick = async () => { if (await dlgConfirm("确定杀死所有玩家？", { danger: true })) execLua(`for _,p in ipairs(AllPlayers) do p:PushEvent("death") end`); };
   $("#reviveAll").onclick = () => execLua(`for _,p in ipairs(AllPlayers) do if p:HasTag("playerghost") then p:PushEvent("respawnfromghost") end end`);

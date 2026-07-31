@@ -444,6 +444,13 @@ function listShards(): ShardInfo[] {
 }
 // 启动/停止/删除分片后清除缓存
 function clearShardListCache() { shardListCache = null; }
+// 切换 cluster 时清除所有与 cluster 相关的缓存
+function clearAllClusterCache() {
+  shardListCache = null;
+  modOverridesCache.clear();
+  modAtlasCache.clear();
+  modItemsCache.clear();
+}
 
 // ---------- screen 控制 ----------
 async function screenList(): Promise<string> {
@@ -2456,6 +2463,7 @@ async function api(req: Request, url: URL): Promise<Response> {
       if (!dir.startsWith("/")) return fail("模组存放目录必须是绝对路径");
       try { mkdirSync(dir, { recursive: true }); panelConfig.modsDir = dir; } catch { return fail("无法创建模组存放目录: " + dir); }
     }
+    clearAllClusterCache();
     savePanelConfig();
     return ok(null, "已保存，重启面板后路径修改生效（其他设置重启服务器后生效）");
   }
@@ -2463,6 +2471,7 @@ async function api(req: Request, url: URL): Promise<Response> {
     const b = await bodyJson(req);
     if (typeof b.cluster === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(b.cluster) && existsSync(join(clusterRoot(), b.cluster))) {
       panelConfig.cluster = b.cluster;
+      clearAllClusterCache();
       savePanelConfig();
       return ok(null, "已切换存档: " + b.cluster);
     }
@@ -2492,6 +2501,7 @@ async function api(req: Request, url: URL): Promise<Response> {
     renameSync(oldDir, newDir);
     if (from === panelConfig.cluster) {
       panelConfig.cluster = name;
+      clearAllClusterCache();
       savePanelConfig();
     }
     return ok(null, `存档已重命名: ${from} → ${name}`);
@@ -2509,6 +2519,7 @@ async function api(req: Request, url: URL): Promise<Response> {
     writeFileSync(join(dir, "Master", "server.ini"), `[NETWORK]\nserver_port = 11000\n\n[SHARD]\nis_master = true\n\n[STEAM]\nmaster_server_port = 27018\nauthentication_port = 8768\n\n[ACCOUNT]\nencode_user_path = true\n`);
     writeFileSync(join(dir, "Caves", "server.ini"), `[NETWORK]\nserver_port = 11001\n\n[SHARD]\nis_master = false\nname = Caves\n\n[STEAM]\nmaster_server_port = 27019\nauthentication_port = 8769\n\n[ACCOUNT]\nencode_user_path = true\n`);
     panelConfig.cluster = name;
+    clearAllClusterCache();
     savePanelConfig();
     return ok(null, "已创建并切换到新存档: " + name + "，记得填写 cluster_token.txt");
   }
@@ -2530,6 +2541,7 @@ async function api(req: Request, url: URL): Promise<Response> {
       });
       if (rest.length) {
         panelConfig.cluster = rest[0];
+        clearAllClusterCache();
         savePanelConfig();
         return ok(null, `已删除存档 ${name}，已切换到 ${rest[0]}`);
       }
@@ -3407,7 +3419,7 @@ async function api(req: Request, url: URL): Promise<Response> {
           try {
             if (existsSync(metaFile)) {
               const metaText = readFileSync(metaFile, "utf-8").replace(/\0/g, "");
-              const m = /cycles\s*=\s*(\d+)/.exec(metaText);
+              const m = /cycles"?\]?\s*=\s*(\d+)/.exec(metaText);
               if (m) day = parseInt(m[1]);
             }
           } catch {}
