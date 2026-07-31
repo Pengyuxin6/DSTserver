@@ -477,7 +477,7 @@ async function startShard(shard: string): Promise<string> {
   // 使用 systemd-run --scope 在独立 cgroup 中启动，通过 MemoryMax 硬性限制实际内存使用
   const screenCmd = `screen -dmS ${screenSession(shard)} ${BIN} -cluster ${panelConfig.cluster} -shard ${shard} ${extraArgs.join(" ")}`.trim();
   const sdArgs = memLimitMB > 0
-    ? ["systemd-run", "--scope", "--user", `-p=MemoryMax=${memLimitMB}M`, `--unit=dst-${shard.toLowerCase()}`, "sh", "-c", screenCmd]
+    ? ["systemd-run", "--scope", `-p`, `MemoryMax=${memLimitMB}M`, `--unit=dst-${shard.toLowerCase()}`, "sh", "-c", screenCmd]
     : ["screen", "-dmS", screenSession(shard), BIN, "-cluster", panelConfig.cluster, "-shard", shard, ...extraArgs];
   const r = await run(sdArgs, { cwd: BIN_DIR });
   return r.code === 0 ? "ok" : r.out;
