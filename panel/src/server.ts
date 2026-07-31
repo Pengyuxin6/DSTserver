@@ -481,9 +481,16 @@ async function startShard(shard: string): Promise<string> {
     String(memLimitMB), ...extraArgs,
   ];
   const r = await run(args, { cwd: BIN_DIR });
-  return r.code === 0 ? "ok" : r.out;
+  // 不依赖退出码（cgroup 写入可能失败导致非零），改为检查进程是否实际启动
+  await sleep(2000);
+  return (await shardRunning(shard)) ? "ok" : (r.out || "启动失败");
 }
 async function stopShard(shard: string): Promise<void> {
+  // 先停 systemd transient service（清理 cgroup）
+  const unit = `dst-${shard.toLowerCase()}`;
+  await run(["systemctl", "stop", unit]);
+  await run(["systemctl", "reset-failed", unit]);
+  // 再清理 screen 和残留进程
   await run(["screen", "-S", screenSession(shard), "-X", "quit"]);
   await run(["pkill", "-f", `dontstarve_dedicated_server_nullrenderer.*-shard ${shard}`]);
 }
