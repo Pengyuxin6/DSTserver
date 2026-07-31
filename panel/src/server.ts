@@ -467,10 +467,6 @@ function screenSession(shard: string): string {
   return shard.toLowerCase() === "caves" ? "dst_caves" : "dst_master";
 }
 async function startShard(shard: string): Promise<string> {
-  // 计算内存上限：系统总内存 - 1GB 预留
-  const sysMem = getSystemMemory();
-  const memLimitMB = sysMem.total > 1024 ? sysMem.total - 1024 : sysMem.total;
-  // 自定义存档根目录参数
   const extraArgs: string[] = [];
   if (clusterRoot() !== DEFAULT_CLUSTER_ROOT) {
     const parent = clusterRoot().replace(/\/[^/]+$/, "") || "/";
@@ -478,14 +474,11 @@ async function startShard(shard: string): Promise<string> {
     extraArgs.push("-persistent_storage_root", parent, "-conf_dir", conf);
   }
   if (panelConfig.mode === "offline") extraArgs.push("-offline");
-  // 通过 sudo 调用 cgroup 启动脚本，限制 DST 进程实际内存
   const args = [
     "sudo", "/usr/local/bin/dst-shard-launch.sh",
-    shard, screenSession(shard), BIN, BIN_DIR, panelConfig.cluster,
-    String(memLimitMB), ...extraArgs,
+    shard, screenSession(shard), BIN, BIN_DIR, panelConfig.cluster, ...extraArgs,
   ];
   const r = await run(args, { cwd: BIN_DIR });
-  // 不依赖退出码（cgroup 写入可能失败导致非零），改为检查进程是否实际启动
   await sleep(2000);
   return (await shardRunning(shard)) ? "ok" : (r.out || "启动失败");
 }
