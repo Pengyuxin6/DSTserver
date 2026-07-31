@@ -1434,6 +1434,7 @@ async function pageServer() {
       <label class="switch" title="每 10 秒自动刷新分片状态"><input type="checkbox" id="autoStatusSwitch"><span class="slider"></span></label>
       <span class="hint">开启后每 10 秒自动刷新分片状态和系统资源</span></div>
     <div class="row" style="margin-bottom:8px"><span id="sysRes" class="hint">加载中…</span></div>
+    <div class="hint" id="memHint" style="margin-bottom:8px">💡 系统可用内存低于 <span style="color:var(--red)">512MB</span> 时自动终止服务器</div>
     <table class="grid"><thead><tr><th>分片</th><th>状态</th><th>端口</th></tr></thead><tbody>${shardRows}</tbody></table>
     <div class="row" style="margin-top:10px"><label>自动重启</label>
       <label class="switch" title="每 30 秒检查分片，掉线自动拉起"><input type="checkbox" id="arSwitch" ${d.autorestart ? "checked" : ""}><span class="slider"></span></label>
@@ -1622,6 +1623,12 @@ async function pageServer() {
       const memPct = d.sys.total ? Math.round(memUsed / d.sys.total * 100) : 0;
       res.innerHTML = `CPU <span style="${cpuColor}">${d.sys.cpu}%</span> ｜ 内存 ${memUsed}MB / ${d.sys.total}MB (${memPct}%)${d.sys.dstMem > 0 ? ` ｜ DST <span class="tag">${d.sys.dstMem}MB</span>` : ''}`;
     }
+    // 更新内存保护提示
+    const hint = $("#memHint");
+    if (hint && d.sys) {
+      const availColor = d.sys.avail < 1024 ? 'var(--red)' : d.sys.avail < 2048 ? 'var(--amber)' : 'var(--green)';
+      hint.innerHTML = `💡 可用 <span style="color:${availColor}">${d.sys.avail}MB</span>，低于 <span style="color:var(--red)">512MB</span> 时自动终止服务器`;
+    }
   };
   window._statusTimer = setInterval(() => { if (statusPolling) refreshStatus(); }, 10_000);
   $("#autoStatusSwitch").onchange = (e) => { statusPolling = e.target.checked; };
@@ -1632,6 +1639,8 @@ async function pageServer() {
     const memUsed = d.sys.total - d.sys.avail;
     const memPct = d.sys.total ? Math.round(memUsed / d.sys.total * 100) : 0;
     $("#sysRes").innerHTML = `CPU <span style="${cpuColor}">${d.sys.cpu}%</span> ｜ 内存 ${memUsed}MB / ${d.sys.total}MB (${memPct}%)${d.sys.dstMem > 0 ? ` ｜ DST <span class="tag">${d.sys.dstMem}MB</span>` : ''}`;
+    const availColor = d.sys.avail < 1024 ? 'var(--red)' : d.sys.avail < 2048 ? 'var(--amber)' : 'var(--green)';
+    $("#memHint").innerHTML = `💡 可用 <span style="color:${availColor}">${d.sys.avail}MB</span>，低于 <span style="color:var(--red)">512MB</span> 时自动终止服务器`;
   }
 }
 
