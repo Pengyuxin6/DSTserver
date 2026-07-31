@@ -1432,7 +1432,8 @@ async function pageServer() {
     </div>
     <div class="row" style="margin-bottom:4px"><label>自动刷新状态</label>
       <label class="switch" title="每 10 秒自动刷新分片状态"><input type="checkbox" id="autoStatusSwitch"><span class="slider"></span></label>
-      <span class="hint">开启后自动刷新，关闭后需手动点击「刷新状态」查看最新状态</span></div>
+      <span class="hint">开启后每 10 秒自动刷新分片状态和系统资源</span></div>
+    <div class="row" style="margin-bottom:8px"><span id="sysRes" class="hint">加载中…</span></div>
     <table class="grid"><thead><tr><th>分片</th><th>状态</th><th>端口</th></tr></thead><tbody>${shardRows}</tbody></table>
     <div class="row" style="margin-top:10px"><label>自动重启</label>
       <label class="switch" title="每 30 秒检查分片，掉线自动拉起"><input type="checkbox" id="arSwitch" ${d.autorestart ? "checked" : ""}><span class="slider"></span></label>
@@ -1595,27 +1596,43 @@ async function pageServer() {
   if (window._serverLogTimer) clearInterval(window._serverLogTimer);
   window._serverLogTimer = logTimer;
 
-  // 分片状态自动刷新（每 10 秒，不重绘整个页面，只更新分片表格）
+  // 分片状态自动刷新（每 10 秒，更新分片状态和系统资源）
   let statusPolling = true;
   if (window._statusTimer) clearInterval(window._statusTimer);
-  const refreshStatusRows = async () => {
-    const j = await apiQuiet("worlds");
+  const refreshStatus = async () => {
+    const j = await apiQuiet("server/status");
     if (!j) return;
+    const d = j.data;
+    // 更新分片表格
     const tbody = document.querySelector("#content table.grid tbody");
-    if (!tbody) return;
-    const newShards = j.data;
-    tbody.innerHTML = "";
-    newShards.forEach((s, i) => {
-      const tr = document.createElement("tr");
-      tr.innerHTML = `<td><span class="status-dot ${s.running ? "on" : "off"}"></span>${esc(s.name)}（${s.isMaster ? "地上" : "地下"}）</td>
-        <td>${s.running ? "运行中" : "未运行"}</td><td>${esc(s.port)}</td>`;
-      tbody.appendChild(tr);
-    });
+    if (tbody) {
+      tbody.innerHTML = "";
+      d.shards.forEach((s, i) => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td><span class="status-dot ${s.running ? "on" : "off"}"></span>${esc(s.name)}（${s.isMaster ? "地上" : "地下"}）</td>
+          <td>${s.running ? "运行中" : "未运行"}</td><td>${esc(s.port)}</td>`;
+        tbody.appendChild(tr);
+      });
+    }
+    // 更新系统资源
+    const res = $("#sysRes");
+    if (res && d.sys) {
+      const cpuColor = d.sys.cpu > 80 ? 'color:var(--red)' : d.sys.cpu > 50 ? 'color:var(--amber)' : '';
+      const memUsed = d.sys.total - d.sys.avail;
+      const memPct = d.sys.total ? Math.round(memUsed / d.sys.total * 100) : 0;
+      res.innerHTML = `CPU <span style="${cpuColor}">${d.sys.cpu}%</span> ｜ 内存 ${memUsed}MB / ${d.sys.total}MB (${memPct}%)${d.sys.dstMem > 0 ? ` ｜ DST <span class="tag">${d.sys.dstMem}MB</span>` : ''}`;
+    }
   };
-  window._statusTimer = setInterval(() => { if (statusPolling) refreshStatusRows(); }, 10_000);
-  $("#autoStatusSwitch").onchange = (e) => {
-    statusPolling = e.target.checked;
-  };
+  window._statusTimer = setInterval(() => { if (statusPolling) refreshStatus(); }, 10_000);
+  $("#autoStatusSwitch").onchange = (e) => { statusPolling = e.target.checked; };
+
+  // 初始显示系统资源
+  if (d.sys) {
+    const cpuColor = d.sys.cpu > 80 ? 'color:var(--red)' : d.sys.cpu > 50 ? 'color:var(--amber)' : '';
+    const memUsed = d.sys.total - d.sys.avail;
+    const memPct = d.sys.total ? Math.round(memUsed / d.sys.total * 100) : 0;
+    $("#sysRes").innerHTML = `CPU <span style="${cpuColor}">${d.sys.cpu}%</span> ｜ 内存 ${memUsed}MB / ${d.sys.total}MB (${memPct}%)${d.sys.dstMem > 0 ? ` ｜ DST <span class="tag">${d.sys.dstMem}MB</span>` : ''}`;
+  }
 }
 
 // ============ 5. 控制台 ============

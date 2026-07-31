@@ -3132,7 +3132,11 @@ async function api(req: Request, url: URL): Promise<Response> {
   if (path === "server/status" && method === "GET") {
     const shards = listShards();
     for (const s of shards) s.running = await shardRunning(s.name);
-    return ok({ shards, autorestart: panelConfig.autorestart, mode: panelConfig.mode, langCheck: panelConfig.langCheck });
+    const sysMem = getSystemMemory();
+    const dstMem = getDstProcessMemory();
+    const loadText = readText("/proc/loadavg");
+    const cpuPct = Math.round((parseFloat(loadText.split(/\s+/)[0]) || 0) / ((require("node:os") as any).cpus?.().length || 4) * 100);
+    return ok({ shards, autorestart: panelConfig.autorestart, mode: panelConfig.mode, langCheck: panelConfig.langCheck, sys: { avail: sysMem.avail, total: sysMem.total, dstMem, cpu: cpuPct } });
   }
   if (path === "server/start" && method === "POST") {
     const shards = listShards();
