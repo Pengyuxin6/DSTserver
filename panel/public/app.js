@@ -1734,12 +1734,8 @@ async function pageServer() {
     let html = "";
     if (p.running) html += `<div class="multi-err">服务器运行中，端口只读。请先关闭服务器再修改。</div>`;
     html += row("主世界通信端口 master_port", "master_port", p.masterPort, !p.masterPortSet);
-    for (const s of p.shards) {
-      html += `<div class="hint" style="margin:8px 0 2px"><b>${esc(s.name)}</b> 分片（${s.isMaster ? "地上·主世界" : "地下/附加层"}）：</div>`;
-      html += row("玩家连接端口 server_port", `${s.name}.serverPort`, s.serverPort, !s.serverPortSet);
-      html += row("Steam 查询端口 master_server_port", `${s.name}.masterServerPort`, s.masterServerPort, !s.masterServerPortSet);
-      html += row("Steam 认证端口 authentication_port", `${s.name}.authPort`, s.authPort, !s.authPortSet);
-    }
+    // 分片端口不在此显示/修改：统一由上方分片表的端口号弹窗编辑（带冲突详情）
+    html += `<div class="hint" style="margin:8px 0 2px">分片端口（${p.shards.map((s) => `${esc(s.name)} ${s.serverPort}`).join(" / ")}）请点击上方「服务器控制」分片表中的端口号查看冲突详情并修改</div>`;
     html += `<div class="btn-row" style="margin-top:10px">
       <button class="btn" id="portAuto" ${p.running ? "disabled" : ""}>⚡ 自动分配空闲端口</button>
       <button class="btn primary" id="portSave" ${p.running ? "disabled" : ""}>💾 保存端口</button>
@@ -1749,25 +1745,24 @@ async function pageServer() {
     box.innerHTML = html;
     const autoBtn = $("#portAuto");
     const resetBtn2 = $("#portReset2");
-    if (resetBtn2) resetBtn2.onclick = async () => { if (await resetPortsDefault()) loadPorts(); };
+    // 保存后整页刷新：分片表端口与本卡同步显示最新值
+    if (resetBtn2) resetBtn2.onclick = async () => { if (await resetPortsDefault()) pageServer(); };
     if (autoBtn) autoBtn.onclick = async () => {
       if (!(await dlgConfirm("将自动避开其他存档占用的端口，重写当前存档的全部端口配置，继续？"))) return;
       const r = await api("server/ports/auto", { method: "POST", body: {} });
       toast(r.msg, !r.ok);
-      loadPorts();
+      pageServer();
     };
     const saveBtn = $("#portSave");
     if (saveBtn) saveBtn.onclick = async () => {
       const body = { masterPort: null, shards: {} };
-      $$(".port-input").forEach((inp) => {
-        const parts = inp.dataset.portkey.split(".");
-        const v = inp.value === "" ? null : Number(inp.value);
-        if (parts[0] === "master_port") body.masterPort = v;
-        else { body.shards[parts[0]] = body.shards[parts[0]] || {}; body.shards[parts[0]][parts[1]] = v; }
+      $$(".port-input", box).forEach((el) => {
+        const v = el.value === "" ? null : Number(el.value);
+        if (el.dataset.portkey === "master_port") body.masterPort = v;
       });
       const r = await api("server/ports", { method: "POST", body });
       toast(r.msg, !r.ok);
-      loadPorts();
+      pageServer();
     };
   };
   loadPorts();
