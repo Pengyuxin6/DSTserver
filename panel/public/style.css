@@ -550,6 +550,9 @@ body[data-theme="paper"] #pageBg { opacity: .3; }
 .multi-open-box { background: rgba(232,163,61,.08); border: 1px solid var(--amber); border-radius: 8px; padding: 10px 14px; margin-bottom: 12px; font-size: 13px; line-height: 1.7; }
 .multi-open-box .multi-err { color: var(--red); margin-top: 6px; }
 .btn:disabled { opacity: .45; cursor: not-allowed; filter: grayscale(.6); }
+.port-row { margin-bottom: 2px; }
+.port-input { width: 110px; }
+.port-input.port-bad { border-color: var(--red); color: var(--red); }
 @media (max-width: 1200px) {
   #topbar { flex-wrap: nowrap; }
   #tabs { order: 0; flex-basis: auto; flex-wrap: nowrap; overflow: hidden; }

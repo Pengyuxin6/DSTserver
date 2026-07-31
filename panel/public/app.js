@@ -1514,7 +1514,7 @@ async function pageServer() {
       <b>⚠ 检测到其他存档的服务器正在运行：</b>${multi.map((m) => `「${esc(m.cluster)}」（${m.shards.map((x) => esc(x)).join("、")}）`).join("，")}
       ${blocked ? `<div class="hint" style="margin-top:4px">当前切换的是另一个存档，服务器控制已置灰。多开需同时满足：空余内存 ≥ 4G、端口互不冲突。</div>` : ""}
       ${blocked && !d.canMultiOpen ? `<div class="multi-err">✖ 空余内存不足 4G（当前可用 ${d.sys.avail}MB），不允许多开</div>` : ""}
-      ${conflicts.length ? `<div class="multi-err">✖ 端口冲突，请先修改以下配置再启动：<br>${conflicts.map((c) => `端口 ${c.port} — ${esc(c.file)} 的 ${esc(c.key)}（与「${esc(c.other)}」冲突）`).join("<br>")}</div>` : ""}
+      ${conflicts.length ? `<div class="multi-err">✖ 端口冲突，请先修改以下配置再启动：<br>${conflicts.map((c) => `端口 ${c.port} — ${esc(c.file)} 的 ${esc(c.key)}（与「${esc(c.other)}」冲突）`).join("<br>")}<br><span class="hint">可在下方「端口设置」中手动修改，或点「自动分配空闲端口」一键解决</span></div>` : ""}
       ${canUnlock ? `<button class="btn" id="multiOpenAllow" style="margin-top:8px">仍然多开（内存 ${d.sys.avail}MB ≥ 4G，端口无冲突）</button>` : ""}
     </div>` : ""}
     <div class="btn-row">
@@ -1537,6 +1537,10 @@ async function pageServer() {
       <label class="switch" title="启动服务器时检测是否启用中文汉化模组"><input type="checkbox" id="langCheckSwitch" ${d.langCheck ? "checked" : ""}><span class="slider"></span></label>
       <span class="hint">启动时检测汉化模组（1301033176/1418746242），未启用则弹窗提示自动配置为简体中文</span></div>
     <div class="row"><label>世界暂停</label><span id="pauseState" class="hint">查询中…</span> <span class="hint">暂停 = 冻结世界时间（昼夜/作物/生物停止），玩家不被踢出</span></div>
+  </div>
+  <div class="card">
+    <h3>端口设置 <span class="hint">多开时每个存档的端口必须互不相同，修改后重启服务器生效</span></h3>
+    <div id="portBox" class="hint">加载中…</div>
   </div>
   <div class="card">
     <h3>服务器连接模式</h3>
@@ -1571,6 +1575,58 @@ async function pageServer() {
     unlockBtn.remove();
     toast("已解锁多开控制，请注意内存占用");
   };
+  // 端口设置卡：查看 / 手动修改 / 一键自动分配（运行中只读）
+  const loadPorts = async () => {
+    const box = $("#portBox");
+    if (!box) return;
+    const pj = await apiQuiet("server/ports");
+    if (!pj) { box.textContent = "端口信息加载失败，请刷新"; return; }
+    const p = pj.data;
+    const otherPorts = new Map();
+    (p.others || []).forEach((o) => o.ports.forEach((pt) => { if (!otherPorts.has(pt)) otherPorts.set(pt, o.cluster); }));
+    const row = (label, key, val, isDefault) => {
+      const clash = otherPorts.get(Number(val));
+      return `<div class="row port-row"><label style="min-width:230px">${label}${isDefault ? ' <span class="hint">(默认值，未显式配置)</span>' : ""}</label>
+        <input type="number" class="port-input${clash ? " port-bad" : ""}" data-portkey="${esc(key)}" value="${val ?? ""}" min="1024" max="65535" ${p.running ? "disabled" : ""}>
+        ${clash ? `<span class="multi-err" style="margin:0">✖ 与「${esc(clash)}」冲突</span>` : ""}</div>`;
+    };
+    let html = "";
+    if (p.running) html += `<div class="multi-err">服务器运行中，端口只读。请先关闭服务器再修改。</div>`;
+    html += row("主世界通信端口 master_port", "master_port", p.masterPort, !p.masterPortSet);
+    for (const s of p.shards) {
+      html += `<div class="hint" style="margin:8px 0 2px"><b>${esc(s.name)}</b> 分片（${s.isMaster ? "地上·主世界" : "地下/附加层"}）：</div>`;
+      html += row("玩家连接端口 server_port", `${s.name}.serverPort`, s.serverPort, !s.serverPortSet);
+      html += row("Steam 查询端口 master_server_port", `${s.name}.masterServerPort`, s.masterServerPort, !s.masterServerPortSet);
+      html += row("Steam 认证端口 authentication_port", `${s.name}.authPort`, s.authPort, !s.authPortSet);
+    }
+    html += `<div class="btn-row" style="margin-top:10px">
+      <button class="btn" id="portAuto" ${p.running ? "disabled" : ""}>⚡ 自动分配空闲端口</button>
+      <button class="btn primary" id="portSave" ${p.running ? "disabled" : ""}>💾 保存端口</button>
+      <span class="hint">改端口不影响存档数据；多开请给每个存档各点一次「自动分配」</span></div>`;
+    if ((p.others || []).length) html += `<div class="hint" style="margin-top:6px">其他存档占用端口：${p.others.map((o) => `「${esc(o.cluster)}」${o.ports.join("/")}`).join("，")}</div>`;
+    box.innerHTML = html;
+    const autoBtn = $("#portAuto");
+    if (autoBtn) autoBtn.onclick = async () => {
+      if (!(await dlgConfirm("将自动避开其他存档占用的端口，重写当前存档的全部端口配置，继续？"))) return;
+      const r = await api("server/ports/auto", { method: "POST", body: {} });
+      toast(r.msg, !r.ok);
+      loadPorts();
+    };
+    const saveBtn = $("#portSave");
+    if (saveBtn) saveBtn.onclick = async () => {
+      const body = { masterPort: null, shards: {} };
+      $$(".port-input").forEach((inp) => {
+        const parts = inp.dataset.portkey.split(".");
+        const v = inp.value === "" ? null : Number(inp.value);
+        if (parts[0] === "master_port") body.masterPort = v;
+        else { body.shards[parts[0]] = body.shards[parts[0]] || {}; body.shards[parts[0]][parts[1]] = v; }
+      });
+      const r = await api("server/ports", { method: "POST", body });
+      toast(r.msg, !r.ok);
+      loadPorts();
+    };
+  };
+  loadPorts();
   $("#start").onclick = async () => {
     // 汉化检测
     if ($("#langCheckSwitch")?.checked) {
