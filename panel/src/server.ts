@@ -446,6 +446,8 @@ function listShards(): ShardInfo[] {
   shardListCache = out;
   return out;
 }
+// 启动/停止/删除分片后清除缓存
+function clearShardListCache() { shardListCache = null; }
 
 // ---------- screen 控制 ----------
 async function screenList(): Promise<string> {
@@ -453,9 +455,15 @@ async function screenList(): Promise<string> {
   return r.out;
 }
 async function shardRunning(shard: string): Promise<boolean> {
+  // 优先检查 systemd transient service（cgroup 启动方式）
+  const unit = `dst-${shard.toLowerCase()}`;
+  const svc = await run(["systemctl", "is-active", "--quiet", unit]);
+  if (svc.code === 0) return true;
+  // 检查 screen 会话
   const sess = shard.toLowerCase() === "master" ? "dst_master" : shard.toLowerCase() === "caves" ? "dst_caves" : `dst_${shard.toLowerCase()}`;
   const ls = await screenList();
   if (new RegExp(`\\.${sess}\\b`).test(ls)) return true;
+  // pgrep 跨用户检测
   const pg = await run(["pgrep", "-f", `dontstarve_dedicated_server_nullrenderer.*-shard ${shard}`]);
   return pg.code === 0 && pg.out.trim().length > 0;
 }
