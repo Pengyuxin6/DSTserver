@@ -1109,32 +1109,60 @@ async function renderLocalSteamBox(modsDir) {
   if (!j || !j.data) { box.innerHTML = ""; return; }
   const mods = j.data.mods || [];
   const client = j.data.client;
+  const typeTag = (m) =>
+    m.worldMode === "replace" ? '<span class="tag warn" title="含modworldgenmain.lua，替换原版世界生成（海难/猪镇类）">地图·覆盖世界</span>'
+    : m.worldMode === "extend" ? '<span class="tag on" title="在原版世界基础上加入设置（三合一类生态叠加）">生态·叠加设置</span>'
+    : '<span class="tag">功能模组</span>';
   const statusTag = (m) =>
-    (m.hasInfo ? '<span class="tag on">完整</span>' : '<span class="tag warn">缺modinfo</span>') +
+    (m.enabled ? '<span class="tag on">已启用</span>' : "") +
+    (m.hasInfo ? "" : ' <span class="tag warn">缺modinfo</span>') +
     (m.linked ? ' <span class="tag on">链接加载中</span>' : m.inStore ? ' <span class="tag">已复用</span>' : "");
   const actionBtns = (m) => {
-    if (m.linked) return `<button class="btn danger" data-unlink="${esc(m.id)}">取消链接</button>`;
-    return `<button class="btn" data-link="${esc(m.id)}" data-path="${esc(m.path)}" title="建立目录联接直接读取客户端文件夹，不占磁盘、随Steam更新" ${m.hasInfo && !m.inStore ? "" : "disabled"}>链接加载</button>
-      <button class="btn primary" data-imp="${esc(m.id)}" data-path="${esc(m.path)}" title="复制模组文件到服务器模组目录（含 SOURCE.txt 标明来源）" ${m.hasInfo ? "" : "disabled"}>复用(复制)</button>`;
+    const enableBtn = m.enabled
+      ? `<button class="btn danger" data-localen="${esc(m.id)}" data-on="0" data-path="${esc(m.path)}">停用</button>`
+      : `<button class="btn primary" data-localen="${esc(m.id)}" data-on="1" data-path="${esc(m.path)}" title="一键启用：未入库自动链接加载后启用" ${m.hasInfo ? "" : "disabled"}>启用</button>`;
+    const linkBtn = m.linked
+      ? `<button class="btn" data-unlink="${esc(m.id)}">取消链接</button>`
+      : `<button class="btn" data-link="${esc(m.id)}" data-path="${esc(m.path)}" title="建立目录联接直接读取客户端文件夹，不占磁盘、随Steam更新" ${m.hasInfo && !m.inStore ? "" : "disabled"}>链接加载</button>`;
+    return enableBtn + linkBtn +
+      `<button class="btn" data-imp="${esc(m.id)}" data-path="${esc(m.path)}" title="复制模组文件到服务器模组目录（含 SOURCE.txt 标明来源）" ${m.hasInfo && !m.inStore ? "" : "disabled"}>复用</button>`;
   };
   const inner = !mods.length
     ? '<div class="hint">未在本机 Steam 库中找到已下载的 DST 模组（可先在游戏里订阅下载，再来这里复用）。</div>'
-    : `<div style="max-height:260px;overflow-y:auto"><table class="grid"><thead><tr><th>ID</th><th>来源（本机地址）</th><th>状态</th><th>操作</th></tr></thead><tbody>` +
-      mods.map((m) => `<tr><td>${esc(m.id)}</td><td style="font-size:12px">${esc(m.source)}<div class="hint" style="font-family:monospace;word-break:break-all">${esc(m.path)}</div></td>
-        <td>${statusTag(m)}</td>
+    : `<div style="max-height:420px;overflow-y:auto"><table class="grid"><thead><tr><th></th><th>模组</th><th>说明</th><th>类型</th><th>来源（本机地址）</th><th>状态</th><th>操作</th></tr></thead><tbody>` +
+      mods.map((m) => `<tr>
+        <td><button class="fav-star${m.favorite ? " on" : ""}" data-localfav="${esc(m.id)}" title="${m.favorite ? "取消收藏" : "收藏（置顶）"}">${m.favorite ? "★" : "☆"}</button></td>
+        <td style="min-width:180px"><div style="display:flex;align-items:center;gap:8px">
+          ${m.hasIcon ? `<img src="/local-icon?id=${esc(m.id)}" style="width:36px;height:36px;object-fit:contain;border-radius:6px;border:1px solid var(--border);flex-shrink:0" onerror="this.style.display='none'">` : ""}
+          <div><b>${esc(m.name || m.id)}</b><div class="hint" style="font-family:monospace">${esc(m.id)}</div></div></div></td>
+        <td style="font-size:12px;max-width:260px"><div style="max-height:48px;overflow:hidden" title="${esc(m.desc)}">${esc(m.desc || "（无说明）")}</div></td>
+        <td style="white-space:nowrap">${typeTag(m)}${m.wgPresetCount ? `<div class="hint">预设 ${m.wgPresetCount} 个</div>` : ""}</td>
+        <td style="font-size:12px">${esc(m.source)}<div class="hint" style="font-family:monospace;word-break:break-all">${esc(m.path)}</div></td>
+        <td style="white-space:nowrap">${statusTag(m)}</td>
         <td style="white-space:nowrap">${actionBtns(m)}</td></tr>`).join("") +
       `</tbody></table></div>`;
   box.innerHTML = `<div class="card">
-    <h3>本地模组库 <span class="hint">（Windows 本机客户端模组，可直接读取或复用开房间）</span></h3>
+    <h3>本地模组库 <span class="hint">（本机客户端模组，可直接启用/链接/复用开房间）</span></h3>
     <div class="hint" style="margin-bottom:6px">模组统一存放目录：<b style="font-family:monospace">${esc(j.data.modsDir || modsDir)}</b>
       <button class="btn" id="openModsDir">打开文件夹</button></div>
     ${client ? `<div class="hint" style="margin-bottom:8px">客户端位置：<b style="font-family:monospace">${esc(client.dir)}</b> ｜ 客户端模组: <span style="font-family:monospace">${esc(client.modsDir)}</span> ｜ 创意工坊缓存: <span style="font-family:monospace">${esc(client.workshopDir)}</span></div>` : ""}
-    <div class="hint" style="margin-bottom:8px">「链接加载」= 直接读取客户端模组文件夹（目录联接，不占磁盘、随 Steam 自动更新，清单见存放目录的 _链接模组来源.txt）；「复用(复制)」= 复制一份到服务器（含 SOURCE.txt 标明来源）</div>
+    <div class="hint" style="margin-bottom:8px">「启用」= 未入库自动链接加载后对当前存档启用（地图模组自动应用世界预设）；「链接加载」直接读客户端文件夹不占磁盘；「复用」复制一份到服务器。★收藏置顶</div>
     ${inner}</div>`;
   $("#openModsDir").onclick = async () => {
     const r = await apiQuiet("util/open-folder", { method: "POST", body: { which: "mods" } });
     if (r) toast(r.msg);
   };
+  $$("#localSteamBox [data-localen]").forEach((b) => (b.onclick = async () => {
+    b.disabled = true;
+    const r = await apiQuiet("mods/local-enable", { method: "POST", body: { id: b.dataset.localen, path: b.dataset.path, on: b.dataset.on === "1" } });
+    if (r) { toast(r.msg, !r.ok); if (r.ok) renderModsLocal(); else b.disabled = false; }
+  }));
+  $$("#localSteamBox [data-localfav]").forEach((b) => (b.onclick = async () => {
+    const nowFav = !b.classList.contains("on");
+    const r = await api("mods/favorite", { method: "POST", body: { id: b.dataset.localfav, fav: nowFav } });
+    toast(r.msg);
+    if (r.ok) renderLocalSteamBox(modsDir);
+  }));
   $$("#localSteamBox [data-imp]").forEach((b) => (b.onclick = async () => {
     b.disabled = true;
     const r = await apiQuiet("mods/import-local", { method: "POST", body: { id: b.dataset.imp, path: b.dataset.path } });

@@ -1,0 +1,2 @@
+# shell 脚本必须 LF 行尾（Linux 执行，CRLF 会导致解释器报错）
+*.sh text eol=lf

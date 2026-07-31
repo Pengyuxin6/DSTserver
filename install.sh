@@ -246,6 +246,18 @@ cp "$SCRIPT_DIR/scripts/"*.sh "$DST_HOME/"
 chmod +x "$DST_HOME/"*.sh
 chown "$DST_USER:$DST_USER" "$DST_HOME/"*.sh
 
+# 分片启动器安装到 /usr/local/bin（面板以普通用户运行，通过 sudo 免密调用它执行 systemd-run）
+install -m 755 -o root -g root "$SCRIPT_DIR/scripts/dst-shard-launch.sh" /usr/local/bin/dst-shard-launch.sh
+
+# sudoers 免密配置：仅放行启动脚本与 dst-* 单元的 stop/reset-failed/is-active，最小权限
+cat > /etc/sudoers.d/dst-panel <<EOF
+# DST panel: $DST_USER needs root for systemd-run launch and dst-* unit control
+$DST_USER ALL=(root) NOPASSWD: /usr/local/bin/dst-shard-launch.sh
+$DST_USER ALL=(root) NOPASSWD: /usr/bin/systemctl stop dst-*, /usr/bin/systemctl reset-failed dst-*, /usr/bin/systemctl is-active dst-*
+EOF
+chmod 440 /etc/sudoers.d/dst-panel
+visudo -cf /etc/sudoers.d/dst-panel >/dev/null || { echo "sudoers 配置校验失败"; exit 1; }
+
 # dst-panel 服务（替换端口占位）
 sed "s/ExecStart=.*/ExecStart=\/usr\/local\/bin\/bun run src\/server.ts/; s/User=.*/User=${DST_USER}/; s/Group=.*/Group=${DST_USER}/; s|WorkingDirectory=.*|WorkingDirectory=${PANEL_DIR}|" \
   "$SCRIPT_DIR/systemd/dst-panel.service" > /etc/systemd/system/dst-panel.service

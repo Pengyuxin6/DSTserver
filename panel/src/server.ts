@@ -802,10 +802,10 @@ async function stopShard(shard: string): Promise<void> {
     winProcs.delete(key);
     return;
   }
-  // 先停 systemd transient service（清理 cgroup）
+  // 先停 systemd transient service（清理 cgroup）；面板以 steam 运行，需 sudo 免密（/etc/sudoers.d/dst-panel）
   const unit = `dst-${shard.toLowerCase()}`;
-  await run(["systemctl", "stop", unit]);
-  await run(["systemctl", "reset-failed", unit]);
+  await run(["sudo", "-n", "systemctl", "stop", unit]);
+  await run(["sudo", "-n", "systemctl", "reset-failed", unit]);
   // 再清理 screen（两种命名都尝试）和残留进程（限定本存档）
   const others = (await runningDstAll()).filter((x) => x.cluster !== panelConfig.cluster);
   for (const sess of screenSessionCandidates(shard, others.length > 0)) {
@@ -962,6 +962,8 @@ function readSetupIds(): string[] {
   return ids;
 }
 function writeSetupIds(ids: string[]): void {
+  // 目录可能不存在（新装面板/新服务器目录）：先补全再写
+  try { mkdirSync(dirname2(SETUP_LUA), { recursive: true }); } catch {}
   const text = readText(SETUP_LUA);
   const keep: string[] = [];
   for (const line of text.split(/\r?\n/)) {
@@ -1077,8 +1079,9 @@ function ensureUgcLayout(): void {
   } catch {}
 }
 function dirname2(p: string): string {
-  const i = p.lastIndexOf("/");
-  return i > 0 ? p.slice(0, i) : "/";
+  // 同时兼容 / 与 \（Windows 的 join 产出反斜杠，旧版只认 / 会错误返回 "/"）
+  const i = Math.max(p.lastIndexOf("/"), p.lastIndexOf("\\"));
+  return i > 0 ? p.slice(0, i) : IS_WIN ? "." : "/";
 }
 function ugcContentDirs(): string[] {
   const dirs: string[] = [];
@@ -1094,8 +1097,8 @@ function modInfoPath(id: string): string | null {
   const p = join(MODS_DIR, `workshop-${id}`, "modinfo.lua");
   return existsSync(p) ? p : null;
 }
-function parseModInfo(id: string): ModInfo | null {
-  const file = modInfoPath(id);
+function parseModInfo(id: string, fileOverride?: string): ModInfo | null {
+  const file = fileOverride || modInfoPath(id);
   if (!file) return null;
   const text = readText(file);
   const info: ModInfo = {
@@ -2127,7 +2130,10 @@ function modWorldgenData(id: string): { name: string; options: ModWorldgenOption
   return result;
 }
 function modWorldgenDataRaw(id: string): { name: string; options: ModWorldgenOption[]; presets: ModWorldgenPreset[]; worldgenFiles: string[] } | null {
-  const dir = join(ugcSharedDir(), id);
+  return modWorldgenDataFromDir(id, join(ugcSharedDir(), id));
+}
+// 按目录分析模组的世界生成内容（本地模组库直接传客户端路径，无需先入库）
+function modWorldgenDataFromDir(id: string, dir: string): { name: string; options: ModWorldgenOption[]; presets: ModWorldgenPreset[]; worldgenFiles: string[] } | null {
   if (!existsSync(dir)) return null;
   const files: string[] = [];
   const mw = join(dir, "modworldgenmain.lua");
@@ -2164,7 +2170,7 @@ function modWorldgenDataRaw(id: string): { name: string; options: ModWorldgenOpt
       const mwText = readText(mw);
       const modifiesWorldgen = /AddLevelPreInit|GetModConfigData.*world|AddRoom|AddTask|GROUND\./.test(mwText);
       if (modifiesWorldgen) {
-        const mi = parseModInfo(id);
+        const mi = parseModInfo(id, join(dir, "modinfo.lua"));
         if (mi?.configOptions?.length) {
           // 筛选与世界/地图生成相关的配置项
           // 精确匹配：名称包含明确的世界生成关键词
@@ -2190,7 +2196,7 @@ function modWorldgenDataRaw(id: string): { name: string; options: ModWorldgenOpt
     }
   }
   if (!options.length && !presets.length) return null;
-  const mi = parseModInfo(id);
+  const mi = parseModInfo(id, join(dir, "modinfo.lua"));
   const st = modCache.items[id];
   return { name: st?.title || mi?.name || id, options, presets, worldgenFiles };
 }
@@ -2818,6 +2824,87 @@ function groupOtherRunning(all: { cluster: string; shard: string }[]): Map<strin
   return map;
 }
 
+// 启用模组统一逻辑（mod设置页保存所选 / 本地模组库一键启用 共用）：
+// 冲突检测 → 写 modoverrides+setup ids → 不支持洞穴的地图模组自动删 Caves 分片 → 新启用的大型地图模组自动应用世界预设
+async function applyEnabledMods(ids: string[]): Promise<Response> {
+  const enabledSet = new Set(ids);
+  // 冲突检测：替换世界生成的模组（AddLevel/PRESETLEVELS）同时只能启用一个
+  // 注意：仅用 AddLevelPreInitAny 修改现有关卡的模组（如三合一）不算冲突
+  const worldModIds = ids.filter((id) => {
+    const mw = join(ugcSharedDir(), id, "modworldgenmain.lua");
+    if (!existsSync(mw)) return false;
+    const text = readText(mw);
+    // 有 AddLevel/AddPreset/LEVELTYPE 调用 = 替换型世界生成
+    // 仅有 AddLevelPreInitAny = 兼容型修改，不冲突
+    return /AddLevel\s*\(|AddPreset\s*\(|LEVELTYPE\.\w+\s*,\s*\{/.test(text) && !text.includes("AddLevelPreInitAny");
+  });
+  if (worldModIds.length > 1) {
+    const names = worldModIds.map((id) => modCache.items[id]?.title || parseModInfo(id)?.name || id).join("、");
+    return fail(`检测到大型地图模组冲突，不能一起开启：${names}。这些模组都会替换世界生成，请只保留一个（"三合一"类模组本身包含多生态，算一个）。`);
+  }
+  // 保留已有配置，未勾选的省略
+  const master = listShards().find((s) => s.isMaster) || listShards()[0];
+  const old = master ? readModOverrides(master.name) : new Map<string, ModOverrideEntry>();
+  const map = new Map<string, ModOverrideEntry>();
+  for (const id of ids) {
+    const key = `workshop-${id}`;
+    map.set(key, { enabled: true, options: old.get(key)?.options || {} });
+  }
+  writeSetupIds(ids);
+  writeModOverridesBoth(map);
+  const omitted = [...old.keys()].filter((k) => !enabledSet.has(k.replace("workshop-", "")));
+  // 检测启用的地图模组是否有洞穴预设
+  const activeWorldMods = ids.filter((id) => {
+    const d = modWorldgenData(id);
+    if (!d) return false;
+    const hasCavePreset = d.presets.some((p) => /volcano|cave|under/i.test(p.location || ""));
+    const hasOverworldPreset = d.presets.some((p) => !/volcano|cave|under/i.test(p.location || ""));
+    // 只有地上预设、没有洞穴预设 = 纯地上地图模组（如猪镇）
+    return hasOverworldPreset && !hasCavePreset;
+  });
+  // 自动删除不支持的 Caves 分片
+  let cavesRemoved = false;
+  if (activeWorldMods.length) {
+    const shards = listShards();
+    const cavesShard = shards.find((s) => !s.isMaster);
+    if (cavesShard) {
+      if (await shardRunning(cavesShard.name)) return fail(`正在启用的地图模组不支持地下世界，请先关闭服务器再保存`);
+      try { rmSync(shardDir(cavesShard.name), { recursive: true, force: true }); cavesRemoved = true; } catch {}
+    }
+  }
+  // 大型地图模组（海难/哈姆雷特/三合一等）：新启用时自动应用对应世界预设
+  const autoApplied: string[] = [];
+  // VANILLA_PRESETS 已在文件顶部定义为全局常量
+  const pickPreset = (presets: ModWorldgenPreset[], isMaster: boolean): ModWorldgenPreset | null => {
+    const isCaveLoc = (l: string) => /volcano|cave|under/i.test(l || "");
+    if (isMaster) {
+      return presets.find((p) => /SURVIVAL_TOGETHER/i.test(p.id) && !isCaveLoc(p.location))
+        || presets.find((p) => !isCaveLoc(p.location))
+        || null;
+    }
+    return presets.find((p) => isCaveLoc(p.location)) || null;
+  };
+  for (const id of ids) {
+    const key = `workshop-${id}`;
+    if (old.get(key)?.enabled) continue; // 只处理新启用的
+    const d = modWorldgenData(id);
+    if (!d || !d.presets.length) continue;
+    for (const shard of listShards()) {
+      const cur = readLevelOverrides(shard.name).presets.worldgen;
+      if (!VANILLA_PRESETS.has(cur)) continue; // 已是模组预设则不覆盖
+      const pick = pickPreset(d.presets, shard.isMaster);
+      if (!pick) continue;
+      const ov = readLevelOverrides(shard.name).overrides;
+      for (const [k, v] of Object.entries(pick.overrides)) {
+        if (validKeyVal(k) && validWorldVal(v)) ov[k] = String(v);
+      }
+      writeLevelOverrides(shard.name, shard.isMaster, ov, pick.id);
+      autoApplied.push(`${shard.name}→${pick.id}`);
+    }
+  }
+  return ok(null, `已保存所选（启用 ${ids.length} 个模组）` + (omitted.length ? `；未勾选的 ${omitted.length} 个模组配置已省略` : "") + (autoApplied.length ? `；已自动应用大型模组预设: ${autoApplied.join("、")}` : ""));
+}
+
 async function api(req: Request, url: URL): Promise<Response> {
   const path = url.pathname.replace(/^\/api\/?/, "");
   const method = req.method;
@@ -2895,6 +2982,10 @@ async function api(req: Request, url: URL): Promise<Response> {
       clearAllClusterCache();
     }
     const iniPath = join(clusterDir(), "cluster.ini");
+    // 当前存档目录不存在时（刚切换根目录/外部删除）不创建"空骨架存档"——
+    // 否则会留下只有 1 字节 cluster.ini 的幽灵目录，挡住后续新建同名存档
+    const clusterDirExists = existsSync(dirname(iniPath));
+    let skippedIni = false;
     let lines = parseIni(readText(iniPath));
     const setStr = (sec: string, key: string, val: any, max = 200) => {
       if (typeof val === "string") lines = iniSet(lines, sec, key, val.slice(0, max).replace(/[\r\n]/g, " "));
@@ -2911,9 +3002,12 @@ async function api(req: Request, url: URL): Promise<Response> {
     if (typeof b.pause_when_empty === "boolean") lines = iniSet(lines, "GAMEPLAY", "pause_when_empty", String(b.pause_when_empty));
     const mp = parseInt(b.max_players);
     if (!isNaN(mp) && mp >= 1 && mp <= 64) lines = iniSet(lines, "GAMEPLAY", "max_players", String(mp));
-    // 存档根目录被改到新位置时，当前存档目录可能不存在，先创建再写
-    try { mkdirSync(dirname(iniPath), { recursive: true }); } catch {}
-    writeFileSync(iniPath, iniToText(lines) + "\n");
+    // 存档目录已存在才写 cluster.ini；不存在则跳过并在返回消息中提示
+    if (clusterDirExists) {
+      writeFileSync(iniPath, iniToText(lines) + "\n");
+    } else {
+      skippedIni = true;
+    }
     // 保存 cluster_token.txt（非空才覆盖；clear_token 可清除）
     if (typeof b.cluster_token === "string") {
       const token = b.cluster_token.trim();
@@ -2961,7 +3055,8 @@ async function api(req: Request, url: URL): Promise<Response> {
     }
     clearAllClusterCache();
     savePanelConfig();
-    return ok(null, "已保存，重启面板后路径修改生效（其他设置重启服务器后生效）");
+    return ok(null, "已保存，重启面板后路径修改生效（其他设置重启服务器后生效）"
+      + (skippedIni ? "。⚠ 当前存档目录不存在，基本设置未写入——请先在「存档」中新建或选择存档" : ""));
   }
   if (path === "cluster" && method === "POST") {
     const b = await bodyJson(req);
@@ -3430,82 +3525,7 @@ async function api(req: Request, url: URL): Promise<Response> {
   if (path === "mods/save-enabled" && method === "POST") {
     const b = await bodyJson(req);
     const ids: string[] = Array.isArray(b.ids) ? b.ids.filter(validId) : [];
-    const enabledSet = new Set(ids);
-    // 冲突检测：替换世界生成的模组（AddLevel/PRESETLEVELS）同时只能启用一个
-    // 注意：仅用 AddLevelPreInitAny 修改现有关卡的模组（如三合一）不算冲突
-    const worldModIds = ids.filter((id) => {
-      const mw = join(ugcSharedDir(), id, "modworldgenmain.lua");
-      if (!existsSync(mw)) return false;
-      const text = readText(mw);
-      // 有 AddLevel/AddPreset/LEVELTYPE 调用 = 替换型世界生成
-      // 仅有 AddLevelPreInitAny = 兼容型修改，不冲突
-      return /AddLevel\s*\(|AddPreset\s*\(|LEVELTYPE\.\w+\s*,\s*\{/.test(text) && !text.includes("AddLevelPreInitAny");
-    });
-    if (worldModIds.length > 1) {
-      const names = worldModIds.map((id) => modCache.items[id]?.title || parseModInfo(id)?.name || id).join("、");
-      return fail(`检测到大型地图模组冲突，不能一起开启：${names}。这些模组都会替换世界生成，请只保留一个（"三合一"类模组本身包含多生态，算一个）。`);
-    }
-    // 保留已有配置，未勾选的省略
-    const master = listShards().find((s) => s.isMaster) || listShards()[0];
-    const old = master ? readModOverrides(master.name) : new Map<string, ModOverrideEntry>();
-    const map = new Map<string, ModOverrideEntry>();
-    for (const id of ids) {
-      const key = `workshop-${id}`;
-      map.set(key, { enabled: true, options: old.get(key)?.options || {} });
-    }
-    writeSetupIds(ids);
-    writeModOverridesBoth(map);
-    const omitted = [...old.keys()].filter((k) => !enabledSet.has(k.replace("workshop-", "")));
-    // 检测启用的地图模组是否有洞穴预设
-    const activeWorldMods = ids.filter((id) => {
-      const d = modWorldgenData(id);
-      if (!d) return false;
-      const hasCavePreset = d.presets.some((p) => /volcano|cave|under/i.test(p.location || ""));
-      const hasOverworldPreset = d.presets.some((p) => !/volcano|cave|under/i.test(p.location || ""));
-      // 只有地上预设、没有洞穴预设 = 纯地上地图模组（如猪镇）
-      return hasOverworldPreset && !hasCavePreset;
-    });
-    // 自动删除不支持的 Caves 分片
-    let cavesRemoved = false;
-    if (activeWorldMods.length) {
-      const shards = listShards();
-      const cavesShard = shards.find((s) => !s.isMaster);
-      if (cavesShard) {
-        if (await shardRunning(cavesShard.name)) return fail(`正在启用的地图模组不支持地下世界，请先关闭服务器再保存`);
-        try { rmSync(shardDir(cavesShard.name), { recursive: true, force: true }); cavesRemoved = true; } catch {}
-      }
-    }
-    // 大型地图模组（海难/哈姆雷特/三合一等）：新启用时自动应用对应世界预设
-    const autoApplied: string[] = [];
-    // VANILLA_PRESETS 已在文件顶部定义为全局常量
-    const pickPreset = (presets: ModWorldgenPreset[], isMaster: boolean): ModWorldgenPreset | null => {
-      const isCaveLoc = (l: string) => /volcano|cave|under/i.test(l || "");
-      if (isMaster) {
-        return presets.find((p) => /SURVIVAL_TOGETHER/i.test(p.id) && !isCaveLoc(p.location))
-          || presets.find((p) => !isCaveLoc(p.location))
-          || null;
-      }
-      return presets.find((p) => isCaveLoc(p.location)) || null;
-    };
-    for (const id of ids) {
-      const key = `workshop-${id}`;
-      if (old.get(key)?.enabled) continue; // 只处理新启用的
-      const d = modWorldgenData(id);
-      if (!d || !d.presets.length) continue;
-      for (const shard of listShards()) {
-        const cur = readLevelOverrides(shard.name).presets.worldgen;
-        if (!VANILLA_PRESETS.has(cur)) continue; // 已是模组预设则不覆盖
-        const pick = pickPreset(d.presets, shard.isMaster);
-        if (!pick) continue;
-        const ov = readLevelOverrides(shard.name).overrides;
-        for (const [k, v] of Object.entries(pick.overrides)) {
-          if (validKeyVal(k) && validWorldVal(v)) ov[k] = String(v);
-        }
-        writeLevelOverrides(shard.name, shard.isMaster, ov, pick.id);
-        autoApplied.push(`${shard.name}→${pick.id}`);
-      }
-    }
-    return ok(null, `已保存所选（启用 ${ids.length} 个模组）` + (omitted.length ? `；未勾选的 ${omitted.length} 个模组配置已省略` : "") + (autoApplied.length ? `；已自动应用大型模组预设: ${autoApplied.join("、")}` : ""));
+    return applyEnabledMods(ids);
   }
   if (path === "mods/config" && method === "POST") {
     const b = await bodyJson(req);
@@ -3600,15 +3620,71 @@ async function api(req: Request, url: URL): Promise<Response> {
   }
   // ===== Windows 本地模组复用（本地模组直接开房间） =====
   if (path === "mods/local-steam" && method === "GET") {
-    // 标注每个本地模组在存放目录中的状态：linked=链接加载中 / inStore=已复用副本
+    // 标注每个本地模组：存放目录状态 / 名称说明 / 图标 / 世界生成分析(覆盖or叠加) / 启用状态 / 收藏
     const store = modsStoreDir();
+    const master = listShards().find((s) => s.isMaster) || listShards()[0];
+    const enabledIds = new Set<string>();
+    if (master) for (const [k, e] of readModOverrides(master.name)) if (e.enabled) enabledIds.add(k.replace("workshop-", ""));
     const mods = scanLocalSteamMods().map((m) => {
       const p = join(store, m.id);
       let linked = false, inStore = false;
       try { if (lstatSync(p).isSymbolicLink()) linked = true; else if (existsSync(p)) inStore = true; } catch {}
-      return { ...m, linked, inStore };
+      // 名称与说明（直接从客户端 modinfo.lua 解析）
+      let name = "", desc = "";
+      const infoFile = join(m.path, "modinfo.lua");
+      if (existsSync(infoFile)) {
+        const text = readText(infoFile);
+        name = luaStrField(text, "name");
+        desc = luaStrField(text, "description").replace(/\s+/g, " ").slice(0, 300);
+      }
+      // 世界生成分析：modworldgenmain.lua 等 → 覆盖世界(替换型) or 加入设置(兼容叠加型)
+      let worldMode = "";
+      const wg = modWorldgenDataFromDir(m.id, m.path);
+      if (wg && (wg.options.length || wg.presets.length)) {
+        const mwText = existsSync(join(m.path, "modworldgenmain.lua")) ? readText(join(m.path, "modworldgenmain.lua")) : "";
+        const isReplace = /AddLevel\s*\(\s*LEVELTYPE\.|AddWorldGenLevel\s*\(\s*LEVELTYPE\.|AddPreset\s*\(/.test(mwText)
+          || wg.presets.some((pr) => !VANILLA_PRESETS.has(pr.id));
+        worldMode = isReplace ? "replace" : "extend";
+      }
+      return {
+        ...m, linked, inStore, name, desc,
+        hasIcon: existsSync(join(m.path, "modicon.tex")),
+        worldMode, wgPresetCount: wg?.presets.length || 0,
+        enabled: enabledIds.has(m.id),
+        favorite: panelConfig.favorites.includes(m.id),
+      };
     });
+    // 收藏置顶，已启用其次
+    mods.sort((a, b) => Number(b.favorite) - Number(a.favorite) || Number(b.enabled) - Number(a.enabled) || a.id.localeCompare(b.id));
     return ok({ mods, modsDir: store, client: detectDstClient() });
+  }
+  // 本地模组库一键启用/停用：未入库的自动链接加载后启用；停用只改启用状态不动文件
+  if (path === "mods/local-enable" && method === "POST") {
+    const b = await bodyJson(req);
+    const id = String(b.id || "");
+    const src = String(b.path || "");
+    if (!validId(id)) return fail("非法模组 ID");
+    const on = b.on !== false;
+    const master = listShards().find((s) => s.isMaster) || listShards()[0];
+    if (!master) return fail("当前存档没有任何世界分片");
+    const cur = [...readModOverrides(master.name).entries()].filter(([, e]) => e.enabled).map(([k]) => k.replace("workshop-", ""));
+    if (on) {
+      // 确保模组在存放目录（未链接/未复用则自动链接加载，链接失败退回复制）
+      const dst = join(modsStoreDir(), id);
+      if (!existsSync(dst)) {
+        if (!src || src.includes("..") || !existsSync(src) || !existsSync(join(src, "modinfo.lua")))
+          return fail("模组不在存放目录且来源路径无效，请先「链接加载」或「复用(复制)」");
+        mkdirSync(modsStoreDir(), { recursive: true });
+        try { symlinkSync(src, dst, IS_WIN ? "junction" : "dir"); }
+        catch { try { copyDirSync(src, dst); } catch (e: any) { return fail("模组入库失败: " + (e?.message || e)); } }
+        refreshLinkManifest();
+        clearModCaches();
+      }
+      if (cur.includes(id)) return ok(null, `模组 ${id} 已处于启用状态`);
+      return applyEnabledMods([...cur, id]);
+    }
+    if (!cur.includes(id)) return ok(null, `模组 ${id} 未启用`);
+    return applyEnabledMods(cur.filter((x) => x !== id));
   }
   // 链接加载：在模组存放目录建立目录联接(Junction)/符号链接直接指向客户端模组文件夹，不复制、不占磁盘、随 Steam 自动更新
   if (path === "mods/link-local" && method === "POST") {
@@ -4418,6 +4494,26 @@ const server = Bun.serve({
     }
     if (path === "/" || path === "/index.html") {
       return serveFile(join(PUBLIC_DIR, checkAuth(req) ? "index.html" : "login.html"), req);
+    }
+    // 本地模组库图标：/local-icon?id=<modId> → PNG（直接解码客户端目录里的 modicon.tex，磁盘缓存）
+    if (path === "/local-icon" && req.method === "GET") {
+      const modId = url.searchParams.get("id") || "";
+      if (!/^\d{4,15}$/.test(modId)) return new Response("Bad request", { status: 400 });
+      const pngHeaders = { "Content-Type": "image/png", "Cache-Control": "public, max-age=86400" };
+      const diskDir = join(PUBLIC_DIR, "modicons", modId);
+      const diskFile = join(diskDir, "local.png");
+      if (existsSync(diskFile)) return new Response(Bun.file(diskFile), { status: 200, headers: pngHeaders });
+      const m = scanLocalSteamMods().find((x) => x.id === modId);
+      const texPath = m ? join(m.path, "modicon.tex") : "";
+      if (!m || !existsSync(texPath)) return new Response("Not found", { status: 404 });
+      try {
+        const result = decodeKTEX(readFileSync(texPath));
+        if (!result) return new Response("Decode failed", { status: 500 });
+        try { mkdirSync(diskDir, { recursive: true }); writeFileSync(diskFile, result.png); } catch {}
+        return new Response(result.png, { status: 200, headers: pngHeaders });
+      } catch {
+        return new Response("Error", { status: 500 });
+      }
     }
     // 动态模组物品图标：/mod-icon?id=<modId>&prefab=<prefab> → PNG（支持图集 UV 切片）
     if (path === "/mod-icon" && req.method === "GET") {
