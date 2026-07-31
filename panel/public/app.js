@@ -660,7 +660,30 @@ async function pageWorld() {
     div.className = "item" + (worldState.shard === s.name ? " sel" : "");
     // 经典两层 = Master(主世界)+Caves；其余为附加层（多开层），面板不维护其设置
     const isExtra = s.name !== "Master" && s.name !== "Caves";
-    div.innerHTML = `<span class="status-dot ${s.running ? "on" : "off"}"></span>#${i + 1} ${esc(s.name)}（${s.isMaster ? "地上·主世界" : "地下"}${s.port ? "，端口 " + esc(s.port) : ""}）${isExtra ? ' <span class="tag warn">附加层·不维护</span>' : ""}${s.hasIni === false ? ' <span class="tag warn">客户端世界·启动时自动补全配置</span>' : ""}`;
+    div.innerHTML = `<span class="status-dot ${s.running ? "on" : "off"}"></span>#${i + 1} ${esc(s.name)}（${s.isMaster ? "地上·主世界" : "地下"}`;
+    // 端口可点击直接修改（运行中只读）
+    if (s.port) {
+      div.appendChild(document.createTextNode("，端口 "));
+      const span = document.createElement("span");
+      span.className = "port-edit" + (s.running ? " disabled" : "");
+      span.textContent = s.port;
+      span.title = s.running ? "运行中不可修改" : "点击修改端口";
+      span.onclick = async (e) => {
+        e.stopPropagation();
+        if (s.running) return;
+        const v = prompt(`修改 ${s.name} 的玩家连接端口（server_port，1024-65535）：`, s.port);
+        if (v === null) return;
+        const n = Number(v.trim());
+        if (!Number.isInteger(n) || n < 1024 || n > 65535) return toast("端口必须是 1024-65535 的整数", true);
+        const r = await api("server/ports", { method: "POST", body: { shards: { [s.name]: { serverPort: n } } } });
+        toast(r.msg, !r.ok);
+        if (r.ok) pageWorld();
+      };
+      div.appendChild(span);
+    }
+    div.appendChild(document.createTextNode("）"));
+    if (isExtra) div.insertAdjacentHTML("beforeend", ' <span class="tag warn">附加层·不维护</span>');
+    if (s.hasIni === false) div.insertAdjacentHTML("beforeend", ' <span class="tag warn">客户端世界·启动时自动补全配置</span>');
     div.onclick = () => { worldState.shard = s.name; worldState.selKey = null; loadWorldOverrides(); pageWorldHighlight(); };
     wlist.appendChild(div);
   });
@@ -1544,7 +1567,7 @@ async function pageServer() {
   const canUnlock = blocked && d.canMultiOpen && !conflicts.length;
   const shardRows = d.shards.map((s) =>
     `<tr><td><span class="status-dot ${s.running ? "on" : "off"}"></span>${esc(s.name)}（${s.isMaster ? "地上·主世界" : "地下"}）</td>
-     <td>${s.running ? "运行中" : "未运行"}</td><td>${esc(s.port)}</td></tr>`).join("");
+     <td>${s.running ? "运行中" : "未运行"}</td><td><span class="port-edit${s.running ? " disabled" : ""}" data-shard="${esc(s.name)}" data-port="${esc(s.port || "")}" title="${s.running ? "运行中不可修改" : "点击修改端口"}">${esc(s.port || "默认")}</span></td></tr>`).join("");
   content.innerHTML = `
   <div class="card">
     <h3>服务器控制</h3>
@@ -1665,6 +1688,21 @@ async function pageServer() {
     };
   };
   loadPorts();
+  // 分片表端口内联修改（运行中只读）
+  $$(".port-edit[data-shard]").forEach((el) => {
+    if (el.classList.contains("disabled")) return;
+    el.onclick = async () => {
+      const shardName = el.dataset.shard;
+      const cur = el.dataset.port || "10999";
+      const v = prompt(`修改 ${shardName} 分片的玩家连接端口（server_port，1024-65535）：`, cur);
+      if (v === null) return;
+      const n = Number(v.trim());
+      if (!Number.isInteger(n) || n < 1024 || n > 65535) return toast("端口必须是 1024-65535 的整数", true);
+      const r = await api("server/ports", { method: "POST", body: { shards: { [shardName]: { serverPort: n } } } });
+      toast(r.msg, !r.ok);
+      if (r.ok) pageServer();
+    };
+  });
   $("#start").onclick = async () => {
     // 汉化检测
     if ($("#langCheckSwitch")?.checked) {

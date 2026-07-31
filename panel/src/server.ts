@@ -663,7 +663,7 @@ function ensureServerIni(shard: string): void {
   const used = new Set<number>();
   try {
     for (const c of readdirSync(clusterRoot())) {
-      try { if (statSync(join(clusterRoot(), c)).isDirectory()) for (const p of clusterPorts(c)) used.add(p.port); } catch {}
+      try { if (statSync(join(clusterRoot(), c)).isDirectory()) for (const p of clusterPorts(c, c === panelConfig.cluster)) used.add(p.port); } catch {}
     }
   } catch {}
   const alloc = (start: number) => { let p = start; while (used.has(p) && p < 65535) p++; used.add(p); return p; };
@@ -2744,23 +2744,28 @@ function fixItemCategory(prefab: string, cat: string): string {
 
 // ---------- 多开端口工具 ----------
 // 收集指定存档占用的全部端口（分片 server_port / steam 端口 / cluster.ini 的 master_port）
-function clusterPorts(name: string): { port: number; file: string; key: string }[] {
+function clusterPorts(name: string, effective = true): { port: number; file: string; key: string }[] {
   const out: { port: number; file: string; key: string }[] = [];
   const cdir = join(clusterRoot(), name);
   const ciPath = join(cdir, "cluster.ini");
-  // 按 Klei 有效值计算：配置缺失时进程仍按默认端口启动（10888/10999/27016/8766），冲突检测必须算上
+  // effective=true：按 Klei 有效值计算（缺失配置按默认端口 10888/10999/27016/8766），用于冲突检测
+  // effective=false：只算显式配置的端口，用于新建存档/世界时的端口分配（首个存档应拿到经典默认端口）
   if (existsSync(ciPath)) {
     const ci = parseIni(readText(ciPath));
-    out.push({ port: Number(iniGet(ci, "SHARD", "master_port") || 10888), file: ciPath, key: "[SHARD] master_port" });
+    const v = iniGet(ci, "SHARD", "master_port");
+    if (v || effective) out.push({ port: Number(v || 10888), file: ciPath, key: "[SHARD] master_port" });
   }
   let shardNames: string[] = [];
   try { shardNames = readdirSync(cdir).filter((d) => existsSync(join(cdir, d, "server.ini"))); } catch {}
   for (const sn of shardNames) {
     const f = join(cdir, sn, "server.ini");
     const lines = parseIni(readText(f));
-    out.push({ port: Number(iniGet(lines, "NETWORK", "server_port") || 10999), file: f, key: "[NETWORK] server_port" });
-    out.push({ port: Number(iniGet(lines, "STEAM", "master_server_port") || 27016), file: f, key: "[STEAM] master_server_port" });
-    out.push({ port: Number(iniGet(lines, "STEAM", "authentication_port") || 8766), file: f, key: "[STEAM] authentication_port" });
+    const sp = iniGet(lines, "NETWORK", "server_port");
+    if (sp || effective) out.push({ port: Number(sp || 10999), file: f, key: "[NETWORK] server_port" });
+    const msp = iniGet(lines, "STEAM", "master_server_port");
+    if (msp || effective) out.push({ port: Number(msp || 27016), file: f, key: "[STEAM] master_server_port" });
+    const ap = iniGet(lines, "STEAM", "authentication_port");
+    if (ap || effective) out.push({ port: Number(ap || 8766), file: f, key: "[STEAM] authentication_port" });
   }
   return out;
 }
@@ -2968,17 +2973,17 @@ async function api(req: Request, url: URL): Promise<Response> {
     if (existsSync(dir)) return fail("已存在同名存档: " + name);
     mkdirSync(join(dir, "Master"), { recursive: true });
     mkdirSync(join(dir, "Caves"), { recursive: true });
-    // 端口自动分配：避开其他存档已占用的端口（为以后多开留好余地）
+    // 端口自动分配：首个存档拿经典默认端口（10888/10999/11000），其他存档只按显式配置的端口避让
     const usedPorts = new Set<number>();
     try {
       for (const c of readdirSync(clusterRoot())) {
-        try { if (c !== name && statSync(join(clusterRoot(), c)).isDirectory()) for (const p of clusterPorts(c)) usedPorts.add(p.port); } catch {}
+        try { if (c !== name && statSync(join(clusterRoot(), c)).isDirectory()) for (const p of clusterPorts(c, false)) usedPorts.add(p.port); } catch {}
       }
     } catch {}
     const alloc = (start: number) => { let p = start; while (usedPorts.has(p)) p++; usedPorts.add(p); return p; };
-    const masterPort = alloc(10889);
-    const mServer = alloc(11000), mSteam = alloc(27018), mAuth = alloc(8768);
-    const cServer = alloc(11001), cSteam = alloc(27019), cAuth = alloc(8769);
+    const masterPort = alloc(10888);
+    const mServer = alloc(10999), mSteam = alloc(27016), mAuth = alloc(8766);
+    const cServer = alloc(11000), cSteam = alloc(27017), cAuth = alloc(8767);
     writeFileSync(join(dir, "cluster.ini"), `[GAMEPLAY]\ngame_mode = survival\nmax_players = 6\npvp = false\npause_when_empty = true\nvote_kick_enabled = true\n\n[NETWORK]\ncluster_name = ${name}\ncluster_description = A dedicated server\ncluster_password =\n\n[MISC]\nconsole_enabled = true\n\n[SHARD]\nshard_enabled = true\nbind_ip = 127.0.0.1\nmaster_ip = 127.0.0.1\nmaster_port = ${masterPort}\ncluster_key = supersecretkey\n`);
     writeFileSync(join(dir, "cluster_token.txt"), "# 在此粘贴 Klei 服务器令牌（必须填写才能开服）\n");
     writeFileSync(join(dir, "Master", "server.ini"), `[NETWORK]\nserver_port = ${mServer}\n\n[SHARD]\nis_master = true\n\n[STEAM]\nmaster_server_port = ${mSteam}\nauthentication_port = ${mAuth}\n\n[ACCOUNT]\nencode_user_path = true\n`);
@@ -3063,17 +3068,21 @@ async function api(req: Request, url: URL): Promise<Response> {
     const isMaster = wantMaster && !hasMaster;
     // 附加层 = 超出经典「地上+地下」组合的多开层，面板不维护其设置
     const isExtraLayer = !isMaster && (shards.length >= 2 || (wantMaster && hasMaster));
-    // 自动分配未占用端口（扫描全部存档的已用端口）
+    // 自动分配端口：默认拿经典端口（地上 10999 / 地下 11000）；
+    // 本存档内其他分片按有效值避让（隐式默认也算），其他存档只按显式配置的端口避让
     const usedPorts = new Set<number>();
     try {
       for (const c of readdirSync(clusterRoot())) {
-        try { if (statSync(join(clusterRoot(), c)).isDirectory()) for (const p of clusterPorts(c)) usedPorts.add(p.port); } catch {}
+        try {
+          if (!statSync(join(clusterRoot(), c)).isDirectory()) continue;
+          for (const p of clusterPorts(c, c === panelConfig.cluster)) usedPorts.add(p.port);
+        } catch {}
       }
     } catch {}
     const alloc = (start: number) => { let p = start; while (usedPorts.has(p)) p++; usedPorts.add(p); return p; };
-    const serverPort = alloc(11000);
-    const steamPort = alloc(27018);
-    const authPort = alloc(8768);
+    const serverPort = alloc(wantMaster ? 10999 : 11000);
+    const steamPort = alloc(27016);
+    const authPort = alloc(8766);
     const dir = shardDir(name);
     if (existsSync(dir)) return fail("目录已存在: " + name);
     mkdirSync(dir, { recursive: true });
@@ -3845,6 +3854,8 @@ async function api(req: Request, url: URL): Promise<Response> {
     }
     for (const [sn, cfg] of shardCfg) {
       if (!cfg.explicit) continue;
+      // 客户端世界可能没有 server.ini，先补全再写端口（保证 is_master 等关键配置齐全）
+      ensureServerIni(sn);
       const f = join(clusterDir(), sn, "server.ini");
       let lines = parseIni(readText(f));
       if (cfg.serverPort !== null) lines = iniSet(lines, "NETWORK", "server_port", String(cfg.serverPort));

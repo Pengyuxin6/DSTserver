@@ -553,6 +553,9 @@ body[data-theme="paper"] #pageBg { opacity: .3; }
 .port-row { margin-bottom: 2px; }
 .port-input { width: 110px; }
 .port-input.port-bad { border-color: var(--red); color: var(--red); }
+.port-edit { cursor: pointer; border-bottom: 1px dashed var(--amber); padding: 0 2px; }
+.port-edit:hover { color: var(--amber); }
+.port-edit.disabled { cursor: not-allowed; border-bottom: none; opacity: .55; }
 @media (max-width: 1200px) {
   #topbar { flex-wrap: nowrap; }
   #tabs { order: 0; flex-basis: auto; flex-wrap: nowrap; overflow: hidden; }
