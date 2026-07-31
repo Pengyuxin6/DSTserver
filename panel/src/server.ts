@@ -189,18 +189,40 @@ function removePathOrLink(p: string): void {
   } catch {}
   rmSync(p, { recursive: true, force: true });
 }
-// 解析本机 Steam 库目录：默认库 + libraryfolders.vdf 里的附加库
+// 定位本机 Steam 安装/库根目录（含 steamapps 子目录的目录）：
+// 1. 注册表 SteamPath（最可靠） 2. 默认位置 3. 各盘符常见目录（D:\steam、E:\SteamLibrary 等）
+function steamRoots(): string[] {
+  if (!IS_WIN) return [];
+  const roots: string[] = [];
+  const push = (p: string) => { try { if (p && existsSync(join(p, "steamapps")) && !roots.includes(p)) roots.push(p); } catch {} };
+  for (const key of ["HKCU\\Software\\Valve\\Steam", "HKLM\\SOFTWARE\\WOW6432Node\\Valve\\Steam", "HKLM\\SOFTWARE\\Valve\\Steam"]) {
+    try {
+      const r = Bun.spawnSync(["reg", "query", key, "/v", "SteamPath"], { stdout: "pipe", stderr: "ignore" } as any);
+      const m = /SteamPath\s+REG_SZ\s+(\S[^\r\n]*)/.exec(r.stdout.toString());
+      if (m) push(m[1].trim());
+    } catch {}
+  }
+  push("C:\\Program Files (x86)\\Steam");
+  for (const L of "CDEFGHIJKLMNOPQRSTUVWXYZ") {
+    for (const cand of ["steam", "Steam", "SteamLibrary", "steamlibrary", "Games\\steam", "Games\\Steam", "Games\\SteamLibrary", "Program Files\\Steam", "Program Files (x86)\\Steam"]) {
+      push(`${L}:\\${cand}`);
+    }
+  }
+  return roots;
+}
+// 解析本机 Steam 库目录：各 Steam 根 + 各自 libraryfolders.vdf 里的附加库
 function steamLibs(): string[] {
   const libs: string[] = [];
-  const defLib = "C:\\Program Files (x86)\\Steam";
-  if (existsSync(defLib)) libs.push(defLib);
-  try {
-    const vdf = readText(join(defLib, "steamapps", "libraryfolders.vdf"));
-    for (const m of vdf.matchAll(/"path"\s+"([^"]+)"/g)) {
-      const p = m[1].replace(/\\\\/g, "\\");
-      if (existsSync(p) && !libs.includes(p)) libs.push(p);
-    }
-  } catch {}
+  for (const root of steamRoots()) {
+    if (!libs.includes(root)) libs.push(root);
+    try {
+      const vdf = readText(join(root, "steamapps", "libraryfolders.vdf"));
+      for (const m of vdf.matchAll(/"path"\s+"([^"]+)"/g)) {
+        const p = m[1].replace(/\\\\/g, "\\");
+        try { if (existsSync(join(p, "steamapps")) && !libs.includes(p)) libs.push(p); } catch {}
+      }
+    } catch {}
+  }
   return libs;
 }
 // 检测 DST 客户端安装位置（用于直接读取客户端模组文件夹）。
@@ -2858,6 +2880,16 @@ async function api(req: Request, url: URL): Promise<Response> {
   }
   if (path === "basic" && method === "POST") {
     const b = await bodyJson(req);
+    // 存档根目录优先处理：先把 clusterRoot 切过去并清缓存，后续 cluster.ini / modoverrides 都写到新位置，
+    // 否则分片列表缓存可能还是旧根目录的，写 modoverrides.lua 会因目录不存在而 ENOENT 崩溃
+    if (typeof b.clusterRoot === "string" && b.clusterRoot.trim() && b.clusterRoot.trim() !== clusterRoot()) {
+      const dir = b.clusterRoot.trim();
+      if (!isAbsPath(dir)) return fail("存档根目录必须是绝对路径");
+      try { mkdirSync(dir, { recursive: true }); panelConfig.clusterRoot = dir; } catch { return fail("无法创建存档根目录: " + dir); }
+      // 记录存档位置历史，方便随时切换
+      panelConfig.clusterRoots = [dir, ...panelConfig.clusterRoots.filter((x) => x !== dir)].slice(0, 12);
+      clearAllClusterCache();
+    }
     const iniPath = join(clusterDir(), "cluster.ini");
     let lines = parseIni(readText(iniPath));
     const setStr = (sec: string, key: string, val: any, max = 200) => {
@@ -2886,15 +2918,19 @@ async function api(req: Request, url: URL): Promise<Response> {
     if (b.clear_token === true) writeFileSync(join(clusterDir(), "cluster_token.txt"), "# 在此粘贴 Klei 服务器令牌\n");
     panelConfig.beta = !!b.beta;
     if (typeof b.betaBranch === "string" && /^[A-Za-z0-9_-]{0,64}$/.test(b.betaBranch)) panelConfig.betaBranch = b.betaBranch;
-    // 语言设置：写入中文语言包在两个分片的 modoverrides（保持启用状态）
+    // 语言设置：写入中文语言包在两个分片的 modoverrides（保持启用状态）。
+    // 分片目录可能不存在（刚切换根目录/外部删除），单个失败不影响整体保存
     if (["simplified", "traditional", "auto"].includes(String(b.lang))) {
       for (const shard of listShards()) {
-        const map = readModOverrides(shard.name);
-        const entry = map.get("workshop-367546858") || { enabled: true, options: {} };
-        entry.enabled = true;
-        entry.options.LANG = String(b.lang);
-        map.set("workshop-367546858", entry);
-        writeFileSync(join(shardDir(shard.name), "modoverrides.lua"), serializeModOverrides(map) + "\n");
+        try {
+          mkdirSync(shardDir(shard.name), { recursive: true });
+          const map = readModOverrides(shard.name);
+          const entry = map.get("workshop-367546858") || { enabled: true, options: {} };
+          entry.enabled = true;
+          entry.options.LANG = String(b.lang);
+          map.set("workshop-367546858", entry);
+          writeFileSync(join(shardDir(shard.name), "modoverrides.lua"), serializeModOverrides(map) + "\n");
+        } catch {}
       }
     }
     // 保存服务器目录
@@ -2902,12 +2938,9 @@ async function api(req: Request, url: URL): Promise<Response> {
       const dir = b.serverDir.trim();
       if (existsSync(dir)) { panelConfig.serverDir = dir; } else return fail("服务器目录不存在: " + dir);
     }
-    if (typeof b.clusterRoot === "string" && b.clusterRoot.trim()) {
-      const dir = b.clusterRoot.trim();
-      if (!isAbsPath(dir)) return fail("存档根目录必须是绝对路径");
-      try { mkdirSync(dir, { recursive: true }); panelConfig.clusterRoot = dir; } catch { return fail("无法创建存档根目录: " + dir); }
-      // 记录存档位置历史，方便随时切换
-      panelConfig.clusterRoots = [dir, ...panelConfig.clusterRoots.filter((x) => x !== dir)].slice(0, 12);
+    if (typeof b.clusterRoot === "string" && b.clusterRoot.trim() && b.clusterRoot.trim() === clusterRoot()) {
+      // 根目录未变化（已在开头处理过变更），仅补记历史
+      panelConfig.clusterRoots = [clusterRoot(), ...panelConfig.clusterRoots.filter((x) => x !== clusterRoot())].slice(0, 12);
     }
     // Windows：客户端位置（空 = 清除手动设置回到自动检测）
     if (typeof b.clientDir === "string") {
@@ -3770,15 +3803,16 @@ async function api(req: Request, url: URL): Promise<Response> {
         authPort: Number(apRaw || 8766), authPortSet: apRaw !== null,
       };
     });
-    // 其他存档已占用的端口（含 Klei 默认值，不管是否在运行，改端口时都要避开）
-    const others: { cluster: string; ports: number[] }[] = [];
+    // 其他存档已占用的端口（含 Klei 默认值；标注是否在运行——只有运行中的才算硬冲突）
+    const runningSet = new Set((await runningDstAll()).map((r) => r.cluster));
+    const others: { cluster: string; ports: number[]; running: boolean }[] = [];
     try {
       for (const c of readdirSync(clusterRoot())) {
         if (c === panelConfig.cluster) continue;
         try {
           if (!statSync(join(clusterRoot(), c)).isDirectory()) continue;
           const ps = [...new Set(clusterPorts(c).map((p) => p.port))];
-          if (ps.length) others.push({ cluster: c, ports: ps });
+          if (ps.length) others.push({ cluster: c, ports: ps, running: runningSet.has(c) });
         } catch {}
       }
     } catch {}
@@ -3816,12 +3850,18 @@ async function api(req: Request, url: URL): Promise<Response> {
         shardCfg.set(s.name, cfg);
       }
     }
-    // 组装有效值清单（未显式配置的按 Klei 默认值参与校验）
-    const entries: PortEntry[] = [{ label: "cluster.ini [SHARD] master_port", port: masterPort ?? 10888, explicit: masterExplicit }];
+    // 组装有效值清单：显式提供的新值 > 磁盘现有配置 > Klei 默认值
+    const ciCur = parseIni(readText(join(clusterDir(), "cluster.ini")));
+    const mpCurRaw = iniGet(ciCur, "SHARD", "master_port");
+    const entries: PortEntry[] = [{ label: "cluster.ini [SHARD] master_port", port: masterPort ?? Number(mpCurRaw || 10888), explicit: masterExplicit }];
     for (const [sn, cfg] of shardCfg) {
-      entries.push({ label: `${sn} [NETWORK] server_port`, port: cfg.serverPort ?? 10999, explicit: cfg.serverPort !== null });
-      entries.push({ label: `${sn} [STEAM] master_server_port`, port: cfg.masterServerPort ?? 27016, explicit: cfg.masterServerPort !== null });
-      entries.push({ label: `${sn} [STEAM] authentication_port`, port: cfg.authPort ?? 8766, explicit: cfg.authPort !== null });
+      const curLines = parseIni(readText(join(clusterDir(), sn, "server.ini")));
+      const spCur = iniGet(curLines, "NETWORK", "server_port");
+      const mspCur = iniGet(curLines, "STEAM", "master_server_port");
+      const apCur = iniGet(curLines, "STEAM", "authentication_port");
+      entries.push({ label: `${sn} [NETWORK] server_port`, port: cfg.serverPort ?? Number(spCur || 10999), explicit: cfg.serverPort !== null });
+      entries.push({ label: `${sn} [STEAM] master_server_port`, port: cfg.masterServerPort ?? Number(mspCur || 27016), explicit: cfg.masterServerPort !== null });
+      entries.push({ label: `${sn} [STEAM] authentication_port`, port: cfg.authPort ?? Number(apCur || 8766), explicit: cfg.authPort !== null });
     }
     for (const e of entries) {
       if (!Number.isInteger(e.port) || (e.port as number) < 1024 || (e.port as number) > 65535) return fail(`端口无效：${e.label} = ${e.port}（要求 1024-65535 的整数）`);
@@ -3834,7 +3874,10 @@ async function api(req: Request, url: URL): Promise<Response> {
         return fail(`端口 ${entries[i].port} 重复：${entries[i].label} 与 ${entries[j2].label} 相同，每个端口必须唯一（可用「自动分配空闲端口」一键解决）`);
       }
     }
-    // 与其他存档冲突检测（含对方隐式默认值）
+    // 与其他存档冲突检测（含对方隐式默认值）：对方正在运行才硬拦截；
+    // 对方未运行只警告——用户可以选择保留相同端口（不同时启动即可）
+    const runningSet2 = new Set((await runningDstAll()).map((r) => r.cluster));
+    const warnings: string[] = [];
     try {
       for (const c of readdirSync(clusterRoot())) {
         if (c === panelConfig.cluster) continue;
@@ -3842,7 +3885,9 @@ async function api(req: Request, url: URL): Promise<Response> {
           if (!statSync(join(clusterRoot(), c)).isDirectory()) continue;
           for (const p of clusterPorts(c)) {
             const hit = entries.find((e) => e.port === p.port);
-            if (hit) return fail(`端口 ${p.port}（${hit.label}）与存档「${c}」的 ${p.key} 冲突，请换一个端口或点「自动分配空闲端口」`);
+            if (!hit) continue;
+            if (runningSet2.has(c)) return fail(`端口 ${p.port}（${hit.label}）与正在运行的存档「${c}」的 ${p.key} 冲突，必须换一个端口或先关闭对方服务器`);
+            if (!warnings.some((w) => w.includes(`「${c}」`))) warnings.push(`端口 ${p.port} 与存档「${c}」相同（对方未运行，同时启动前需错开）`);
           }
         } catch {}
       }
@@ -3865,7 +3910,8 @@ async function api(req: Request, url: URL): Promise<Response> {
     }
     clearShardListCache();
     const summary = entries.filter((e) => e.explicit).map((e) => `${e.port}`).join(" / ");
-    return ok(null, (path === "server/ports/auto" ? "已自动分配空闲端口：" : "端口已保存：") + summary + "。启动/重启服务器后生效。");
+    return ok(null, (path === "server/ports/auto" ? "已自动分配空闲端口：" : "端口已保存：") + summary + "。启动/重启服务器后生效。"
+      + (warnings.length ? " ⚠ " + warnings.join("；") : ""));
   }
   if (path === "server/start" && method === "POST") {
     const shards = listShards();

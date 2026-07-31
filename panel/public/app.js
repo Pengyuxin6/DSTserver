@@ -626,6 +626,10 @@ async function pageWorld() {
           <button class="btn" id="addCave">添加地下世界</button>
           <button class="btn danger" id="delWorld">删除所选世界</button>
         </div>
+        <div class="btn-row" style="margin-top:6px">
+          <button class="btn" id="portResetW">↺ 恢复默认端口（Master 10999 / Caves 11000）</button>
+          <span class="hint">点世界旁的端口号可单独改</span>
+        </div>
       </div>
       <div class="card">
         <h3>存档管理 <span class="hint">（需服务器运行中）</span></h3>
@@ -692,6 +696,8 @@ async function pageWorld() {
   }
   if (!worldState.shard && shards.length) worldState.shard = shards[0].name;
   if (worldState.shard) { pageWorldHighlight(); loadWorldOverrides(); }
+  // 恢复默认端口（编辑世界页）
+  $("#portResetW").onclick = async () => { if (await resetPortsDefault()) pageWorld(); };
 
   // 系统资源
   apiQuiet("server/status").then((j) => {
@@ -1555,6 +1561,22 @@ function renderModsDownload() {
   startTaskPoll();
 }
 
+// 恢复经典默认端口（与 43 服务器 MyDediServer 相同的设计）：master_port=10888，
+// Master=10999/27016/8766，Caves=11000/27017/8767；其余分片不动
+async function resetPortsDefault() {
+  const pj = await apiQuiet("server/ports");
+  if (!pj) { toast("端口信息读取失败", true); return false; }
+  if (pj.data.running) { toast("服务器运行中，请先关闭再恢复默认端口", true); return false; }
+  const body = { masterPort: 10888, shards: {} };
+  for (const s of pj.data.shards) {
+    if (s.name === "Master") body.shards.Master = { serverPort: 10999, masterServerPort: 27016, authPort: 8766 };
+    else if (s.name === "Caves") body.shards.Caves = { serverPort: 11000, masterServerPort: 27017, authPort: 8767 };
+  }
+  const r = await api("server/ports", { method: "POST", body });
+  toast(r.msg, !r.ok);
+  return !!r.ok;
+}
+
 // ============ 4. 服务器管理 ============
 async function pageServer() {
   const j = await apiQuiet("server/status");
@@ -1591,6 +1613,10 @@ async function pageServer() {
     <div class="row" style="margin-bottom:8px"><span id="sysRes" class="hint">加载中…</span></div>
     <div class="hint" id="memHint" style="margin-bottom:8px">💡 系统可用内存低于 <span style="color:var(--red)">512MB</span> 时自动终止服务器</div>
     <table class="grid"><thead><tr><th>分片</th><th>状态</th><th>端口</th></tr></thead><tbody>${shardRows}</tbody></table>
+    <div class="btn-row" style="margin-top:8px">
+      <button class="btn" id="portReset" ${d.currentRunning ? "disabled" : ""}>↺ 恢复默认端口（Master 10999 / Caves 11000）</button>
+      <span class="hint">点端口号可单独修改；仅与<b>运行中</b>存档冲突才会强制要求更改</span>
+    </div>
     <div class="row" style="margin-top:10px"><label>自动重启</label>
       <label class="switch" title="每 30 秒检查分片，掉线自动拉起"><input type="checkbox" id="arSwitch" ${d.autorestart ? "checked" : ""}><span class="slider"></span></label>
       <span class="hint">每 30 秒检查一次，分片掉线自动拉起</span></div>
@@ -1644,12 +1670,17 @@ async function pageServer() {
     if (!pj) { box.textContent = "端口信息加载失败，请刷新"; return; }
     const p = pj.data;
     const otherPorts = new Map();
-    (p.others || []).forEach((o) => o.ports.forEach((pt) => { if (!otherPorts.has(pt)) otherPorts.set(pt, o.cluster); }));
+    (p.others || []).forEach((o) => o.ports.forEach((pt) => { if (!otherPorts.has(pt)) otherPorts.set(pt, o); }));
     const row = (label, key, val, isDefault) => {
       const clash = otherPorts.get(Number(val));
+      const clashHtml = clash
+        ? (clash.running
+          ? `<span class="multi-err" style="margin:0">✖ 与运行中的「${esc(clash.cluster)}」冲突，必须改</span>`
+          : `<span style="color:var(--amber);font-size:12px">⚠ 与「${esc(clash.cluster)}」相同（对方未运行，可保留，同时启动前需错开）</span>`)
+        : "";
       return `<div class="row port-row"><label style="min-width:230px">${label}${isDefault ? ' <span class="hint">(默认值，未显式配置)</span>' : ""}</label>
-        <input type="number" class="port-input${clash ? " port-bad" : ""}" data-portkey="${esc(key)}" value="${val ?? ""}" min="1024" max="65535" ${p.running ? "disabled" : ""}>
-        ${clash ? `<span class="multi-err" style="margin:0">✖ 与「${esc(clash)}」冲突</span>` : ""}</div>`;
+        <input type="number" class="port-input${clash && clash.running ? " port-bad" : ""}" data-portkey="${esc(key)}" value="${val ?? ""}" min="1024" max="65535" ${p.running ? "disabled" : ""}>
+        ${clashHtml}</div>`;
     };
     let html = "";
     if (p.running) html += `<div class="multi-err">服务器运行中，端口只读。请先关闭服务器再修改。</div>`;
@@ -1663,10 +1694,13 @@ async function pageServer() {
     html += `<div class="btn-row" style="margin-top:10px">
       <button class="btn" id="portAuto" ${p.running ? "disabled" : ""}>⚡ 自动分配空闲端口</button>
       <button class="btn primary" id="portSave" ${p.running ? "disabled" : ""}>💾 保存端口</button>
+      <button class="btn" id="portReset2" ${p.running ? "disabled" : ""}>↺ 恢复默认（10999/11000）</button>
       <span class="hint">改端口不影响存档数据；多开请给每个存档各点一次「自动分配」</span></div>`;
-    if ((p.others || []).length) html += `<div class="hint" style="margin-top:6px">其他存档占用端口：${p.others.map((o) => `「${esc(o.cluster)}」${o.ports.join("/")}`).join("，")}</div>`;
+    if ((p.others || []).length) html += `<div class="hint" style="margin-top:6px">其他存档占用端口：${p.others.map((o) => `「${esc(o.cluster)}」${o.ports.join("/")}${o.running ? "（运行中）" : ""}`).join("，")}</div>`;
     box.innerHTML = html;
     const autoBtn = $("#portAuto");
+    const resetBtn2 = $("#portReset2");
+    if (resetBtn2) resetBtn2.onclick = async () => { if (await resetPortsDefault()) loadPorts(); };
     if (autoBtn) autoBtn.onclick = async () => {
       if (!(await dlgConfirm("将自动避开其他存档占用的端口，重写当前存档的全部端口配置，继续？"))) return;
       const r = await api("server/ports/auto", { method: "POST", body: {} });
@@ -1689,6 +1723,7 @@ async function pageServer() {
   };
   loadPorts();
   // 分片表端口内联修改（运行中只读）
+  $("#portReset").onclick = async () => { if (await resetPortsDefault()) pageServer(); };
   $$(".port-edit[data-shard]").forEach((el) => {
     if (el.classList.contains("disabled")) return;
     el.onclick = async () => {
