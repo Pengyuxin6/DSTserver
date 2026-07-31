@@ -247,7 +247,7 @@ if (DO_MINIMAP) {
   // 用系统 unzip 解出 minimap/minimap.xml + minimap/minimap.tex
   const uz = Bun.spawnSync(["unzip", "-o", "-q", zip, "minimap/minimap.xml", "minimap/minimap.tex", "-d", tmp]);
   if (uz.exitCode !== 0) {
-    console.log("unzip 失败（需要系统 unzip 命令）: " + new Response(uz.stderr).text());
+    console.log("unzip 失败（需要系统 unzip 命令；注意专用服务端的 images.zip 不含 minimap 图集，该功能需要完整客户端的游戏文件）: " + Buffer.from(uz.stderr).toString());
     process.exit(1);
   }
   const xmlPath = join(tmp, "minimap", "minimap.xml");
