@@ -3491,7 +3491,7 @@ async function api(req: Request, url: URL): Promise<Response> {
   if (path === "serverlog" && method === "GET") {
     const lines: string[] = [];
     for (const f of serverLogPaths()) {
-      for (const line of tailLines(f, 300)) lines.push(`[${basename(dirname(f))}] ${line}`);
+      for (const line of tailLines(f, 2000)) lines.push(`[${basename(dirname(f))}] ${line}`);
     }
     return ok({ lines, count: lines.length });
   }
