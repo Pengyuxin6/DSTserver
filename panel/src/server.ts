@@ -3667,9 +3667,8 @@ const server = Bun.serve({
 console.log(`DST 管理面板已启动: http://127.0.0.1:${PORT}/  (当前存档: ${panelConfig.cluster})`);
 
 // ---------- 定时任务 ----------
-// 自动重启：每 10 秒检查分片 + 系统内存保护
+// 内存保护：每 10 秒检查（独立于自动重启，始终运行）
 setInterval(async () => {
-  if (!panelConfig.autorestart) return;
   try {
     // 内存保护：系统可用内存低于 512MB 时终止 DST
     const sysMem = getSystemMemory();
@@ -3680,7 +3679,8 @@ setInterval(async () => {
       console.log("[内存保护] DST 服务器已终止，可手动重新启动");
       return;
     }
-    // 掉线检测
+    // 掉线自动拉起（仅在开启自动重启时）
+    if (!panelConfig.autorestart) return;
     for (const s of listShards()) {
       if (!(await shardRunning(s.name))) {
         console.log(`[自动重启] 分片 ${s.name} 未运行，正在启动...`);
