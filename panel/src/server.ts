@@ -474,13 +474,9 @@ async function startShard(shard: string): Promise<string> {
     extraArgs.push("-persistent_storage_root", parent, "-conf_dir", conf);
   }
   if (panelConfig.mode === "offline") extraArgs.push("-offline");
-  // 内存限制：系统总内存 - 1GB 预留
-  const sysMem = getSystemMemory();
-  const memLimitMB = sysMem.total > 1024 ? sysMem.total - 1024 : sysMem.total;
   const args = [
     "sudo", "/usr/local/bin/dst-shard-launch.sh",
-    shard, screenSession(shard), BIN, BIN_DIR, panelConfig.cluster,
-    String(memLimitMB), ...extraArgs,
+    shard, screenSession(shard), BIN, BIN_DIR, panelConfig.cluster, ...extraArgs,
   ];
   const r = await run(args, { cwd: BIN_DIR });
   await sleep(2000);
