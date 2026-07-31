@@ -379,7 +379,6 @@ interface PanelConfig {
   clusterRoot: string;
   modsDir: string;
   langCheck: boolean;
-  maxMemoryMB: number;
 }
 function loadPanelConfig(): PanelConfig {
   try {
@@ -403,10 +402,9 @@ function loadPanelConfig(): PanelConfig {
       clusterRoot: typeof c.clusterRoot === "string" && c.clusterRoot.startsWith("/") ? c.clusterRoot : DEFAULT_CLUSTER_ROOT,
       modsDir: typeof c.modsDir === "string" && c.modsDir.startsWith("/") ? c.modsDir : DEFAULT_MODS_DIR,
       langCheck: c.langCheck !== false,
-      maxMemoryMB: typeof c.maxMemoryMB === "number" && c.maxMemoryMB > 0 ? c.maxMemoryMB : 0,
     };
   } catch {
-    return { cluster: "MyDediServer", beta: false, betaBranch: "", mode: "online", autorestart: false, announcements: [], announceAuto: { enabled: false, intervalSec: 300, idx: 0, lastSent: 0 }, itemHistory: [], favorites: [], serverDir: join(HOME, "dst_server"), clusterRoot: DEFAULT_CLUSTER_ROOT, modsDir: DEFAULT_MODS_DIR, langCheck: true, maxMemoryMB: 0 };
+    return { cluster: "MyDediServer", beta: false, betaBranch: "", mode: "online", autorestart: false, announcements: [], announceAuto: { enabled: false, intervalSec: 300, idx: 0, lastSent: 0 }, itemHistory: [], favorites: [], serverDir: join(HOME, "dst_server"), clusterRoot: DEFAULT_CLUSTER_ROOT, modsDir: DEFAULT_MODS_DIR, langCheck: true };
   }
 }
 let panelConfig = loadPanelConfig();
@@ -3125,7 +3123,8 @@ async function api(req: Request, url: URL): Promise<Response> {
     const dstMem = getDstProcessMemory();
     // 系统内存
     const sysMem = getSystemMemory();
-    return ok({ shards, autorestart: panelConfig.autorestart, mode: panelConfig.mode, langCheck: panelConfig.langCheck, maxMemoryMB: panelConfig.maxMemoryMB, dstMem, sysMem });
+    const memLimit = sysMem.total > 1024 ? sysMem.total - 1024 : 0;
+    return ok({ shards, autorestart: panelConfig.autorestart, mode: panelConfig.mode, langCheck: panelConfig.langCheck, dstMem, sysMem, memLimit });
   }
   if (path === "server/start" && method === "POST") {
     const shards = listShards();
@@ -3161,10 +3160,8 @@ async function api(req: Request, url: URL): Promise<Response> {
   if (path === "server/autorestart" && method === "POST") {
     const b = await bodyJson(req);
     if (typeof b.on === "boolean") panelConfig.autorestart = !!b.on;
-    if (typeof b.maxMemoryMB === "number" && b.maxMemoryMB >= 0) panelConfig.maxMemoryMB = b.maxMemoryMB;
     savePanelConfig();
-    const memInfo = panelConfig.maxMemoryMB > 0 ? `（内存超 ${panelConfig.maxMemoryMB}MB 时自动重启）` : "";
-    return ok(null, panelConfig.autorestart ? `已开启自动重启（每 30 秒检查）${memInfo}` : "已关闭自动重启");
+    return ok(null, panelConfig.autorestart ? "已开启自动重启（每 30 秒检查）" : "已关闭自动重启");
   }
   if (path === "server/mode" && method === "POST") {
     const b = await bodyJson(req);
@@ -3662,24 +3659,21 @@ const server = Bun.serve({
 console.log(`DST 管理面板已启动: http://127.0.0.1:${PORT}/  (当前存档: ${panelConfig.cluster})`);
 
 // ---------- 定时任务 ----------
-// 自动重启：每 30 秒检查分片 + 内存
+// 自动重启：每 30 秒检查分片 + 内存保护
 setInterval(async () => {
   if (!panelConfig.autorestart) return;
   try {
-    // 内存超限检测（优先于掉线检测）
-    if (panelConfig.maxMemoryMB > 0) {
+    // 内存保护：留 1GB 给系统，DST 进程超过剩余内存则终止
+    const reserveMem = 1024; // 硬性预留 1GB 给系统
+    const maxMem = sysMem.total - reserveMem;
+    if (maxMem > 0) {
       const mem = getDstProcessMemory();
-      if (mem > panelConfig.maxMemoryMB) {
-        console.log(`[自动重启] DST 进程内存 ${mem}MB 超过阈值 ${panelConfig.maxMemoryMB}MB，正在重启...`);
+      if (mem > maxMem) {
+        console.log(`[内存保护] DST 进程内存 ${mem}MB 触及上限 ${maxMem}MB（预留 ${reserveMem}MB），正在终止...`);
         for (const s of listShards()) await stopShard(s.name);
-        // 释放系统缓存
         try { Bun.spawnSync(["sh", "-c", "echo 1 > /proc/sys/vm/drop_caches 2>/dev/null || true"]); } catch {}
-        await sleep(5000);
-        for (const s of listShards()) {
-          const r = await startShard(s.name);
-          console.log(`[自动重启] 分片 ${s.name}: ${r === "ok" ? "已启动" : "启动失败 " + r}`);
-        }
-        return; // 已处理，跳过本次掉线检查
+        console.log("[内存保护] DST 服务器已终止，可手动重新启动");
+        return;
       }
     }
     // 掉线检测
