@@ -1436,7 +1436,6 @@ async function pageServer() {
     <div class="row"><label>汉化检测</label>
       <label class="switch" title="启动服务器时检测是否启用中文汉化模组"><input type="checkbox" id="langCheckSwitch" ${d.langCheck ? "checked" : ""}><span class="slider"></span></label>
       <span class="hint">启动时检测汉化模组（1301033176/1418746242），未启用则弹窗提示自动配置为简体中文</span></div>
-    <div class="row"><label>DST 进程内存</label><span id="dstMem" class="hint">—</span> <span class="hint">/ 系统总量 ${esc(d.sysMem?.total || "-")}MB ｜ 预留 1GB 不可触碰，超 ${esc(d.memLimit || 0)}MB 自动终止</span></div>
     <div class="row"><label>世界暂停</label><span id="pauseState" class="hint">查询中…</span> <span class="hint">暂停 = 冻结世界时间（昼夜/作物/生物停止），玩家不被踢出</span></div>
   </div>
   <div class="card">
@@ -1521,14 +1520,6 @@ async function pageServer() {
     const r = await api("server/lang-check-toggle", { method: "POST", body: {} });
     toast(r.msg);
   };
-  // 内存显示
-  if (d.dstMem > 0) {
-    const pct = d.sysMem?.total ? Math.round(d.dstMem / d.sysMem.total * 100) : 0;
-    const nearLimit = d.memLimit > 0 && d.dstMem > d.memLimit * 0.85;
-    $("#dstMem").innerHTML = `${d.dstMem}MB${nearLimit ? ' <span class="tag warn">接近上限</span>' : d.dstMem > 3000 ? ' <span style="color:var(--red)">⚠偏高</span>' : ''} (${pct}%)`;
-  } else {
-    $("#dstMem").textContent = "未运行";
-  }
   $$('input[name=mode]').forEach((r) => (r.onchange = () => act("server/mode", { mode: r.value })));
   // 管理员/黑名单：表格展示（ID + 名称 + 备注），勾选删除，按 KU_id 新增
   const [al, bl] = await Promise.all([api("server/adminlist"), api("server/blocklist")]);
