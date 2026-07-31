@@ -4349,7 +4349,15 @@ function serveFile(path: string, req?: Request): Response {
     const headers: Record<string, string> = { "Content-Type": mime };
     // 图标/图片内容稳定，长缓存减少重复请求（模组图标与世界设置图标量大）
     if (/\.(png|jpg|jpeg|webp|gif|ico)$/.test(ext)) headers["Cache-Control"] = "public, max-age=604800, immutable";
-    else if (/\.(css|js)$/.test(ext)) headers["Cache-Control"] = "public, max-age=3600";
+    // html/js/css 不缓存：面板更新频繁，每次加载都向服务器校验，避免部署后用户看到旧页面
+    else headers["Cache-Control"] = "no-cache";
+    // Last-Modified 协商缓存：no-cache 下未修改的资源返回 304，不重复传输
+    try {
+      const mtime = statSync(path).mtime;
+      headers["Last-Modified"] = mtime.toUTCString();
+      const ims = req?.headers.get("if-modified-since");
+      if (ims && new Date(ims).getTime() >= Math.floor(mtime.getTime() / 1000) * 1000) return new Response(null, { status: 304, headers });
+    } catch {}
     // 文本类资源 gzip（app.js 体积大，压缩后传输约 1/4，加快已加载页面的二次打开速度）
     if (req && /\.(html|css|js|svg)$/.test(ext) && (req.headers.get("accept-encoding") || "").includes("gzip")) {
       const buf = readFileSync(path);
