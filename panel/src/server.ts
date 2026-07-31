@@ -65,6 +65,33 @@ function checkResources(): { ok: boolean; msg: string } {
   }
 }
 
+// 获取 DST 服务进程的内存占用（RSS MB）
+function getDstProcessMemory(): number {
+  try {
+    const r = Bun.spawnSync(["pgrep", "-f", "dontstarve_dedicated_server_nullrenderer"], { stdout: "pipe" });
+    let totalRSS = 0;
+    for (const pid of new Response(r.stdout).text().trim().split("\n").filter(Boolean)) {
+      const smaps = readText(`/proc/${pid}/smaps_rollup`);
+      const rss = /Rss:\s+(\d+)/.exec(smaps);
+      if (rss) totalRSS += Number(rss[1]);
+    }
+    return Math.round(totalRSS / 1024); // KB → MB
+  } catch {
+    return 0;
+  }
+}
+// 获取系统内存信息（MB）
+function getSystemMemory(): { total: number; avail: number; used: number } {
+  try {
+    const text = readText("/proc/meminfo");
+    const total = /MemTotal:\s+(\d+)/.exec(text);
+    const avail = /MemAvailable:\s+(\d+)/.exec(text);
+    return { total: total ? Math.round(Number(total[1]) / 1024) : 0, avail: avail ? Math.round(Number(avail[1]) / 1024) : 0, used: 0 };
+  } catch {
+    return { total: 0, avail: 0, used: 0 };
+  }
+}
+
 function json(data: any, status = 200, headers: Record<string, string> = {}) {
   return new Response(JSON.stringify(data), {
     status,
@@ -352,6 +379,7 @@ interface PanelConfig {
   clusterRoot: string;
   modsDir: string;
   langCheck: boolean;
+  maxMemoryMB: number;
 }
 function loadPanelConfig(): PanelConfig {
   try {
@@ -375,9 +403,10 @@ function loadPanelConfig(): PanelConfig {
       clusterRoot: typeof c.clusterRoot === "string" && c.clusterRoot.startsWith("/") ? c.clusterRoot : DEFAULT_CLUSTER_ROOT,
       modsDir: typeof c.modsDir === "string" && c.modsDir.startsWith("/") ? c.modsDir : DEFAULT_MODS_DIR,
       langCheck: c.langCheck !== false,
+      maxMemoryMB: typeof c.maxMemoryMB === "number" && c.maxMemoryMB > 0 ? c.maxMemoryMB : 0,
     };
   } catch {
-    return { cluster: "MyDediServer", beta: false, betaBranch: "", mode: "online", autorestart: false, announcements: [], announceAuto: { enabled: false, intervalSec: 300, idx: 0, lastSent: 0 }, itemHistory: [], favorites: [], serverDir: join(HOME, "dst_server"), clusterRoot: DEFAULT_CLUSTER_ROOT, modsDir: DEFAULT_MODS_DIR, langCheck: true };
+    return { cluster: "MyDediServer", beta: false, betaBranch: "", mode: "online", autorestart: false, announcements: [], announceAuto: { enabled: false, intervalSec: 300, idx: 0, lastSent: 0 }, itemHistory: [], favorites: [], serverDir: join(HOME, "dst_server"), clusterRoot: DEFAULT_CLUSTER_ROOT, modsDir: DEFAULT_MODS_DIR, langCheck: true, maxMemoryMB: 0 };
   }
 }
 let panelConfig = loadPanelConfig();
@@ -3092,7 +3121,11 @@ async function api(req: Request, url: URL): Promise<Response> {
   if (path === "server/status" && method === "GET") {
     const shards = listShards();
     for (const s of shards) s.running = await shardRunning(s.name);
-    return ok({ shards, autorestart: panelConfig.autorestart, mode: panelConfig.mode, langCheck: panelConfig.langCheck });
+    // 获取 DST 进程内存
+    const dstMem = getDstProcessMemory();
+    // 系统内存
+    const sysMem = getSystemMemory();
+    return ok({ shards, autorestart: panelConfig.autorestart, mode: panelConfig.mode, langCheck: panelConfig.langCheck, maxMemoryMB: panelConfig.maxMemoryMB, dstMem, sysMem });
   }
   if (path === "server/start" && method === "POST") {
     const shards = listShards();
@@ -3127,9 +3160,11 @@ async function api(req: Request, url: URL): Promise<Response> {
   }
   if (path === "server/autorestart" && method === "POST") {
     const b = await bodyJson(req);
-    panelConfig.autorestart = !!b.on;
+    if (typeof b.on === "boolean") panelConfig.autorestart = !!b.on;
+    if (typeof b.maxMemoryMB === "number" && b.maxMemoryMB >= 0) panelConfig.maxMemoryMB = b.maxMemoryMB;
     savePanelConfig();
-    return ok(null, panelConfig.autorestart ? "已开启自动重启（每 30 秒检查）" : "已关闭自动重启");
+    const memInfo = panelConfig.maxMemoryMB > 0 ? `（内存超 ${panelConfig.maxMemoryMB}MB 时自动重启）` : "";
+    return ok(null, panelConfig.autorestart ? `已开启自动重启（每 30 秒检查）${memInfo}` : "已关闭自动重启");
   }
   if (path === "server/mode" && method === "POST") {
     const b = await bodyJson(req);
@@ -3627,10 +3662,27 @@ const server = Bun.serve({
 console.log(`DST 管理面板已启动: http://127.0.0.1:${PORT}/  (当前存档: ${panelConfig.cluster})`);
 
 // ---------- 定时任务 ----------
-// 自动重启：每 30 秒检查分片
+// 自动重启：每 30 秒检查分片 + 内存
 setInterval(async () => {
   if (!panelConfig.autorestart) return;
   try {
+    // 内存超限检测（优先于掉线检测）
+    if (panelConfig.maxMemoryMB > 0) {
+      const mem = getDstProcessMemory();
+      if (mem > panelConfig.maxMemoryMB) {
+        console.log(`[自动重启] DST 进程内存 ${mem}MB 超过阈值 ${panelConfig.maxMemoryMB}MB，正在重启...`);
+        for (const s of listShards()) await stopShard(s.name);
+        // 释放系统缓存
+        try { Bun.spawnSync(["sh", "-c", "echo 1 > /proc/sys/vm/drop_caches 2>/dev/null || true"]); } catch {}
+        await sleep(5000);
+        for (const s of listShards()) {
+          const r = await startShard(s.name);
+          console.log(`[自动重启] 分片 ${s.name}: ${r === "ok" ? "已启动" : "启动失败 " + r}`);
+        }
+        return; // 已处理，跳过本次掉线检查
+      }
+    }
+    // 掉线检测
     for (const s of listShards()) {
       if (!(await shardRunning(s.name))) {
         console.log(`[自动重启] 分片 ${s.name} 未运行，正在启动...`);

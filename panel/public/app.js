@@ -1436,6 +1436,8 @@ async function pageServer() {
     <div class="row"><label>汉化检测</label>
       <label class="switch" title="启动服务器时检测是否启用中文汉化模组"><input type="checkbox" id="langCheckSwitch" ${d.langCheck ? "checked" : ""}><span class="slider"></span></label>
       <span class="hint">启动时检测汉化模组（1301033176/1418746242），未启用则弹窗提示自动配置为简体中文</span></div>
+    <div class="row"><label>DST 进程内存</label><span id="dstMem" class="hint">—</span> <span class="hint">/ 系统可用 ${esc(d.sysMem?.avail || "-")}MB</span></div>
+    <div class="row"><label>内存超限重启</label><input type="number" id="maxMemInput" value="${d.maxMemoryMB || ""}" min="0" max="16384" step="100" placeholder="0=不限制" style="width:100px"> <span class="hint">MB，DST进程内存超过时自动重启（0=不限制，建议大模组设 3000-4000）</span></div>
     <div class="row"><label>世界暂停</label><span id="pauseState" class="hint">查询中…</span> <span class="hint">暂停 = 冻结世界时间（昼夜/作物/生物停止），玩家不被踢出</span></div>
   </div>
   <div class="card">
@@ -1520,6 +1522,26 @@ async function pageServer() {
     const r = await api("server/lang-check-toggle", { method: "POST", body: {} });
     toast(r.msg);
   };
+  // 内存显示
+  if (d.dstMem > 0) {
+    const pct = d.sysMem?.total ? Math.round(d.dstMem / d.sysMem.total * 100) : 0;
+    $("#dstMem").innerHTML = `${d.dstMem}MB${d.dstMem > 3000 ? ' <span style="color:var(--red)">⚠偏高</span>' : d.dstMem > 2000 ? ' <span class="tag warn">偏高</span>' : ''} (${pct}%)`;
+  } else {
+    $("#dstMem").textContent = "未运行";
+  }
+  // 内存超限阈值
+  const maxMemInput = $("#maxMemInput");
+  if (maxMemInput) {
+    let memSaveTimer = null;
+    maxMemInput.oninput = () => {
+      clearTimeout(memSaveTimer);
+      memSaveTimer = setTimeout(async () => {
+        const v = parseInt(maxMemInput.value) || 0;
+        const r = await api("server/autorestart", { method: "POST", body: { maxMemoryMB: v } });
+        toast(r.msg);
+      }, 800);
+    };
+  }
   $$('input[name=mode]').forEach((r) => (r.onchange = () => act("server/mode", { mode: r.value })));
   // 管理员/黑名单：表格展示（ID + 名称 + 备注），勾选删除，按 KU_id 新增
   const [al, bl] = await Promise.all([api("server/adminlist"), api("server/blocklist")]);
