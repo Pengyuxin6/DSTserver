@@ -41,6 +41,30 @@ function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
+// 系统资源检测：启动服务器前检查剩余内存和 CPU
+function checkResources(): { ok: boolean; msg: string } {
+  try {
+    // 读取 /proc/meminfo 获取可用内存（单位 KB）
+    const memText = readText("/proc/meminfo");
+    const memAvail = /MemAvailable:\s+(\d+)/.exec(memText);
+    const availMB = memAvail ? Math.floor(Number(memAvail[1]) / 1024) : 0;
+    // 读取 /proc/loadavg 获取 CPU 负载
+    const loadText = readText("/proc/loadavg");
+    const load1 = parseFloat(loadText.split(/\s+/)[0]) || 0;
+    const cpuCount = (require("node:os") as any).cpus ? (require("node:os").cpus().length || 4) : 4;
+    const cpuPct = Math.round((load1 / cpuCount) * 100);
+    if (availMB > 0 && availMB < 1024) {
+      return { ok: false, msg: `剩余内存不足（可用: ${availMB}MB），建议关闭其他服务或释放内存后再启动` };
+    }
+    if (cpuPct > 90) {
+      return { ok: false, msg: `CPU 负载过高（${cpuPct}%），建议等待负载降低后再启动` };
+    }
+    return { ok: true, msg: "" };
+  } catch {
+    return { ok: true, msg: "" }; // 读取失败时不阻止启动
+  }
+}
+
 function json(data: any, status = 200, headers: Record<string, string> = {}) {
   return new Response(JSON.stringify(data), {
     status,
@@ -3073,6 +3097,9 @@ async function api(req: Request, url: URL): Promise<Response> {
   if (path === "server/start" && method === "POST") {
     const shards = listShards();
     if (!shards.length) return fail("当前存档没有任何世界分片");
+    // 资源检查
+    const res = checkResources();
+    if (!res.ok) return fail(res.msg, 200);
     const msgs: string[] = [];
     for (const s of shards) {
       if (await shardRunning(s.name)) { msgs.push(`${s.name}: 已在运行`); continue; }
@@ -3089,6 +3116,8 @@ async function api(req: Request, url: URL): Promise<Response> {
     const shards = listShards();
     for (const s of shards) await stopShard(s.name);
     await sleep(3000);
+    const res = checkResources();
+    if (!res.ok) return fail(res.msg, 200);
     const msgs: string[] = [];
     for (const s of shards) {
       const r = await startShard(s.name);
@@ -3559,13 +3588,13 @@ const server = Bun.serve({
         let png = result.png;
         const isFullUV = icon.u1 === 0 && icon.u2 === 1 && icon.v1 === 0 && icon.v2 === 1;
         if (!isFullUV) png = cropPNG(result, icon.u1, icon.u2, icon.v1, icon.v2);
-        // 缓存（限制总数防止内存溢出）
-        if (modIconPngCache.size > 500) {
-          // 简单 LRU：删除最早的四分之一
-          const keys = [...modIconPngCache.keys()].slice(0, 125);
+        // 缓存（限制总数 + 总量防止内存溢出，200 个约 2MB）
+        if (modIconPngCache.size > 200) {
+          const keys = [...modIconPngCache.keys()].slice(0, 50);
           for (const k of keys) modIconPngCache.delete(k);
         }
-        modIconPngCache.set(cacheKey, png);
+        // 限制单个缓存不超过 100KB
+        if (png.length < 100_000) modIconPngCache.set(cacheKey, png);
         return new Response(png, { status: 200, headers: { "Content-Type": "image/png", "Cache-Control": "public, max-age=604800" } });
       } catch {
         return new Response("Error", { status: 500 });
