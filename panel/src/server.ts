@@ -463,6 +463,10 @@ function screenSession(shard: string): string {
   return shard.toLowerCase() === "caves" ? "dst_caves" : "dst_master";
 }
 async function startShard(shard: string): Promise<string> {
+  // 计算内存上限：系统总内存 - 1GB 预留
+  const sysMem = getSystemMemory();
+  const memLimitMB = sysMem.total > 1024 ? sysMem.total - 1024 : sysMem.total;
+  const memLimitKB = memLimitMB * 1024;
   const args = ["screen", "-dmS", screenSession(shard), BIN, "-cluster", panelConfig.cluster, "-shard", shard];
   // 自定义存档根目录：通过 -persistent_storage_root + -conf_dir 告知服务端
   if (clusterRoot() !== DEFAULT_CLUSTER_ROOT) {
@@ -471,7 +475,10 @@ async function startShard(shard: string): Promise<string> {
     args.push("-persistent_storage_root", parent, "-conf_dir", conf);
   }
   if (panelConfig.mode === "offline") args.push("-offline");
-  const r = await run(args, { cwd: BIN_DIR });
+  // 通过 ulimit -v 限制进程虚拟内存上限，防止 DST 吃掉预留的 1GB
+  const env: Record<string, string> = { ...process.env };
+  if (memLimitKB > 0) env["BASH_ENV"] = ""; // 避免干扰
+  const r = await run(["sh", "-c", `ulimit -v ${memLimitKB} 2>/dev/null; exec screen -dmS ${screenSession(shard)} ${BIN} -cluster ${panelConfig.cluster} -shard ${shard}${clusterRoot() !== DEFAULT_CLUSTER_ROOT ? ` -persistent_storage_root ${clusterRoot().replace(/\/[^/]+$/, "")} -conf_dir ${clusterRoot().split("/").pop()}` : ""}${panelConfig.mode === "offline" ? " -offline" : ""}`], { cwd: BIN_DIR, env });
   return r.code === 0 ? "ok" : r.out;
 }
 async function stopShard(shard: string): Promise<void> {
