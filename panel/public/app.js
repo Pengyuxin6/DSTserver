@@ -1702,7 +1702,7 @@ async function pageServer() {
   <div class="card">
     <h3>服务器日志 <span class="hint" id="logHint">（实时刷新）</span></h3>
     <div class="btn-row"><button class="btn" id="logToggle">暂停刷新</button><span class="hint" id="logCount"></span></div>
-    <div class="logbox" id="serverLog" style="min-height:200px;max-height:none"></div>
+    <div class="logbox" id="serverLog" style="min-height:200px;max-height:480px;overflow-y:auto"></div>
   </div>`;
   const act = async (path, body = {}) => { const r = await api(path, { method: "POST", body }); toast(r.msg); setTimeout(pageServer, 1500); };
   // 多开解锁：用户确认内存/端口条件满足后，解除控制置灰

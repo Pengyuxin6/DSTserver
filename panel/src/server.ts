@@ -681,16 +681,13 @@ function clearAllClusterCache() {
   modAtlasCache.clear();
   modItemsCache.clear();
 }
-// 为缺少 server.ini 的既有世界文件夹补全配置（端口自动分配，避开所有存档已占用的端口）
+// 为缺少 server.ini 的既有世界文件夹补全配置（端口只在本存档内避让——同存档多世界必须不同端口；
+// 不看其他存档：新建/导入的世界固定拿默认端口，跨存档冲突仅黄色警告）
 function ensureServerIni(shard: string): void {
   const f = join(shardDir(shard), "server.ini");
   if (existsSync(f)) return;
   const used = new Set<number>();
-  try {
-    for (const c of readdirSync(clusterRoot())) {
-      try { if (statSync(join(clusterRoot(), c)).isDirectory()) for (const p of clusterPorts(c, c === panelConfig.cluster)) used.add(p.port); } catch {}
-    }
-  } catch {}
+  try { for (const p of clusterPorts(panelConfig.cluster, true)) used.add(p.port); } catch {}
   const alloc = (start: number) => { let p = start; while (used.has(p) && p < 65535) p++; used.add(p); return p; };
   const info = listShards().find((s) => s.name === shard);
   const isMaster = info ? info.isMaster : /^master$/i.test(shard);
@@ -3010,17 +3007,11 @@ async function api(req: Request, url: URL): Promise<Response> {
     if (existsSync(dir)) return fail("已存在同名存档: " + name);
     mkdirSync(join(dir, "Master"), { recursive: true });
     mkdirSync(join(dir, "Caves"), { recursive: true });
-    // 端口自动分配：首个存档拿经典默认端口（10889/11000/11001，与43服务器MyDediServer一致），其他存档只按显式配置的端口避让
-    const usedPorts = new Set<number>();
-    try {
-      for (const c of readdirSync(clusterRoot())) {
-        try { if (c !== name && statSync(join(clusterRoot(), c)).isDirectory()) for (const p of clusterPorts(c, false)) usedPorts.add(p.port); } catch {}
-      }
-    } catch {}
-    const alloc = (start: number) => { let p = start; while (usedPorts.has(p)) p++; usedPorts.add(p); return p; };
-    const masterPort = alloc(10889);
-    const mServer = alloc(11000), mSteam = alloc(27018), mAuth = alloc(8768);
-    const cServer = alloc(11001), cSteam = alloc(27019), cAuth = alloc(8769);
+    // 新建存档固定使用默认端口（与43服务器MyDediServer一致：防火墙按此放行，不做端口区分/避让；
+    // 多开冲突由端口设置中的黄色警告提示，用户自行决定是否修改）
+    const masterPort = 10889;
+    const mServer = 11000, mSteam = 27018, mAuth = 8768;
+    const cServer = 11001, cSteam = 27019, cAuth = 8769;
     writeFileSync(join(dir, "cluster.ini"), `[GAMEPLAY]\ngame_mode = survival\nmax_players = 6\npvp = false\npause_when_empty = true\nvote_kick_enabled = true\n\n[NETWORK]\ncluster_name = ${name}\ncluster_description = A dedicated server\ncluster_password =\n\n[MISC]\nconsole_enabled = true\n\n[SHARD]\nshard_enabled = true\nbind_ip = 127.0.0.1\nmaster_ip = 127.0.0.1\nmaster_port = ${masterPort}\ncluster_key = supersecretkey\n`);
     writeFileSync(join(dir, "cluster_token.txt"), "# 在此粘贴 Klei 服务器令牌（必须填写才能开服）\n");
     writeFileSync(join(dir, "Master", "server.ini"), `[NETWORK]\nserver_port = ${mServer}\n\n[SHARD]\nis_master = true\n\n[STEAM]\nmaster_server_port = ${mSteam}\nauthentication_port = ${mAuth}\n\n[ACCOUNT]\nencode_user_path = true\n`);
@@ -3106,16 +3097,9 @@ async function api(req: Request, url: URL): Promise<Response> {
     // 附加层 = 超出经典「地上+地下」组合的多开层，面板不维护其设置
     const isExtraLayer = !isMaster && (shards.length >= 2 || (wantMaster && hasMaster));
     // 自动分配端口：默认拿经典端口（地上 11000 / 地下 11001）；
-    // 本存档内其他分片按有效值避让（隐式默认也算），其他存档只按显式配置的端口避让
+    // 只在本存档内避让（同存档多世界必须不同端口），不看其他存档——跨存档冲突仅黄色警告
     const usedPorts = new Set<number>();
-    try {
-      for (const c of readdirSync(clusterRoot())) {
-        try {
-          if (!statSync(join(clusterRoot(), c)).isDirectory()) continue;
-          for (const p of clusterPorts(c, c === panelConfig.cluster)) usedPorts.add(p.port);
-        } catch {}
-      }
-    } catch {}
+    try { for (const p of clusterPorts(panelConfig.cluster, true)) usedPorts.add(p.port); } catch {}
     const alloc = (start: number) => { let p = start; while (usedPorts.has(p)) p++; usedPorts.add(p); return p; };
     const serverPort = alloc(wantMaster ? 11000 : 11001);
     const steamPort = alloc(isMaster ? 27018 : 27019);
