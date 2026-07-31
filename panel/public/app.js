@@ -392,10 +392,10 @@ async function pageBasic() {
       ${(d.clusterRoots || []).length ? `<select id="clusterRootHist" title="切换到历史使用过的存档位置"><option value="">历史位置…</option>${d.clusterRoots.map((r) => `<option value="${esc(r)}" ${r === d.clusterRoot ? "selected" : ""}>${esc(r)}</option>`).join("")}</select>` : ""}
       <button class="btn" id="clusterRootDefault" type="button" title="${esc(d.defaultClusterRoot || "")}">科雷默认位置</button>
       <span class="hint">默认用科雷存档位置；也可自定义绝对路径（勿含中文），用过的位置会记录可随时切换</span></div>
-    ${d.isWin ? `<div class="row"><label>客户端位置</label><input type="text" id="clientDirInput" value="${esc(d.clientDir || "")}" size="46" placeholder="留空 = 自动检测（如 D:\\steam\\steamapps\\common\\Don't Starve Together）">
+    <div class="row"><label>客户端位置</label><input type="text" id="clientDirInput" value="${esc(d.clientDir || "")}" size="46" placeholder="留空 = 自动检测（如 ${d.isWin ? "D:\\steam\\steamapps\\common\\Don't Starve Together" : "~/.steam/steam/steamapps/common/Don't Starve Together"}）">
       <button class="btn" id="clientDirAutoBtn" type="button" ${d.clientAuto ? "" : "disabled"}>自动检测</button>
-      <span class="hint">DST 客户端安装目录，用于直接读取客户端模组文件夹</span></div>
-    ${d.clientAuto ? `<div class="row"><label></label><span class="hint" style="font-family:monospace;line-height:1.7">检测到客户端: ${esc(d.clientAuto.dir)}<br>客户端模组: ${esc(d.clientAuto.modsDir)}<br>创意工坊缓存: ${esc(d.clientAuto.workshopDir)}</span></div>` : `<div class="row"><label></label><span class="hint">未检测到本机 DST 客户端（安装后可使用「本地模组库」直接读取/复用客户端模组）</span></div>`}` : ""}
+      <span class="hint">DST 客户端（饥荒联机版游戏本体）安装目录，可为空；用于直接读取客户端 mods 文件夹与创意工坊缓存的模组来开房间</span></div>
+    ${d.clientAuto ? `<div class="row"><label></label><span class="hint" style="font-family:monospace;line-height:1.7">检测到客户端: ${esc(d.clientAuto.dir)}<br>客户端模组: ${esc(d.clientAuto.modsDir)}<br>创意工坊缓存: ${esc(d.clientAuto.workshopDir)}</span></div>` : `<div class="row"><label></label><span class="hint">未检测到本机 DST 客户端（安装客户端或手动填写位置后，可使用「本地模组库」直接读取/复用客户端模组）</span></div>`}
     <div class="row"><label>模组存放目录</label><input type="text" id="modsDirInput" value="${esc(d.modsDir || "")}" size="46"> <span class="hint">模组统一存放目录（绝对路径），改动后需迁移或重新下载模组</span></div>
     <div class="row"><label>服务器目录</label><input type="text" id="serverDir" value="${esc(d.serverDir)}" size="46"> <span class="hint">修改后保存并重启面板生效</span></div>
   </div>
@@ -432,7 +432,6 @@ async function pageBasic() {
     <div class="row"><label>开启投票</label><input type="checkbox" id="vote_kick_enabled" ${ini.vote_kick_enabled === "true" ? "checked" : ""}></div>
     <div class="row"><label>无人自动暂停</label><input type="checkbox" id="pause_when_empty" ${ini.pause_when_empty === "true" ? "checked" : ""}> <span class="hint">没有玩家在线时暂停世界时间流逝（省资源，但作物/生物也停止）</span></div>
     <div class="row"><label>是否为内测</label><input type="checkbox" id="beta" ${d.beta ? "checked" : ""}> <label>内测分支</label><input type="text" id="betaBranch" value="${esc(d.betaBranch || "")}" size="16" maxlength="64" placeholder="留空=默认分支"> <span class="hint">开启后 update_dst.sh 将用 -beta 分支更新服务端</span></div>
-    <div class="row"><label>身份看门狗</label><span id="guardStatus" class="hint">查询中…</span> <button class="btn" id="guardToggle">…</button> <span class="hint">每分钟清理非 steam 身份的面板/服务端进程并修复文件属主</span></div>
     <div class="btn-row"><button class="btn primary" id="save">保存</button></div>
   </div>`;
   // 存档位置：历史记录下拉 + 科雷默认位置 + 客户端自动检测
@@ -524,20 +523,6 @@ async function pageBasic() {
     catch { toast("复制失败，请手动复制", true); }
     document.body.removeChild(ta);
   };
-  // 看门狗开关
-  const loadGuard = async () => {
-    const g = await apiQuiet("guard");
-    if (!g) { $("#guardStatus").textContent = "状态未知"; return; }
-    $("#guardStatus").innerHTML = g.data.running ? '<span class="tag on">运行中</span>' : '<span class="tag">已关闭</span>';
-    $("#guardToggle").textContent = g.data.running ? "关闭看门狗" : "开启看门狗";
-    $("#guardToggle").onclick = async () => {
-      if (g.data.running && !(await dlgConfirm("确定关闭看门狗？关闭后非 steam 身份的面板/服务端进程不再被自动清理。"))) return;
-      const r = await api("guard", { method: "POST", body: { on: !g.data.running } });
-      toast(r.msg);
-      loadGuard();
-    };
-  };
-  loadGuard();
 }
 
 // ============ 2. 编辑世界 ============
@@ -654,6 +639,7 @@ async function pageWorld() {
         <div class="btn-row" style="margin-top:12px"><button class="btn primary" id="saveOv">保存世界设置</button></div>
         <div class="hint">点击设置项查看详情并修改。每设置完一个世界后，点击保存。</div>
       </div>
+      <div id="vanillaWorldBox"></div>
       <div id="modWorldBox"></div>
     </div>
   </div>`;
@@ -757,6 +743,33 @@ async function pageWorld() {
   $("#wRefreshSaves").onclick = renderWSaves;
   renderWSaves(); // 进入编辑世界页自动刷新存档列表
 }
+// 原版世界的「世界类型与模式」卡片：基础世界也启用模式难度设置（生存/轻松/无尽等），
+// 模组世界/附加层不显示（模组世界由「模组世界设置」卡片提供）
+function renderVanillaWorldCard(hide) {
+  const box = $("#vanillaWorldBox");
+  if (!box) return;
+  if (hide || !worldState.shard) { box.innerHTML = ""; return; }
+  const isMaster = !!worldState.isMaster;
+  const wgCur = worldState.presets?.worldgen || (isMaster ? "SURVIVAL_TOGETHER" : "DST_CAVE");
+  const stCur = worldState.presets?.settings || (isMaster ? "SURVIVAL_TOGETHER" : "DST_CAVE");
+  const modes = isMaster
+    ? [["SURVIVAL_TOGETHER", "生存"], ["RELAXED", "轻松"], ["ENDLESS", "无尽"], ["WILDERNESS", "荒野"], ["LIGHTS_OUT", "暗无天日"], ["SURVIVAL_TOGETHER_CLASSIC", "经典（无巨人）"], ["SURVIVAL_DEFAULT_PLUS", "森林Plus"], ["TERRARIA", "泰拉瑞亚"]]
+    : [["DST_CAVE", "洞穴"], ["DST_CAVE_PLUS", "洞穴Plus"], ["TERRARIA_CAVE", "泰拉洞穴"]];
+  const wgName = isMaster ? "森林（地上）" : "洞穴（地下）";
+  box.innerHTML = `<div class="card">
+    <h3>世界类型与模式 <span class="hint">原版世界</span></h3>
+    <div class="row"><label>世界类型</label><span><b>${wgName}</b>（${esc(wgCur)}）</span> <span class="hint">原版世界类型固定；想玩海难/猪镇等请在 mod设置 启用地图模组</span></div>
+    <div class="row"><label>模式难度</label><select id="vwMode">${modes.map(([id, cn]) => `<option value="${id}" ${stCur === id ? "selected" : ""}>${cn}（${id}）</option>`).join("")}</select>
+    <button class="btn primary" id="vwModeApply">应用模式</button> <span class="hint">生存/轻松/无尽等，会同步基本设置的游戏模式，重新生成世界后完全生效</span></div>
+  </div>`;
+  $("#vwModeApply").onclick = async () => {
+    const v = $("#vwMode").value;
+    const r = await api("world/overrides", { method: "POST", body: { shard: worldState.shard, settings_preset: v, overrides: {} } });
+    toast(r.msg);
+    loadWorldOverrides();
+  };
+}
+
 async function loadWorldOverrides() {
   const j = await api("world/overrides?shard=" + encodeURIComponent(worldState.shard));
   worldState.overrides = j.data.overrides;
@@ -771,6 +784,8 @@ async function loadWorldOverrides() {
   // 兼容型模组（三合一等在原版基础上扩展）保留原版设置 + 额外显示模组设置
   const hasReplaceWorldgenMod = !!j.data.hasReplaceWorldgenMod;
   const isModWorld = (!!preset && !["SURVIVAL_TOGETHER", "DST_CAVE", "LAVAARENA", "QUAGMIRE", ""].includes(preset)) || hasReplaceWorldgenMod;
+  // 原版世界显示「世界类型与模式」卡片；模组世界/附加层隐藏
+  renderVanillaWorldCard(isModWorld || isExtraShard);
   const filterRow = $("#optFilter")?.closest(".row");
   const tableWrap = $("#optTable")?.parentElement;
   const saveRow = $("#saveOv")?.closest(".btn-row");
@@ -986,7 +1001,7 @@ async function renderModsLocal() {
   modsState.mods = j.data.mods;
   modsState.checked = new Set(modsState.mods.filter((m) => m.enabled).map((m) => m.id));
   body.innerHTML = `
-  ${j.data.isWin ? '<div id="localSteamBox"></div>' : ""}
+  <div id="localSteamBox"></div>
   <div class="card">
     <h3>本地Mod ${j.data.steamOk ? "" : '<span class="hint">（Steam API 不可用，仅显示本地信息）</span>'}</h3>
     <div class="btn-row">
@@ -1082,10 +1097,10 @@ async function renderModsLocal() {
     toast(`补全完成：${ok}/${need.length} 个成功`);
     renderModsLocal();
   };
-  // Windows 版：本地 Steam 模组库（一键复用本机模组开房间）
-  if (j.data.isWin) renderLocalSteamBox(j.data.modsDir || "");
+  // 本地 Steam 模组库（一键复用本机客户端模组开房间）
+  renderLocalSteamBox(j.data.modsDir || "");
 }
-// Windows 本地模组库卡片：扫描本机 Steam 已下载模组，显示来源地址，一键复用/链接加载到面板模组目录
+// 本地模组库卡片：扫描本机 Steam 已下载模组，显示来源地址，一键复用/链接加载到面板模组目录
 async function renderLocalSteamBox(modsDir) {
   const box = $("#localSteamBox");
   if (!box) return;
@@ -2539,7 +2554,7 @@ const HELP_GUIDE = `
   <h3>📖 饥荒联机版（DST）专用服务器：从零开服到日常运维</h3>
   <h4>一、环境与目录</h4>
   <table class="grid"><thead><tr><th>项目</th><th>路径 / 说明</th></tr></thead><tbody>
-    <tr><td>运行用户</td><td><code>steam</code>（所有服务进程都应以 steam 身份运行，root 启动会被看门狗清理）</td></tr>
+    <tr><td>运行用户</td><td><code>steam</code>（所有服务进程都应以 steam 身份运行，避免 root 启动造成文件属主混乱）</td></tr>
     <tr><td>DST 服务端</td><td><code>/home/steam/dst_server</code>（可执行文件在 <code>bin64/</code> 下）</td></tr>
     <tr><td>存档根目录</td><td><code>/home/steam/.klei/DoNotStarveTogether</code>，每个存档（cluster）一个文件夹</td></tr>
     <tr><td>模组统一目录</td><td><code>/home/steam/dst_mods/&lt;模组ID&gt;/</code>（全机共用一份，不按存档区分）</td></tr>
@@ -2636,9 +2651,6 @@ ufw reload</div>
     <tr><td>热带体验（海难哈姆雷特生态 / 三合一）</td><td>1505270912</td><td>生态叠加（不替换世界，用 mod设置 页配置）</td></tr>
     <tr><td>忒修斯之船（轻量版三合一）</td><td>2986194136</td><td>生态叠加（同上）</td></tr>
   </tbody></table>
-
-  <h4>九、身份看门狗（dst-steam-guard）</h4>
-  <p>为防止面板/服务端被 root 身份误启动（会造成文件属主混乱、EACCES 报错），系统装有看门狗：每 60 秒杀掉<b>非 steam 用户</b>运行的面板 / DST 服务端 / screen 进程，并把相关目录下 root 属主的文件改回 steam。可在「基本设置」页开关。</p>
 </div>`;
 
 // ---- 章节二：面板各功能详细说明 ----
@@ -2649,7 +2661,7 @@ const HELP_PANEL = `
   <ul>
     <li><b>路径</b>：存档根目录 / 模组存放目录 / 服务器目录，改动后按提示重启生效；</li>
     <li><b>存档列表</b>：一台服务器可建多个存档（cluster），点「选择」切换当前控制的存档，支持新建 / 重命名 / 删除（删除不可恢复）；</li>
-    <li><b>当前存档设置</b>：房间名、描述、密码、游戏模式、人数、PVP、投票、无人暂停、服务器令牌（可显示/复制）、内测分支、身份看门狗开关。保存后重启服务器生效。</li>
+    <li><b>当前存档设置</b>：房间名、描述、密码、游戏模式、人数、PVP、投票、无人暂停、服务器令牌（可显示/复制）、内测分支。保存后重启服务器生效。</li>
   </ul>
   <h4>编辑世界</h4>
   <ul>

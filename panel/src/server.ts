@@ -192,9 +192,14 @@ function removePathOrLink(p: string): void {
 // 定位本机 Steam 安装/库根目录（含 steamapps 子目录的目录）：
 // 1. 注册表 SteamPath（最可靠） 2. 默认位置 3. 各盘符常见目录（D:\steam、E:\SteamLibrary 等）
 function steamRoots(): string[] {
-  if (!IS_WIN) return [];
   const roots: string[] = [];
   const push = (p: string) => { try { if (p && existsSync(join(p, "steamapps")) && !roots.includes(p)) roots.push(p); } catch {} };
+  if (!IS_WIN) {
+    // Linux：常见 Steam 安装位置
+    const home = process.env.HOME || "";
+    for (const cand of [join(home, ".steam", "steam"), join(home, ".local", "share", "Steam"), join(home, "Steam"), "/usr/lib/steam", "/opt/steam"]) push(cand);
+    return roots;
+  }
   for (const key of ["HKCU\\Software\\Valve\\Steam", "HKLM\\SOFTWARE\\WOW6432Node\\Valve\\Steam", "HKLM\\SOFTWARE\\Valve\\Steam"]) {
     try {
       const r = Bun.spawnSync(["reg", "query", key, "/v", "SteamPath"], { stdout: "pipe", stderr: "ignore" } as any);
@@ -228,7 +233,6 @@ function steamLibs(): string[] {
 // 检测 DST 客户端安装位置（用于直接读取客户端模组文件夹）。
 // 返回：客户端根目录 / bin / 客户端mods / 创意工坊缓存（322330）；用户手动设置的优先
 function detectDstClient(): { dir: string; binDir: string; modsDir: string; workshopDir: string } | null {
-  if (!IS_WIN) return null;
   if (panelConfig.clientDir && existsSync(panelConfig.clientDir)) {
     const dir = panelConfig.clientDir;
     // 客户端根目录上两级即 steamapps（.../steamapps/common/Don't Starve Together）
@@ -245,7 +249,6 @@ function detectDstClient(): { dir: string; binDir: string; modsDir: string; work
 }
 // 扫描本机 Steam 库中的 DST 模组（创意工坊缓存 + 游戏/专用服务器的 mods 目录），可直接复用开房间
 function scanLocalSteamMods(): { id: string; source: string; path: string; hasInfo: boolean }[] {
-  if (!IS_WIN) return [];
   const out: { id: string; source: string; path: string; hasInfo: boolean }[] = [];
   const seen = new Set<string>();
   const libs = steamLibs();
@@ -3597,7 +3600,6 @@ async function api(req: Request, url: URL): Promise<Response> {
   }
   // ===== Windows 本地模组复用（本地模组直接开房间） =====
   if (path === "mods/local-steam" && method === "GET") {
-    if (!IS_WIN) return fail("该功能仅 Windows 版可用");
     // 标注每个本地模组在存放目录中的状态：linked=链接加载中 / inStore=已复用副本
     const store = modsStoreDir();
     const mods = scanLocalSteamMods().map((m) => {
@@ -3608,9 +3610,8 @@ async function api(req: Request, url: URL): Promise<Response> {
     });
     return ok({ mods, modsDir: store, client: detectDstClient() });
   }
-  // 链接加载：在模组存放目录建立目录联接(Junction)直接指向客户端模组文件夹，不复制、不占磁盘、随 Steam 自动更新
+  // 链接加载：在模组存放目录建立目录联接(Junction)/符号链接直接指向客户端模组文件夹，不复制、不占磁盘、随 Steam 自动更新
   if (path === "mods/link-local" && method === "POST") {
-    if (!IS_WIN) return fail("该功能仅 Windows 版可用");
     const b = await bodyJson(req);
     const id = String(b.id || "");
     const src = String(b.path || "");
@@ -3628,17 +3629,16 @@ async function api(req: Request, url: URL): Promise<Response> {
       }
     } catch {}
     try {
-      symlinkSync(src, dst, "junction");
+      symlinkSync(src, dst, IS_WIN ? "junction" : "dir");
     } catch (e: any) {
-      return fail("创建目录联接失败: " + (e?.message || e));
+      return fail("创建链接失败: " + (e?.message || e));
     }
     refreshLinkManifest();
     clearModCaches();
     return ok(null, `已链接加载模组 ${id} → 直接读取 ${src}（不占用额外磁盘）`);
   }
-  // 取消链接：只移除目录联接，不删客户端文件
+  // 取消链接：只移除链接本身，不删客户端文件
   if (path === "mods/unlink-local" && method === "POST") {
-    if (!IS_WIN) return fail("该功能仅 Windows 版可用");
     const b = await bodyJson(req);
     const id = String(b.id || "");
     if (!validId(id)) return fail("非法模组 ID");
@@ -3652,7 +3652,6 @@ async function api(req: Request, url: URL): Promise<Response> {
     return ok(null, `已取消模组 ${id} 的链接（客户端文件未受影响）`);
   }
   if (path === "mods/import-local" && method === "POST") {
-    if (!IS_WIN) return fail("该功能仅 Windows 版可用");
     const b = await bodyJson(req);
     const id = String(b.id || "");
     const src = String(b.path || "");
@@ -3734,20 +3733,6 @@ async function api(req: Request, url: URL): Promise<Response> {
     if (!isJpeg && !isPng) return fail("只支持 JPG/PNG 图片");
     writeFileSync(join(PUBLIC_DIR, "bg", "custom.jpg"), Buffer.from(buf));
     return ok(null, "自定义背景图已上传（登录页背景选「自定义」即可使用）");
-  }
-
-  // ===== 身份看门狗（dst-steam-guard）开关 =====
-  if (path === "guard" && method === "GET") {
-    const active = await run(["sudo", "-n", "systemctl", "is-active", "dst-steam-guard.timer"]);
-    const enabled = await run(["sudo", "-n", "systemctl", "is-enabled", "dst-steam-guard.timer"]);
-    return ok({ running: active.out.trim() === "active", enabled: enabled.out.trim() === "enabled" });
-  }
-  if (path === "guard" && method === "POST") {
-    const b = await bodyJson(req);
-    const on = !!b.on;
-    const r = await run(["sudo", "-n", "systemctl", on ? "start" : "stop", "dst-steam-guard.timer"]);
-    if (r.code !== 0) return fail("操作失败: " + r.out.slice(-300));
-    return ok(null, on ? "看门狗已开启（每分钟巡检，非 steam 进程会被清理）" : "看门狗已关闭");
   }
 
   // ===== 服务器管理 =====

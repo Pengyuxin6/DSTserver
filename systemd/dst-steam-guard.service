@@ -1,6 +1,0 @@
-[Unit]
-Description=DST steam-identity guard (kill non-steam panel/server processes)
-
-[Service]
-Type=oneshot
-ExecStart=/usr/local/sbin/dst-steam-guard.sh

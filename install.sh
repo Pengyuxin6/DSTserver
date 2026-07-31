@@ -240,7 +240,7 @@ sed -i "s/^const PORT = [0-9]*;/const PORT = ${PANEL_PORT};/" "$PANEL_DIR/src/se
 chown -R "$DST_USER:$DST_USER" "$PANEL_DIR"
 ok "面板安装完成"
 
-# ---------- 7. 运维脚本 / systemd / sudoers / 看门狗 ----------
+# ---------- 7. 运维脚本 / systemd ----------
 log "步骤 6/8：安装运维脚本与系统服务…"
 cp "$SCRIPT_DIR/scripts/"*.sh "$DST_HOME/"
 chmod +x "$DST_HOME/"*.sh
@@ -249,16 +249,10 @@ chown "$DST_USER:$DST_USER" "$DST_HOME/"*.sh
 # dst-panel 服务（替换端口占位）
 sed "s/ExecStart=.*/ExecStart=\/usr\/local\/bin\/bun run src\/server.ts/; s/User=.*/User=${DST_USER}/; s/Group=.*/Group=${DST_USER}/; s|WorkingDirectory=.*|WorkingDirectory=${PANEL_DIR}|" \
   "$SCRIPT_DIR/systemd/dst-panel.service" > /etc/systemd/system/dst-panel.service
-cp "$SCRIPT_DIR/systemd/dst-steam-guard.service" "$SCRIPT_DIR/systemd/dst-steam-guard.timer" /etc/systemd/system/
-sed "s|/home/steam|$DST_HOME|g" "$SCRIPT_DIR/systemd/dst-steam-guard.sh" > /usr/local/sbin/dst-steam-guard.sh
-chmod +x /usr/local/sbin/dst-steam-guard.sh
-# sudoers（允许运行用户控制看门狗与查看状态）
-sed "s/^steam /${DST_USER} /" "$SCRIPT_DIR/systemd/sudoers.dst-panel" > /etc/sudoers.d/dst-panel
-chmod 440 /etc/sudoers.d/dst-panel
 
 systemctl daemon-reload
-systemctl enable --now dst-panel dst-steam-guard.timer >/dev/null 2>&1
-ok "系统服务已启动（dst-panel + dst-steam-guard.timer）"
+systemctl enable --now dst-panel >/dev/null 2>&1
+ok "系统服务已启动（dst-panel）"
 
 # ---------- 8. nginx 映射（可选） ----------
 if [ "$WITH_NGINX" -eq 1 ]; then
