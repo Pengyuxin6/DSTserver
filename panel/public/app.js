@@ -388,7 +388,14 @@ async function pageBasic() {
   content.innerHTML = `
   <div class="card">
     <h3>路径</h3>
-    <div class="row"><label>存档根目录</label><input type="text" id="clusterRootInput" value="${esc(d.clusterRoot)}" size="46"> <span class="hint">绝对路径，请不要包含中文；改动后新存档将建到新目录</span></div>
+    <div class="row"><label>存档根目录</label><input type="text" id="clusterRootInput" value="${esc(d.clusterRoot)}" size="46">
+      ${(d.clusterRoots || []).length ? `<select id="clusterRootHist" title="切换到历史使用过的存档位置"><option value="">历史位置…</option>${d.clusterRoots.map((r) => `<option value="${esc(r)}" ${r === d.clusterRoot ? "selected" : ""}>${esc(r)}</option>`).join("")}</select>` : ""}
+      <button class="btn" id="clusterRootDefault" type="button" title="${esc(d.defaultClusterRoot || "")}">科雷默认位置</button>
+      <span class="hint">默认用科雷存档位置；也可自定义绝对路径（勿含中文），用过的位置会记录可随时切换</span></div>
+    ${d.isWin ? `<div class="row"><label>客户端位置</label><input type="text" id="clientDirInput" value="${esc(d.clientDir || "")}" size="46" placeholder="留空 = 自动检测（如 D:\\steam\\steamapps\\common\\Don't Starve Together）">
+      <button class="btn" id="clientDirAutoBtn" type="button" ${d.clientAuto ? "" : "disabled"}>自动检测</button>
+      <span class="hint">DST 客户端安装目录，用于直接读取客户端模组文件夹</span></div>
+    ${d.clientAuto ? `<div class="row"><label></label><span class="hint" style="font-family:monospace;line-height:1.7">检测到客户端: ${esc(d.clientAuto.dir)}<br>客户端模组: ${esc(d.clientAuto.modsDir)}<br>创意工坊缓存: ${esc(d.clientAuto.workshopDir)}</span></div>` : `<div class="row"><label></label><span class="hint">未检测到本机 DST 客户端（安装后可使用「本地模组库」直接读取/复用客户端模组）</span></div>`}` : ""}
     <div class="row"><label>模组存放目录</label><input type="text" id="modsDirInput" value="${esc(d.modsDir || "")}" size="46"> <span class="hint">模组统一存放目录（绝对路径），改动后需迁移或重新下载模组</span></div>
     <div class="row"><label>服务器目录</label><input type="text" id="serverDir" value="${esc(d.serverDir)}" size="46"> <span class="hint">修改后保存并重启面板生效</span></div>
   </div>
@@ -428,6 +435,13 @@ async function pageBasic() {
     <div class="row"><label>身份看门狗</label><span id="guardStatus" class="hint">查询中…</span> <button class="btn" id="guardToggle">…</button> <span class="hint">每分钟清理非 steam 身份的面板/服务端进程并修复文件属主</span></div>
     <div class="btn-row"><button class="btn primary" id="save">保存</button></div>
   </div>`;
+  // 存档位置：历史记录下拉 + 科雷默认位置 + 客户端自动检测
+  const histSel = $("#clusterRootHist");
+  if (histSel) histSel.onchange = () => { if (histSel.value) $("#clusterRootInput").value = histSel.value; };
+  const rootDefBtn = $("#clusterRootDefault");
+  if (rootDefBtn) rootDefBtn.onclick = () => { $("#clusterRootInput").value = d.defaultClusterRoot || ""; toast("已填入科雷默认存档位置，点「保存」生效"); };
+  const cliAutoBtn = $("#clientDirAutoBtn");
+  if (cliAutoBtn) cliAutoBtn.onclick = () => { if (d.clientAuto) { $("#clientDirInput").value = d.clientAuto.dir; toast("已填入自动检测到的客户端位置，点「保存」生效"); } };
   $$("#clusterTable [data-sel]").forEach((b) => (b.onclick = async () => {
     const r = await api("cluster", { method: "POST", body: { cluster: b.dataset.sel } });
     toast(r.msg); route();
@@ -468,6 +482,9 @@ async function pageBasic() {
       modsDir: $("#modsDirInput").value,
       betaBranch: $("#betaBranch").value.trim(),
     };
+    // Windows：客户端位置（元素存在时才提交，留空=清除手动设置回到自动检测）
+    const cliInput = $("#clientDirInput");
+    if (cliInput) body.clientDir = cliInput.value.trim();
     // 凭证留空=保持不变，填了=覆盖
     const pwd = $("#cluster_password").value;
     if (pwd) body.cluster_password = pwd;
@@ -643,7 +660,7 @@ async function pageWorld() {
     div.className = "item" + (worldState.shard === s.name ? " sel" : "");
     // 经典两层 = Master(主世界)+Caves；其余为附加层（多开层），面板不维护其设置
     const isExtra = s.name !== "Master" && s.name !== "Caves";
-    div.innerHTML = `<span class="status-dot ${s.running ? "on" : "off"}"></span>#${i + 1} ${esc(s.name)}（${s.isMaster ? "地上·主世界" : "地下"}，端口 ${esc(s.port)}）${isExtra ? ' <span class="tag warn">附加层·不维护</span>' : ""}`;
+    div.innerHTML = `<span class="status-dot ${s.running ? "on" : "off"}"></span>#${i + 1} ${esc(s.name)}（${s.isMaster ? "地上·主世界" : "地下"}${s.port ? "，端口 " + esc(s.port) : ""}）${isExtra ? ' <span class="tag warn">附加层·不维护</span>' : ""}${s.hasIni === false ? ' <span class="tag warn">客户端世界·启动时自动补全配置</span>' : ""}`;
     div.onclick = () => { worldState.shard = s.name; worldState.selKey = null; loadWorldOverrides(); pageWorldHighlight(); };
     wlist.appendChild(div);
   });
@@ -1045,7 +1062,7 @@ async function renderModsLocal() {
   // Windows 版：本地 Steam 模组库（一键复用本机模组开房间）
   if (j.data.isWin) renderLocalSteamBox(j.data.modsDir || "");
 }
-// Windows 本地模组库卡片：扫描本机 Steam 已下载模组，显示来源地址，一键复用到面板模组目录
+// Windows 本地模组库卡片：扫描本机 Steam 已下载模组，显示来源地址，一键复用/链接加载到面板模组目录
 async function renderLocalSteamBox(modsDir) {
   const box = $("#localSteamBox");
   if (!box) return;
@@ -1053,17 +1070,28 @@ async function renderLocalSteamBox(modsDir) {
   const j = await apiQuiet("mods/local-steam");
   if (!j || !j.data) { box.innerHTML = ""; return; }
   const mods = j.data.mods || [];
+  const client = j.data.client;
+  const statusTag = (m) =>
+    (m.hasInfo ? '<span class="tag on">完整</span>' : '<span class="tag warn">缺modinfo</span>') +
+    (m.linked ? ' <span class="tag on">链接加载中</span>' : m.inStore ? ' <span class="tag">已复用</span>' : "");
+  const actionBtns = (m) => {
+    if (m.linked) return `<button class="btn danger" data-unlink="${esc(m.id)}">取消链接</button>`;
+    return `<button class="btn" data-link="${esc(m.id)}" data-path="${esc(m.path)}" title="建立目录联接直接读取客户端文件夹，不占磁盘、随Steam更新" ${m.hasInfo && !m.inStore ? "" : "disabled"}>链接加载</button>
+      <button class="btn primary" data-imp="${esc(m.id)}" data-path="${esc(m.path)}" title="复制模组文件到服务器模组目录（含 SOURCE.txt 标明来源）" ${m.hasInfo ? "" : "disabled"}>复用(复制)</button>`;
+  };
   const inner = !mods.length
     ? '<div class="hint">未在本机 Steam 库中找到已下载的 DST 模组（可先在游戏里订阅下载，再来这里复用）。</div>'
     : `<div style="max-height:260px;overflow-y:auto"><table class="grid"><thead><tr><th>ID</th><th>来源（本机地址）</th><th>状态</th><th>操作</th></tr></thead><tbody>` +
       mods.map((m) => `<tr><td>${esc(m.id)}</td><td style="font-size:12px">${esc(m.source)}<div class="hint" style="font-family:monospace;word-break:break-all">${esc(m.path)}</div></td>
-        <td>${m.hasInfo ? '<span class="tag on">完整</span>' : '<span class="tag warn">缺modinfo</span>'}</td>
-        <td><button class="btn primary" data-imp="${esc(m.id)}" data-path="${esc(m.path)}" ${m.hasInfo ? "" : "disabled"}>复用到服务器</button></td></tr>`).join("") +
+        <td>${statusTag(m)}</td>
+        <td style="white-space:nowrap">${actionBtns(m)}</td></tr>`).join("") +
       `</tbody></table></div>`;
   box.innerHTML = `<div class="card">
-    <h3>本地模组库 <span class="hint">（Windows 本机 Steam 模组，可直接复用开房间）</span></h3>
-    <div class="hint" style="margin-bottom:8px">模组统一存放目录：<b style="font-family:monospace">${esc(j.data.modsDir || modsDir)}</b>
-      <button class="btn" id="openModsDir">打开文件夹</button> ｜ 复用后模组内含 SOURCE.txt 标明来源地址</div>
+    <h3>本地模组库 <span class="hint">（Windows 本机客户端模组，可直接读取或复用开房间）</span></h3>
+    <div class="hint" style="margin-bottom:6px">模组统一存放目录：<b style="font-family:monospace">${esc(j.data.modsDir || modsDir)}</b>
+      <button class="btn" id="openModsDir">打开文件夹</button></div>
+    ${client ? `<div class="hint" style="margin-bottom:8px">客户端位置：<b style="font-family:monospace">${esc(client.dir)}</b> ｜ 客户端模组: <span style="font-family:monospace">${esc(client.modsDir)}</span> ｜ 创意工坊缓存: <span style="font-family:monospace">${esc(client.workshopDir)}</span></div>` : ""}
+    <div class="hint" style="margin-bottom:8px">「链接加载」= 直接读取客户端模组文件夹（目录联接，不占磁盘、随 Steam 自动更新，清单见存放目录的 _链接模组来源.txt）；「复用(复制)」= 复制一份到服务器（含 SOURCE.txt 标明来源）</div>
     ${inner}</div>`;
   $("#openModsDir").onclick = async () => {
     const r = await apiQuiet("util/open-folder", { method: "POST", body: { which: "mods" } });
@@ -1072,6 +1100,16 @@ async function renderLocalSteamBox(modsDir) {
   $$("#localSteamBox [data-imp]").forEach((b) => (b.onclick = async () => {
     b.disabled = true;
     const r = await apiQuiet("mods/import-local", { method: "POST", body: { id: b.dataset.imp, path: b.dataset.path } });
+    if (r) { toast(r.msg, !r.ok); if (r.ok) renderModsLocal(); else b.disabled = false; }
+  }));
+  $$("#localSteamBox [data-link]").forEach((b) => (b.onclick = async () => {
+    b.disabled = true;
+    const r = await apiQuiet("mods/link-local", { method: "POST", body: { id: b.dataset.link, path: b.dataset.path } });
+    if (r) { toast(r.msg, !r.ok); if (r.ok) renderModsLocal(); else b.disabled = false; }
+  }));
+  $$("#localSteamBox [data-unlink]").forEach((b) => (b.onclick = async () => {
+    b.disabled = true;
+    const r = await apiQuiet("mods/unlink-local", { method: "POST", body: { id: b.dataset.unlink } });
     if (r) { toast(r.msg, !r.ok); if (r.ok) renderModsLocal(); else b.disabled = false; }
   }));
 }

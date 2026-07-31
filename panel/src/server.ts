@@ -2,7 +2,7 @@
 // Linux: bun run src/server.ts  (监听 127.0.0.1:5323)
 // Windows: bun run src/server.ts 或打包后的 DSTserver.exe（进程直连模式，无需 screen）
 import { createHmac, createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, rmSync, renameSync, statSync, lstatSync, symlinkSync, readlinkSync, unlinkSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, rmSync, renameSync, statSync, lstatSync, symlinkSync, readlinkSync, unlinkSync, rmdirSync } from "node:fs";
 import { join, basename, dirname } from "node:path";
 import { gzipSync } from "node:zlib";
 import os from "node:os";
@@ -178,12 +178,19 @@ function copyDirSync(src: string, dst: string): void {
     else writeFileSync(d, readFileSync(s));
   }
 }
-// 扫描本机 Steam 库中的 DST 模组（创意工坊缓存 + 游戏/专用服务器的 mods 目录），可直接复用开房间
-function scanLocalSteamMods(): { id: string; source: string; path: string; hasInfo: boolean }[] {
-  if (!IS_WIN) return [];
-  const out: { id: string; source: string; path: string; hasInfo: boolean }[] = [];
-  const seen = new Set<string>();
-  // 解析 Steam 库目录：默认库 + libraryfolders.vdf 里的附加库
+// 删除路径：目录联接/符号链接只移除链接本身、绝不动目标内容。
+// （Bun 在 Windows 上 rmSync 删 junction 会报 EFAULT，需走 unlink/rmdir）
+function removePathOrLink(p: string): void {
+  try {
+    if (lstatSync(p).isSymbolicLink()) {
+      try { unlinkSync(p); return; } catch {}
+      try { rmdirSync(p); return; } catch {}
+    }
+  } catch {}
+  rmSync(p, { recursive: true, force: true });
+}
+// 解析本机 Steam 库目录：默认库 + libraryfolders.vdf 里的附加库
+function steamLibs(): string[] {
   const libs: string[] = [];
   const defLib = "C:\\Program Files (x86)\\Steam";
   if (existsSync(defLib)) libs.push(defLib);
@@ -194,6 +201,32 @@ function scanLocalSteamMods(): { id: string; source: string; path: string; hasIn
       if (existsSync(p) && !libs.includes(p)) libs.push(p);
     }
   } catch {}
+  return libs;
+}
+// 检测 DST 客户端安装位置（用于直接读取客户端模组文件夹）。
+// 返回：客户端根目录 / bin / 客户端mods / 创意工坊缓存（322330）；用户手动设置的优先
+function detectDstClient(): { dir: string; binDir: string; modsDir: string; workshopDir: string } | null {
+  if (!IS_WIN) return null;
+  if (panelConfig.clientDir && existsSync(panelConfig.clientDir)) {
+    const dir = panelConfig.clientDir;
+    // 客户端根目录上两级即 steamapps（.../steamapps/common/Don't Starve Together）
+    const steamapps = dirname2(dirname2(dir));
+    return { dir, binDir: join(dir, "bin"), modsDir: join(dir, "mods"), workshopDir: join(steamapps, "workshop", "content", "322330") };
+  }
+  for (const lib of steamLibs()) {
+    const dir = join(lib, "steamapps", "common", "Don't Starve Together");
+    if (existsSync(dir)) {
+      return { dir, binDir: join(dir, "bin"), modsDir: join(dir, "mods"), workshopDir: join(lib, "steamapps", "workshop", "content", "322330") };
+    }
+  }
+  return null;
+}
+// 扫描本机 Steam 库中的 DST 模组（创意工坊缓存 + 游戏/专用服务器的 mods 目录），可直接复用开房间
+function scanLocalSteamMods(): { id: string; source: string; path: string; hasInfo: boolean }[] {
+  if (!IS_WIN) return [];
+  const out: { id: string; source: string; path: string; hasInfo: boolean }[] = [];
+  const seen = new Set<string>();
+  const libs = steamLibs();
   const push = (id: string, source: string, p: string) => {
     if (!/^\d{4,15}$/.test(id) || seen.has(id)) return;
     seen.add(id);
@@ -218,7 +251,25 @@ function writeModsDirReadme(): void {
   try {
     mkdirSync(modsStoreDir(), { recursive: true });
     writeFileSync(join(modsStoreDir(), "_模组存放目录说明.txt"),
-      `这是 DST 服务器面板的模组统一存放目录。\r\n\r\n地址: ${modsStoreDir()}\r\n\r\n规则:\r\n- 每个子文件夹名 = 创意工坊模组 ID（纯数字）\r\n- 可直接把本地 Steam 的模组复制到这里开房间（面板「mod设置」页有「本地模组库」一键复用）\r\n- 从本地复用的模组内含 SOURCE.txt，标明来源地址\r\n- 不要手动修改子文件夹名，否则服务器无法识别\r\n`);
+      `这是 DST 服务器面板的模组统一存放目录。\r\n\r\n地址: ${modsStoreDir()}\r\n\r\n规则:\r\n- 每个子文件夹名 = 创意工坊模组 ID（纯数字）\r\n- 可直接把本地 Steam 的模组复制到这里开房间（面板「mod设置」页有「本地模组库」一键复用）\r\n- 从本地复用的模组内含 SOURCE.txt，标明来源地址\r\n- 以「链接加载」方式接入的模组是目录联接(Junction)，指向客户端文件夹，清单见 _链接模组来源.txt\r\n- 不要手动修改子文件夹名，否则服务器无法识别\r\n`);
+  } catch {}
+}
+// 重建 _链接模组来源.txt：列出模组存放目录里所有目录联接(Junction)及其指向的客户端地址
+function refreshLinkManifest(): void {
+  if (!IS_WIN) return;
+  try {
+    const g = modsStoreDir();
+    const lines: string[] = [];
+    for (const d of readdirSync(g)) {
+      const p = join(g, d);
+      try { if (lstatSync(p).isSymbolicLink()) lines.push(`${d}  ->  ${readlinkSync(p)}`); } catch {}
+    }
+    const f = join(g, "_链接模组来源.txt");
+    if (lines.length) {
+      writeFileSync(f, `以下模组以「链接加载」方式直接读取本机客户端文件夹（目录联接 Junction，不占用额外磁盘，随 Steam 客户端自动更新）：\r\n\r\n${lines.join("\r\n")}\r\n\r\n删除链接只会移除联接本身，不会删除客户端里的模组文件。\r\n`);
+    } else {
+      try { rmSync(f, { force: true }); } catch {}
+    }
   } catch {}
 }
 
@@ -507,7 +558,9 @@ interface PanelConfig {
   favorites: string[];
   serverDir: string;
   clusterRoot: string;
+  clusterRoots: string[]; // 存档位置历史记录（可随时切换回用过的位置）
   modsDir: string;
+  clientDir: string; // Windows：DST 客户端安装目录（留空=自动检测），用于直接读取客户端模组
   langCheck: boolean;
 }
 function loadPanelConfig(): PanelConfig {
@@ -530,11 +583,13 @@ function loadPanelConfig(): PanelConfig {
       favorites: Array.isArray(c.favorites) ? c.favorites.map(String) : [],
       serverDir: typeof c.serverDir === "string" && c.serverDir ? c.serverDir : readServerDirFromConfig(),
       clusterRoot: typeof c.clusterRoot === "string" && isAbsPath(c.clusterRoot) ? c.clusterRoot : DEFAULT_CLUSTER_ROOT,
+      clusterRoots: Array.isArray(c.clusterRoots) ? c.clusterRoots.filter((x: any) => typeof x === "string" && isAbsPath(x)).slice(0, 12) : [],
       modsDir: typeof c.modsDir === "string" && isAbsPath(c.modsDir) ? c.modsDir : DEFAULT_MODS_DIR,
+      clientDir: typeof c.clientDir === "string" ? c.clientDir : "",
       langCheck: c.langCheck !== false,
     };
   } catch {
-    return { cluster: "MyDediServer", beta: false, betaBranch: "", mode: "online", autorestart: false, announcements: [], announceAuto: { enabled: false, intervalSec: 300, idx: 0, lastSent: 0 }, itemHistory: [], favorites: [], serverDir: readServerDirFromConfig(), clusterRoot: DEFAULT_CLUSTER_ROOT, modsDir: DEFAULT_MODS_DIR, langCheck: true };
+    return { cluster: "MyDediServer", beta: false, betaBranch: "", mode: "online", autorestart: false, announcements: [], announceAuto: { enabled: false, intervalSec: 300, idx: 0, lastSent: 0 }, itemHistory: [], favorites: [], serverDir: readServerDirFromConfig(), clusterRoot: DEFAULT_CLUSTER_ROOT, clusterRoots: [], modsDir: DEFAULT_MODS_DIR, clientDir: "", langCheck: true };
   }
 }
 let panelConfig = loadPanelConfig();
@@ -554,6 +609,9 @@ interface ShardInfo {
   isMaster: boolean;
   port: string;
   running: boolean;
+  // 是否有 server.ini：客户端游戏生成的存档（如 Cluster_1）只有世界文件夹，没有 server.ini，
+  // 这类分片也要识别展示（hasIni=false），启动/添加世界时由 ensureServerIni 自动补全
+  hasIni: boolean;
 }
 // 缓存 shard 列表（避免每次调用都扫描目录）
 let shardListCache: ShardInfo[] | null = null;
@@ -563,20 +621,33 @@ function listShards(): ShardInfo[] {
   let entries: string[] = [];
   try { entries = readdirSync(clusterDir()); } catch { return out; }
   for (const e of entries) {
-    const ini = join(clusterDir(), e, "server.ini");
-    if (!existsSync(ini)) continue;
-    const lines = parseIni(readText(ini));
-    out.push({
-      name: e,
-      isMaster: iniGet(lines, "SHARD", "is_master") === "true",
-      port: iniGet(lines, "NETWORK", "server_port") || "",
-      running: false,
-    });
+    const dir = join(clusterDir(), e);
+    try { if (!statSync(dir).isDirectory()) continue; } catch { continue; }
+    const ini = join(dir, "server.ini");
+    if (existsSync(ini)) {
+      const lines = parseIni(readText(ini));
+      out.push({
+        name: e,
+        isMaster: iniGet(lines, "SHARD", "is_master") === "true",
+        port: iniGet(lines, "NETWORK", "server_port") || "",
+        running: false,
+        hasIni: true,
+      });
+    } else if (existsSync(join(dir, "worldgenoverride.lua")) || existsSync(join(dir, "save"))) {
+      // 既有世界文件夹（客户端存档）：按名字推断主/副世界，端口用 Klei 默认
+      out.push({
+        name: e,
+        isMaster: /^master$/i.test(e),
+        port: "",
+        running: false,
+        hasIni: false,
+      });
+    }
   }
   shardListCache = out;
   return out;
 }
-// 启动/停止/删除分片后清除缓存
+// 启动/删除分片后清除缓存
 function clearShardListCache() { shardListCache = null; }
 // 切换 cluster 时清除所有与 cluster 相关的缓存
 function clearAllClusterCache() {
@@ -584,6 +655,23 @@ function clearAllClusterCache() {
   modOverridesCache.clear();
   modAtlasCache.clear();
   modItemsCache.clear();
+}
+// 为缺少 server.ini 的既有世界文件夹补全配置（端口自动分配，避开所有存档已占用的端口）
+function ensureServerIni(shard: string): void {
+  const f = join(shardDir(shard), "server.ini");
+  if (existsSync(f)) return;
+  const used = new Set<number>();
+  try {
+    for (const c of readdirSync(clusterRoot())) {
+      try { if (statSync(join(clusterRoot(), c)).isDirectory()) for (const p of clusterPorts(c)) used.add(p.port); } catch {}
+    }
+  } catch {}
+  const alloc = (start: number) => { let p = start; while (used.has(p) && p < 65535) p++; used.add(p); return p; };
+  const info = listShards().find((s) => s.name === shard);
+  const isMaster = info ? info.isMaster : /^master$/i.test(shard);
+  const ini = `[NETWORK]\nserver_port = ${alloc(10999)}\n\n[SHARD]\nis_master = ${isMaster}\n${isMaster ? "" : `name = ${shard}\n`}\n[STEAM]\nmaster_server_port = ${alloc(27016)}\nauthentication_port = ${alloc(8766)}\n\n[ACCOUNT]\nencode_user_path = true\n`;
+  writeFileSync(f, ini);
+  clearShardListCache();
 }
 // 模组文件变动（下载/删除/导入）后清除模组相关缓存
 function clearModCaches() {
@@ -638,6 +726,8 @@ async function shardRunning(shard: string): Promise<boolean> {
   return pg2.code === 0 && pg2.out.trim().length > 0;
 }
 async function startShard(shard: string): Promise<string> {
+  // 既有世界文件夹（客户端存档）可能缺 server.ini，启动前自动补全
+  ensureServerIni(shard);
   const extraArgs: string[] = [];
   if (clusterRoot() !== DEFAULT_CLUSTER_ROOT) {
     const parent = clusterRoot().replace(/[\\/][^\\/]+$/, "") || (IS_WIN ? "C:\\" : "/");
@@ -935,11 +1025,13 @@ function ensureUgcLayout(): void {
       for (const link of candidates) {
         const parent = dirname2(link);
         if (!existsSync(parent)) continue;
-        if (!existsSync(link)) { try { symlinkSync(g, link, "dir"); } catch {} continue; }
+        // Windows 普通用户无法创建目录符号链接（需管理员），目录联接(Junction)不需要权限且对程序透明
+        const linkType = IS_WIN ? "junction" : "dir";
+        if (!existsSync(link)) { try { symlinkSync(g, link, linkType); } catch {} continue; }
         const st = lstatSync(link);
         if (st.isSymbolicLink()) {
           // 指向旧位置的符号链接 → 重新指向全局目录
-          try { if (readlinkSync(link) !== g) { rmSync(link, { force: true }); symlinkSync(g, link, "dir"); } } catch {}
+          try { if (readlinkSync(link) !== g) { removePathOrLink(link); symlinkSync(g, link, linkType); } } catch {}
           continue;
         }
         if (st.isDirectory()) {
@@ -948,7 +1040,7 @@ function ensureUgcLayout(): void {
             if (!existsSync(to)) { try { renameSync(from, to); } catch {} }
           }
           rmSync(link, { recursive: true, force: true });
-          try { symlinkSync(g, link, "dir"); } catch {}
+          try { symlinkSync(g, link, linkType); } catch {}
         }
       }
       // 清理旧的 shared 空壳目录
@@ -2724,10 +2816,16 @@ async function api(req: Request, url: URL): Promise<Response> {
     const langSetting = String(langOv?.options?.LANG || "simplified");
     // 运行中的存档清单（用于存档列表标记"运行中"）
     const runningClusters = [...new Set((await runningDstAll()).map((r) => r.cluster))];
+    // Windows：客户端位置（手动设置优先，否则自动检测 Steam 库）
+    const clientAuto = detectDstClient();
     return ok({
       clusterRoot: clusterRoot(),
+      clusterRoots: panelConfig.clusterRoots,
+      defaultClusterRoot: DEFAULT_CLUSTER_ROOT,
       modsDir: modsStoreDir(),
       serverDir: panelConfig.serverDir,
+      clientDir: panelConfig.clientDir || clientAuto?.dir || "",
+      clientAuto,
       clusters,
       clusterList,
       cluster: panelConfig.cluster,
@@ -2803,6 +2901,16 @@ async function api(req: Request, url: URL): Promise<Response> {
       const dir = b.clusterRoot.trim();
       if (!isAbsPath(dir)) return fail("存档根目录必须是绝对路径");
       try { mkdirSync(dir, { recursive: true }); panelConfig.clusterRoot = dir; } catch { return fail("无法创建存档根目录: " + dir); }
+      // 记录存档位置历史，方便随时切换
+      panelConfig.clusterRoots = [dir, ...panelConfig.clusterRoots.filter((x) => x !== dir)].slice(0, 12);
+    }
+    // Windows：客户端位置（空 = 清除手动设置回到自动检测）
+    if (typeof b.clientDir === "string") {
+      const dir = b.clientDir.trim();
+      if (!dir) panelConfig.clientDir = "";
+      else if (!isAbsPath(dir)) return fail("客户端位置必须是绝对路径");
+      else if (!existsSync(dir)) return fail("客户端位置不存在: " + dir);
+      else panelConfig.clientDir = dir;
     }
     if (typeof b.modsDir === "string" && b.modsDir.trim()) {
       const dir = b.modsDir.trim();
@@ -2934,6 +3042,13 @@ async function api(req: Request, url: URL): Promise<Response> {
           }
         }
       }
+    }
+    // 优先识别既有世界文件夹（客户端存档只有文件夹没有 server.ini）：直接导入并补全配置
+    const firstChoice = wantMaster ? "Master" : "Caves";
+    const existingNoIni = shards.find((s) => s.name === firstChoice && !s.hasIni);
+    if (existingNoIni) {
+      ensureServerIni(firstChoice);
+      return ok(null, `已识别并导入既有世界文件夹 ${firstChoice}（客户端存档缺少 server.ini，已自动补全并分配端口），世界数据原样保留，可直接启动`);
     }
     // 命名：第一个地上=Master、第一个地下=Caves，之后 Forest2/Caves2/Forest3…（支持多加世界）
     let name = wantMaster ? "Master" : "Caves";
@@ -3399,12 +3514,13 @@ async function api(req: Request, url: URL): Promise<Response> {
     if (!validId(b.id)) return fail("非法模组 ID");
     // 1. 删除本地文件（mods/workshop-xxx）
     const dir = join(MODS_DIR, `workshop-${b.id}`);
-    if (existsSync(dir)) { try { rmSync(dir, { recursive: true, force: true }); } catch {} }
-    // 1b. 删除 ugc_mods 目录
+    if (existsSync(dir)) { try { removePathOrLink(dir); } catch {} }
+    // 1b. 删除 ugc_mods 目录（链接加载的模组只移除联接本身，不动客户端文件）
     for (const c of ugcContentDirs()) {
       const u = join(c, String(b.id));
-      if (existsSync(u)) { try { rmSync(u, { recursive: true, force: true }); } catch {} }
+      if (existsSync(u)) { try { removePathOrLink(u); } catch {} }
     }
+    refreshLinkManifest();
     // 2. 从 dedicated_server_mods_setup.lua 移除
     const cur = readSetupIds().filter((x) => x !== String(b.id));
     writeSetupIds(cur);
@@ -3452,7 +3568,58 @@ async function api(req: Request, url: URL): Promise<Response> {
   // ===== Windows 本地模组复用（本地模组直接开房间） =====
   if (path === "mods/local-steam" && method === "GET") {
     if (!IS_WIN) return fail("该功能仅 Windows 版可用");
-    return ok({ mods: scanLocalSteamMods(), modsDir: modsStoreDir() });
+    // 标注每个本地模组在存放目录中的状态：linked=链接加载中 / inStore=已复用副本
+    const store = modsStoreDir();
+    const mods = scanLocalSteamMods().map((m) => {
+      const p = join(store, m.id);
+      let linked = false, inStore = false;
+      try { if (lstatSync(p).isSymbolicLink()) linked = true; else if (existsSync(p)) inStore = true; } catch {}
+      return { ...m, linked, inStore };
+    });
+    return ok({ mods, modsDir: store, client: detectDstClient() });
+  }
+  // 链接加载：在模组存放目录建立目录联接(Junction)直接指向客户端模组文件夹，不复制、不占磁盘、随 Steam 自动更新
+  if (path === "mods/link-local" && method === "POST") {
+    if (!IS_WIN) return fail("该功能仅 Windows 版可用");
+    const b = await bodyJson(req);
+    const id = String(b.id || "");
+    const src = String(b.path || "");
+    if (!validId(id)) return fail("非法模组 ID");
+    if (!src || src.includes("..") || !existsSync(src)) return fail("来源路径不存在");
+    if (!existsSync(join(src, "modinfo.lua"))) return fail("来源目录缺少 modinfo.lua，不是有效的模组目录");
+    const dst = join(modsStoreDir(), id);
+    mkdirSync(modsStoreDir(), { recursive: true });
+    try {
+      if (lstatSync(dst).isSymbolicLink()) {
+        if (readlinkSync(dst) === src) return ok(null, `模组 ${id} 已是链接加载状态 → ${src}`);
+        removePathOrLink(dst);
+      } else if (existsSync(dst)) {
+        return fail(`模组 ${id} 在存放目录已有复用副本，请先在模组列表中删除该副本，或改用「复用(复制)」覆盖`);
+      }
+    } catch {}
+    try {
+      symlinkSync(src, dst, "junction");
+    } catch (e: any) {
+      return fail("创建目录联接失败: " + (e?.message || e));
+    }
+    refreshLinkManifest();
+    clearModCaches();
+    return ok(null, `已链接加载模组 ${id} → 直接读取 ${src}（不占用额外磁盘）`);
+  }
+  // 取消链接：只移除目录联接，不删客户端文件
+  if (path === "mods/unlink-local" && method === "POST") {
+    if (!IS_WIN) return fail("该功能仅 Windows 版可用");
+    const b = await bodyJson(req);
+    const id = String(b.id || "");
+    if (!validId(id)) return fail("非法模组 ID");
+    const dst = join(modsStoreDir(), id);
+    let wasLink = false;
+    try { wasLink = lstatSync(dst).isSymbolicLink(); } catch {}
+    if (!wasLink) return fail(`模组 ${id} 不是链接加载状态`);
+    try { removePathOrLink(dst); } catch (e: any) { return fail("移除链接失败: " + (e?.message || e)); }
+    refreshLinkManifest();
+    clearModCaches();
+    return ok(null, `已取消模组 ${id} 的链接（客户端文件未受影响）`);
   }
   if (path === "mods/import-local" && method === "POST") {
     if (!IS_WIN) return fail("该功能仅 Windows 版可用");
@@ -3464,7 +3631,7 @@ async function api(req: Request, url: URL): Promise<Response> {
     if (!existsSync(join(src, "modinfo.lua"))) return fail("来源目录缺少 modinfo.lua，不是有效的模组目录");
     const dst = join(modsStoreDir(), id);
     mkdirSync(modsStoreDir(), { recursive: true });
-    rmSync(dst, { recursive: true, force: true });
+    removePathOrLink(dst);
     copyDirSync(src, dst);
     // 标明来源地址，方便程序调用和用户维护
     writeFileSync(join(dst, "SOURCE.txt"), `该模组从本地复用\r\n模组ID: ${id}\r\n来源: ${src}\r\n时间: ${new Date().toLocaleString("zh-CN")}\r\n`);

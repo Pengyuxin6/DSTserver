@@ -18,11 +18,15 @@ Windows 版与网页版功能一致：基本设置、编辑世界、mod 设置�
 ## Windows 专属功能
 
 - **进程直连**：启动/停止 DST 服务器无需 screen/systemd，面板直接拉起 `dontstarve_dedicated_server_nullrenderer.exe`，控制台命令经 stdin 注入。
+- **客户端位置**：基本设置页可设置/自动检测 DST 客户端安装目录（如 `D:\steam\steamapps\common\Don't Starve Together`，留空=自动检测 Steam 库）。客户端模组在两个位置：客户端 `mods\` 和 `steamapps\workshop\content\322330\<id>`；面板会直接读取这两个位置。服务器目录一般是另一个库（如 `E:\SteamLibrary\steamapps\common\Don't Starve Together Dedicated Server`）。
+- **存档位置切换**：基本设置页默认用科雷存档位置（`文档\Klei\DoNotStarveTogether`，可一键恢复），也可填自定义位置；用过的位置会记录在历史下拉里，随时切换。
+- **客户端存档直接导入**：游戏客户端生成的存档（世界文件夹里没有 server.ini）会被直接识别；点「添加地上/地下世界」即导入既有文件夹并自动补全 server.ini（端口自动分配），世界数据原样保留；启动服务器时也会自动补全。
 - **资源监控**：服务器管理页实时显示 CPU 使用率、系统内存、DST 进程内存（PowerShell Get-Process 汇总）。
 - **本地模组库**（mod 设置页顶部）：自动扫描本机 Steam 库（含 `libraryfolders.vdf` 里的附加库）中已下载的 DST 模组：
   - 创意工坊缓存 `steamapps/workshop/content/322330/<id>`
   - 游戏/专用服务器 `steamapps/common/.../mods/workshop-<id>`
-  - 一键「复用到服务器」，复制到面板模组统一目录并写入 `SOURCE.txt` 标明来源地址，可直接开房间。
+  - **链接加载（推荐）**：在模组存放目录建立目录联接（Junction）直接指向客户端模组文件夹——不复制、不占额外磁盘、随 Steam 客户端自动更新，无需管理员权限；清单见存放目录的 `_链接模组来源.txt`（标明每个链接指向的客户端地址），取消链接不删客户端文件。
+  - **复用（复制）**：复制一份到面板模组统一目录并写入 `SOURCE.txt` 标明来源地址，客户端卸载后仍可用。
   - 模组统一存放目录（默认 `panel/dst_mods`）内含 `_模组存放目录说明.txt` 标明地址，面板界面也显示该地址，可一键打开文件夹。
 - **图片解析**：模组物品图标（KTEX → PNG）在 Windows 上同样可用，与网页版一致。
 - **多开保护**：空余内存不足 4G 时禁止多开；端口冲突时列出需要修改的端口、配置文件与键名。
@@ -35,7 +39,9 @@ Windows 版与网页版功能一致：基本设置、编辑世界、mod 设置�
 
 | 内容 | 路径 |
 | --- | --- |
-| 存档根目录 | `文档\Klei\DoNotStarveTogether` |
+| 存档根目录 | `文档\Klei\DoNotStarveTogether`（科雷默认，可改并记录历史切换） |
+| 客户端位置 | 自动检测 Steam 库中的 `steamapps\common\Don't Starve Together`（可手动指定） |
+| 客户端模组 | `<客户端>\mods` 与 `<库>\steamapps\workshop\content\322330\<id>`（面板直接读取） |
 | 模组统一目录 | `panel/dst_mods`（exe 版：`dist/dst_mods`） |
-| DST 服务端 | `panel/dst_server`（菜单 4 安装，可在基本设置修改） |
+| DST 服务端 | `panel/dst_server`（菜单 4 安装，可在基本设置修改；如已装在 `E:\SteamLibrary\...Dedicated Server` 可直接填该目录） |
 | 面板密码/配置 | `panel/.panel_password`、`panel/panel_config.json` |
