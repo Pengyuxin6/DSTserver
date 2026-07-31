@@ -627,7 +627,7 @@ async function pageWorld() {
           <button class="btn danger" id="delWorld">删除所选世界</button>
         </div>
         <div class="btn-row" style="margin-top:6px">
-          <button class="btn" id="portResetW">↺ 恢复默认端口（Master 10999 / Caves 11000）</button>
+          <button class="btn" id="portResetW">↺ 恢复默认端口（Master 11000 / Caves 11001）</button>
           <span class="hint">点世界旁的端口号可单独改</span>
         </div>
       </div>
@@ -1561,16 +1561,16 @@ function renderModsDownload() {
   startTaskPoll();
 }
 
-// 恢复经典默认端口（与 43 服务器 MyDediServer 相同的设计）：master_port=10888，
-// Master=10999/27016/8766，Caves=11000/27017/8767；其余分片不动
+// 恢复经典默认端口（与 43 服务器 MyDediServer 相同的设计）：master_port=10889，
+// Master=11000/27018/8768，Caves=11001/27019/8769；其余分片不动
 async function resetPortsDefault() {
   const pj = await apiQuiet("server/ports");
   if (!pj) { toast("端口信息读取失败", true); return false; }
   if (pj.data.running) { toast("服务器运行中，请先关闭再恢复默认端口", true); return false; }
-  const body = { masterPort: 10888, shards: {} };
+  const body = { masterPort: 10889, shards: {} };
   for (const s of pj.data.shards) {
-    if (s.name === "Master") body.shards.Master = { serverPort: 10999, masterServerPort: 27016, authPort: 8766 };
-    else if (s.name === "Caves") body.shards.Caves = { serverPort: 11000, masterServerPort: 27017, authPort: 8767 };
+    if (s.name === "Master") body.shards.Master = { serverPort: 11000, masterServerPort: 27018, authPort: 8768 };
+    else if (s.name === "Caves") body.shards.Caves = { serverPort: 11001, masterServerPort: 27019, authPort: 8769 };
   }
   const r = await api("server/ports", { method: "POST", body });
   toast(r.msg, !r.ok);
@@ -1586,7 +1586,7 @@ async function pageServer() {
   const multi = (d.otherRunning && d.otherRunning.length) ? d.otherRunning : null;
   const conflicts = d.portConflicts || [];
   const blocked = !!multi && !d.currentRunning;
-  const canUnlock = blocked && d.canMultiOpen && !conflicts.length;
+  const canUnlock = blocked && d.canMultiOpen;
   const shardRows = d.shards.map((s) =>
     `<tr><td><span class="status-dot ${s.running ? "on" : "off"}"></span>${esc(s.name)}（${s.isMaster ? "地上·主世界" : "地下"}）</td>
      <td>${s.running ? "运行中" : "未运行"}</td><td><span class="port-edit${s.running ? " disabled" : ""}" data-shard="${esc(s.name)}" data-port="${esc(s.port || "")}" title="${s.running ? "运行中不可修改" : "点击修改端口"}">${esc(s.port || "默认")}</span></td></tr>`).join("");
@@ -1597,8 +1597,8 @@ async function pageServer() {
       <b>⚠ 检测到其他存档的服务器正在运行：</b>${multi.map((m) => `「${esc(m.cluster)}」（${m.shards.map((x) => esc(x)).join("、")}）`).join("，")}
       ${blocked ? `<div class="hint" style="margin-top:4px">当前切换的是另一个存档，服务器控制已置灰。多开需同时满足：空余内存 ≥ 4G、端口互不冲突。</div>` : ""}
       ${blocked && !d.canMultiOpen ? `<div class="multi-err">✖ 空余内存不足 4G（当前可用 ${d.sys.avail}MB），不允许多开</div>` : ""}
-      ${conflicts.length ? `<div class="multi-err">✖ 端口冲突，请先修改以下配置再启动：<br>${conflicts.map((c) => `端口 ${c.port} — ${esc(c.file)} 的 ${esc(c.key)}（与「${esc(c.other)}」冲突）`).join("<br>")}<br><span class="hint">可在下方「端口设置」中手动修改，或点「自动分配空闲端口」一键解决</span></div>` : ""}
-      ${canUnlock ? `<button class="btn" id="multiOpenAllow" style="margin-top:8px">仍然多开（内存 ${d.sys.avail}MB ≥ 4G，端口无冲突）</button>` : ""}
+      ${conflicts.length ? `<div style="color:var(--amber);font-size:13px;margin-top:4px">⚠ 端口相同提醒（不拦截启动）：<br>${conflicts.map((c) => `端口 ${c.port} — ${esc(c.key)}（与「${esc(c.other)}」相同）`).join("<br>")}<br><span class="hint">不同时启动两个服务器就没有影响；如需多开，可在下方「端口设置」中错开</span></div>` : ""}
+      ${canUnlock ? `<button class="btn" id="multiOpenAllow" style="margin-top:8px">仍然多开（内存 ${d.sys.avail}MB ≥ 4G${conflicts.length ? "，端口相同已知悉" : "，端口无冲突"}）</button>` : ""}
     </div>` : ""}
     <div class="btn-row">
       <button class="btn primary" id="start" ${blocked ? "disabled" : ""}>▶ 启动服务器</button>
@@ -1614,8 +1614,8 @@ async function pageServer() {
     <div class="hint" id="memHint" style="margin-bottom:8px">💡 系统可用内存低于 <span style="color:var(--red)">512MB</span> 时自动终止服务器</div>
     <table class="grid"><thead><tr><th>分片</th><th>状态</th><th>端口</th></tr></thead><tbody>${shardRows}</tbody></table>
     <div class="btn-row" style="margin-top:8px">
-      <button class="btn" id="portReset" ${d.currentRunning ? "disabled" : ""}>↺ 恢复默认端口（Master 10999 / Caves 11000）</button>
-      <span class="hint">点端口号可单独修改；仅与<b>运行中</b>存档冲突才会强制要求更改</span>
+      <button class="btn" id="portReset" ${d.currentRunning ? "disabled" : ""}>↺ 恢复默认端口（Master 11000 / Caves 11001）</button>
+      <span class="hint">点端口号可单独修改；与其他存档端口相同只黄色提醒，不同时启动即可</span>
     </div>
     <div class="row" style="margin-top:10px"><label>自动重启</label>
       <label class="switch" title="每 30 秒检查分片，掉线自动拉起"><input type="checkbox" id="arSwitch" ${d.autorestart ? "checked" : ""}><span class="slider"></span></label>
@@ -1673,13 +1673,12 @@ async function pageServer() {
     (p.others || []).forEach((o) => o.ports.forEach((pt) => { if (!otherPorts.has(pt)) otherPorts.set(pt, o); }));
     const row = (label, key, val, isDefault) => {
       const clash = otherPorts.get(Number(val));
+      // 跨存档端口相同只黄色警告：不同时启动就没关系，用户可自行决定保留
       const clashHtml = clash
-        ? (clash.running
-          ? `<span class="multi-err" style="margin:0">✖ 与运行中的「${esc(clash.cluster)}」冲突，必须改</span>`
-          : `<span style="color:var(--amber);font-size:12px">⚠ 与「${esc(clash.cluster)}」相同（对方未运行，可保留，同时启动前需错开）</span>`)
+        ? `<span style="color:var(--amber);font-size:12px">⚠ 与${clash.running ? "正在运行的" : ""}「${esc(clash.cluster)}」相同（可保留，两个服务器同时启动才会冲突）</span>`
         : "";
       return `<div class="row port-row"><label style="min-width:230px">${label}${isDefault ? ' <span class="hint">(默认值，未显式配置)</span>' : ""}</label>
-        <input type="number" class="port-input${clash && clash.running ? " port-bad" : ""}" data-portkey="${esc(key)}" value="${val ?? ""}" min="1024" max="65535" ${p.running ? "disabled" : ""}>
+        <input type="number" class="port-input" data-portkey="${esc(key)}" value="${val ?? ""}" min="1024" max="65535" ${p.running ? "disabled" : ""}>
         ${clashHtml}</div>`;
     };
     let html = "";
@@ -1694,7 +1693,7 @@ async function pageServer() {
     html += `<div class="btn-row" style="margin-top:10px">
       <button class="btn" id="portAuto" ${p.running ? "disabled" : ""}>⚡ 自动分配空闲端口</button>
       <button class="btn primary" id="portSave" ${p.running ? "disabled" : ""}>💾 保存端口</button>
-      <button class="btn" id="portReset2" ${p.running ? "disabled" : ""}>↺ 恢复默认（10999/11000）</button>
+      <button class="btn" id="portReset2" ${p.running ? "disabled" : ""}>↺ 恢复默认（11000/11001）</button>
       <span class="hint">改端口不影响存档数据；多开请给每个存档各点一次「自动分配」</span></div>`;
     if ((p.others || []).length) html += `<div class="hint" style="margin-top:6px">其他存档占用端口：${p.others.map((o) => `「${esc(o.cluster)}」${o.ports.join("/")}${o.running ? "（运行中）" : ""}`).join("，")}</div>`;
     box.innerHTML = html;
@@ -1728,7 +1727,7 @@ async function pageServer() {
     if (el.classList.contains("disabled")) return;
     el.onclick = async () => {
       const shardName = el.dataset.shard;
-      const cur = el.dataset.port || "10999";
+      const cur = el.dataset.port || (shardName === "Caves" ? "11001" : "11000");
       const v = prompt(`修改 ${shardName} 分片的玩家连接端口（server_port，1024-65535）：`, cur);
       if (v === null) return;
       const n = Number(v.trim());

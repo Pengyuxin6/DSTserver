@@ -691,7 +691,7 @@ function ensureServerIni(shard: string): void {
   const alloc = (start: number) => { let p = start; while (used.has(p) && p < 65535) p++; used.add(p); return p; };
   const info = listShards().find((s) => s.name === shard);
   const isMaster = info ? info.isMaster : /^master$/i.test(shard);
-  const ini = `[NETWORK]\nserver_port = ${alloc(10999)}\n\n[SHARD]\nis_master = ${isMaster}\n${isMaster ? "" : `name = ${shard}\n`}\n[STEAM]\nmaster_server_port = ${alloc(27016)}\nauthentication_port = ${alloc(8766)}\n\n[ACCOUNT]\nencode_user_path = true\n`;
+  const ini = `[NETWORK]\nserver_port = ${alloc(isMaster ? 11000 : 11001)}\n\n[SHARD]\nis_master = ${isMaster}\n${isMaster ? "" : `name = ${shard}\n`}\n[STEAM]\nmaster_server_port = ${alloc(isMaster ? 27018 : 27019)}\nauthentication_port = ${alloc(isMaster ? 8768 : 8769)}\n\n[ACCOUNT]\nencode_user_path = true\n`;
   writeFileSync(f, ini);
   clearShardListCache();
 }
@@ -2770,24 +2770,25 @@ function clusterPorts(name: string, effective = true): { port: number; file: str
   const out: { port: number; file: string; key: string }[] = [];
   const cdir = join(clusterRoot(), name);
   const ciPath = join(cdir, "cluster.ini");
-  // effective=true：按 Klei 有效值计算（缺失配置按默认端口 10888/10999/27016/8766），用于冲突检测
+  // effective=true：按有效值计算（缺失配置按面板默认端口 10889/11000/11001/27018/27019/8768/8769），用于冲突检测
   // effective=false：只算显式配置的端口，用于新建存档/世界时的端口分配（首个存档应拿到经典默认端口）
   if (existsSync(ciPath)) {
     const ci = parseIni(readText(ciPath));
     const v = iniGet(ci, "SHARD", "master_port");
-    if (v || effective) out.push({ port: Number(v || 10888), file: ciPath, key: "[SHARD] master_port" });
+    if (v || effective) out.push({ port: Number(v || 10889), file: ciPath, key: "[SHARD] master_port" });
   }
   let shardNames: string[] = [];
   try { shardNames = readdirSync(cdir).filter((d) => existsSync(join(cdir, d, "server.ini"))); } catch {}
   for (const sn of shardNames) {
     const f = join(cdir, sn, "server.ini");
     const lines = parseIni(readText(f));
+    const isM = /^true$/i.test(iniGet(lines, "SHARD", "is_master") || "");
     const sp = iniGet(lines, "NETWORK", "server_port");
-    if (sp || effective) out.push({ port: Number(sp || 10999), file: f, key: "[NETWORK] server_port" });
+    if (sp || effective) out.push({ port: Number(sp || (isM ? 11000 : 11001)), file: f, key: "[NETWORK] server_port" });
     const msp = iniGet(lines, "STEAM", "master_server_port");
-    if (msp || effective) out.push({ port: Number(msp || 27016), file: f, key: "[STEAM] master_server_port" });
+    if (msp || effective) out.push({ port: Number(msp || (isM ? 27018 : 27019)), file: f, key: "[STEAM] master_server_port" });
     const ap = iniGet(lines, "STEAM", "authentication_port");
-    if (ap || effective) out.push({ port: Number(ap || 8766), file: f, key: "[STEAM] authentication_port" });
+    if (ap || effective) out.push({ port: Number(ap || (isM ? 8768 : 8769)), file: f, key: "[STEAM] authentication_port" });
   }
   return out;
 }
@@ -3006,7 +3007,7 @@ async function api(req: Request, url: URL): Promise<Response> {
     if (existsSync(dir)) return fail("已存在同名存档: " + name);
     mkdirSync(join(dir, "Master"), { recursive: true });
     mkdirSync(join(dir, "Caves"), { recursive: true });
-    // 端口自动分配：首个存档拿经典默认端口（10888/10999/11000），其他存档只按显式配置的端口避让
+    // 端口自动分配：首个存档拿经典默认端口（10889/11000/11001，与43服务器MyDediServer一致），其他存档只按显式配置的端口避让
     const usedPorts = new Set<number>();
     try {
       for (const c of readdirSync(clusterRoot())) {
@@ -3014,9 +3015,9 @@ async function api(req: Request, url: URL): Promise<Response> {
       }
     } catch {}
     const alloc = (start: number) => { let p = start; while (usedPorts.has(p)) p++; usedPorts.add(p); return p; };
-    const masterPort = alloc(10888);
-    const mServer = alloc(10999), mSteam = alloc(27016), mAuth = alloc(8766);
-    const cServer = alloc(11000), cSteam = alloc(27017), cAuth = alloc(8767);
+    const masterPort = alloc(10889);
+    const mServer = alloc(11000), mSteam = alloc(27018), mAuth = alloc(8768);
+    const cServer = alloc(11001), cSteam = alloc(27019), cAuth = alloc(8769);
     writeFileSync(join(dir, "cluster.ini"), `[GAMEPLAY]\ngame_mode = survival\nmax_players = 6\npvp = false\npause_when_empty = true\nvote_kick_enabled = true\n\n[NETWORK]\ncluster_name = ${name}\ncluster_description = A dedicated server\ncluster_password =\n\n[MISC]\nconsole_enabled = true\n\n[SHARD]\nshard_enabled = true\nbind_ip = 127.0.0.1\nmaster_ip = 127.0.0.1\nmaster_port = ${masterPort}\ncluster_key = supersecretkey\n`);
     writeFileSync(join(dir, "cluster_token.txt"), "# 在此粘贴 Klei 服务器令牌（必须填写才能开服）\n");
     writeFileSync(join(dir, "Master", "server.ini"), `[NETWORK]\nserver_port = ${mServer}\n\n[SHARD]\nis_master = true\n\n[STEAM]\nmaster_server_port = ${mSteam}\nauthentication_port = ${mAuth}\n\n[ACCOUNT]\nencode_user_path = true\n`);
@@ -3101,7 +3102,7 @@ async function api(req: Request, url: URL): Promise<Response> {
     const isMaster = wantMaster && !hasMaster;
     // 附加层 = 超出经典「地上+地下」组合的多开层，面板不维护其设置
     const isExtraLayer = !isMaster && (shards.length >= 2 || (wantMaster && hasMaster));
-    // 自动分配端口：默认拿经典端口（地上 10999 / 地下 11000）；
+    // 自动分配端口：默认拿经典端口（地上 11000 / 地下 11001）；
     // 本存档内其他分片按有效值避让（隐式默认也算），其他存档只按显式配置的端口避让
     const usedPorts = new Set<number>();
     try {
@@ -3113,9 +3114,9 @@ async function api(req: Request, url: URL): Promise<Response> {
       }
     } catch {}
     const alloc = (start: number) => { let p = start; while (usedPorts.has(p)) p++; usedPorts.add(p); return p; };
-    const serverPort = alloc(wantMaster ? 10999 : 11000);
-    const steamPort = alloc(27016);
-    const authPort = alloc(8766);
+    const serverPort = alloc(wantMaster ? 11000 : 11001);
+    const steamPort = alloc(isMaster ? 27018 : 27019);
+    const authPort = alloc(isMaster ? 8768 : 8769);
     const dir = shardDir(name);
     if (existsSync(dir)) return fail("目录已存在: " + name);
     mkdirSync(dir, { recursive: true });
@@ -3798,9 +3799,9 @@ async function api(req: Request, url: URL): Promise<Response> {
       const apRaw = iniGet(lines, "STEAM", "authentication_port");
       return {
         name: s.name, isMaster: s.isMaster,
-        serverPort: Number(spRaw || 10999), serverPortSet: spRaw !== null,
-        masterServerPort: Number(mspRaw || 27016), masterServerPortSet: mspRaw !== null,
-        authPort: Number(apRaw || 8766), authPortSet: apRaw !== null,
+        serverPort: Number(spRaw || (s.isMaster ? 11000 : 11001)), serverPortSet: spRaw !== null,
+        masterServerPort: Number(mspRaw || (s.isMaster ? 27018 : 27019)), masterServerPortSet: mspRaw !== null,
+        authPort: Number(apRaw || (s.isMaster ? 8768 : 8769)), authPortSet: apRaw !== null,
       };
     });
     // 其他存档已占用的端口（含 Klei 默认值；标注是否在运行——只有运行中的才算硬冲突）
@@ -3816,7 +3817,7 @@ async function api(req: Request, url: URL): Promise<Response> {
         } catch {}
       }
     } catch {}
-    return ok({ cluster: panelConfig.cluster, running, masterPort: Number(mpRaw || 10888), masterPortSet: mpRaw !== null, shards: shardPorts, others });
+    return ok({ cluster: panelConfig.cluster, running, masterPort: Number(mpRaw || 10889), masterPortSet: mpRaw !== null, shards: shardPorts, others });
   }
   if ((path === "server/ports" || path === "server/ports/auto") && method === "POST") {
     // 端口只在进程启动时读取，运行中禁止修改
@@ -3837,8 +3838,8 @@ async function api(req: Request, url: URL): Promise<Response> {
         }
       } catch {}
       const alloc = (start: number) => { let p = start; while (used.has(p) && p < 65535) p++; used.add(p); return p; };
-      masterPort = alloc(10888); masterExplicit = true;
-      for (const s of cur) shardCfg.set(s.name, { serverPort: alloc(10999), masterServerPort: alloc(27016), authPort: alloc(8766), explicit: true });
+      masterPort = alloc(10889); masterExplicit = true;
+      for (const s of cur) shardCfg.set(s.name, { serverPort: alloc(s.isMaster ? 11000 : 11001), masterServerPort: alloc(s.isMaster ? 27018 : 27019), authPort: alloc(s.isMaster ? 8768 : 8769), explicit: true });
     } else {
       const b = await bodyJson(req);
       const num = (v: any): number | null => (v === undefined || v === null || v === "" ? null : Number(v));
@@ -3853,15 +3854,16 @@ async function api(req: Request, url: URL): Promise<Response> {
     // 组装有效值清单：显式提供的新值 > 磁盘现有配置 > Klei 默认值
     const ciCur = parseIni(readText(join(clusterDir(), "cluster.ini")));
     const mpCurRaw = iniGet(ciCur, "SHARD", "master_port");
-    const entries: PortEntry[] = [{ label: "cluster.ini [SHARD] master_port", port: masterPort ?? Number(mpCurRaw || 10888), explicit: masterExplicit }];
+    const entries: PortEntry[] = [{ label: "cluster.ini [SHARD] master_port", port: masterPort ?? Number(mpCurRaw || 10889), explicit: masterExplicit }];
     for (const [sn, cfg] of shardCfg) {
+      const isM = !!cur.find((x) => x.name === sn)?.isMaster;
       const curLines = parseIni(readText(join(clusterDir(), sn, "server.ini")));
       const spCur = iniGet(curLines, "NETWORK", "server_port");
       const mspCur = iniGet(curLines, "STEAM", "master_server_port");
       const apCur = iniGet(curLines, "STEAM", "authentication_port");
-      entries.push({ label: `${sn} [NETWORK] server_port`, port: cfg.serverPort ?? Number(spCur || 10999), explicit: cfg.serverPort !== null });
-      entries.push({ label: `${sn} [STEAM] master_server_port`, port: cfg.masterServerPort ?? Number(mspCur || 27016), explicit: cfg.masterServerPort !== null });
-      entries.push({ label: `${sn} [STEAM] authentication_port`, port: cfg.authPort ?? Number(apCur || 8766), explicit: cfg.authPort !== null });
+      entries.push({ label: `${sn} [NETWORK] server_port`, port: cfg.serverPort ?? Number(spCur || (isM ? 11000 : 11001)), explicit: cfg.serverPort !== null });
+      entries.push({ label: `${sn} [STEAM] master_server_port`, port: cfg.masterServerPort ?? Number(mspCur || (isM ? 27018 : 27019)), explicit: cfg.masterServerPort !== null });
+      entries.push({ label: `${sn} [STEAM] authentication_port`, port: cfg.authPort ?? Number(apCur || (isM ? 8768 : 8769)), explicit: cfg.authPort !== null });
     }
     for (const e of entries) {
       if (!Number.isInteger(e.port) || (e.port as number) < 1024 || (e.port as number) > 65535) return fail(`端口无效：${e.label} = ${e.port}（要求 1024-65535 的整数）`);
@@ -3874,8 +3876,7 @@ async function api(req: Request, url: URL): Promise<Response> {
         return fail(`端口 ${entries[i].port} 重复：${entries[i].label} 与 ${entries[j2].label} 相同，每个端口必须唯一（可用「自动分配空闲端口」一键解决）`);
       }
     }
-    // 与其他存档冲突检测（含对方隐式默认值）：对方正在运行才硬拦截；
-    // 对方未运行只警告——用户可以选择保留相同端口（不同时启动即可）
+    // 与其他存档端口相同不拦截，只黄色警告：同时启动才会冲突，用户可自行决定是否错开
     const runningSet2 = new Set((await runningDstAll()).map((r) => r.cluster));
     const warnings: string[] = [];
     try {
@@ -3886,8 +3887,10 @@ async function api(req: Request, url: URL): Promise<Response> {
           for (const p of clusterPorts(c)) {
             const hit = entries.find((e) => e.port === p.port);
             if (!hit) continue;
-            if (runningSet2.has(c)) return fail(`端口 ${p.port}（${hit.label}）与正在运行的存档「${c}」的 ${p.key} 冲突，必须换一个端口或先关闭对方服务器`);
-            if (!warnings.some((w) => w.includes(`「${c}」`))) warnings.push(`端口 ${p.port} 与存档「${c}」相同（对方未运行，同时启动前需错开）`);
+            if (!warnings.some((w) => w.includes(`「${c}」`)))
+              warnings.push(runningSet2.has(c)
+                ? `端口 ${p.port} 与正在运行的存档「${c}」相同（两个服务器不能同时启动，如需多开请先错开端口）`
+                : `端口 ${p.port} 与存档「${c}」相同（对方未运行，同时启动前需错开）`);
           }
         } catch {}
       }
@@ -3916,8 +3919,9 @@ async function api(req: Request, url: URL): Promise<Response> {
   if (path === "server/start" && method === "POST") {
     const shards = listShards();
     if (!shards.length) return fail("当前存档没有任何世界分片");
-    // 多开检测：已有其他存档的服务器在运行时，需要过内存门禁与端口冲突检测
+    // 多开检测：已有其他存档的服务器在运行时，需要过内存门禁；端口冲突只警告不拦截
     const otherMap = groupOtherRunning(await runningDstAll());
+    const startWarnings: string[] = [];
     if (otherMap.size) {
       const names = [...otherMap.keys()].map((n) => `「${n}」`).join("、");
       // 内存门禁：空余不足 4G 不准多开
@@ -3925,11 +3929,11 @@ async function api(req: Request, url: URL): Promise<Response> {
       if (sysMem.avail > 0 && sysMem.avail < MULTI_OPEN_MIN_MEM) {
         return fail(`存档 ${names} 的服务器正在运行，当前空余内存仅 ${sysMem.avail}MB，不足 4G，不允许再开新服务器。请先在对应存档关闭服务器或释放内存后再试。`);
       }
-      // 端口冲突检测：冲突时列出需要修改的端口、文件与键名
+      // 端口冲突只黄色警告：同时启动会抢端口导致后启动的分片绑定失败，由用户自行决定
       const conflicts = findPortConflicts(otherMap);
       if (conflicts.length) {
-        const detail = conflicts.map((c) => `端口 ${c.port}（${c.file} 的 ${c.key}，与「${c.other}」冲突）`).join("；");
-        return fail(`检测到与运行中存档 ${names} 的端口冲突，无法多开：${detail}。请在下方「端口设置」中修改冲突端口，或点「自动分配空闲端口」一键解决（每个存档的 server_port / master_server_port / authentication_port / master_port 都必须唯一）。`);
+        const detail = conflicts.map((c) => `端口 ${c.port}（${c.key}）`).join("、");
+        startWarnings.push(`⚠ 与运行中存档 ${names} 端口相同：${detail}。两个服务器同时运行会冲突，如需多开请在「端口设置」中错开端口`);
       }
     }
     // 资源检查
@@ -3948,6 +3952,7 @@ async function api(req: Request, url: URL): Promise<Response> {
     if (hasFailure) {
       msg += "。💡 如果反复启动失败，很可能是内存不足。可尝试：1) 关闭其他服务释放内存 2) 减少启用的模组数量 3) 检查 dst.slice 内存限制";
     }
+    if (startWarnings.length) msg += "。" + startWarnings.join("；");
     return ok(null, msg);
   }
   if (path === "server/stop" && method === "POST") {
