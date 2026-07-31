@@ -4418,7 +4418,7 @@ const MIME: Record<string, string> = {
   ".gif": "image/gif",
   ".ico": "image/x-icon",
 };
-function serveFile(path: string, req?: Request): Response {
+function serveFile(path: string, req?: Request, opts?: { noNegotiate?: boolean }): Response {
   try {
     const ext = path.slice(path.lastIndexOf("."));
     const mime = MIME[ext] || "application/octet-stream";
@@ -4428,11 +4428,14 @@ function serveFile(path: string, req?: Request): Response {
     // html/js/css 不缓存：面板更新频繁，每次加载都向服务器校验，避免部署后用户看到旧页面
     else headers["Cache-Control"] = "no-cache";
     // Last-Modified 协商缓存：no-cache 下未修改的资源返回 304，不重复传输
+    // noNegotiate：表示随登录态等条件变化的页面（/ 根路径），禁用 304 且 no-store，
+    // 否则登录后浏览器拿 If-Modified-Since 命中 304，会继续展示缓存的登录页
+    if (opts?.noNegotiate) headers["Cache-Control"] = "no-store";
     try {
       const mtime = statSync(path).mtime;
       headers["Last-Modified"] = mtime.toUTCString();
       const ims = req?.headers.get("if-modified-since");
-      if (ims && new Date(ims).getTime() >= Math.floor(mtime.getTime() / 1000) * 1000) return new Response(null, { status: 304, headers });
+      if (!opts?.noNegotiate && ims && new Date(ims).getTime() >= Math.floor(mtime.getTime() / 1000) * 1000) return new Response(null, { status: 304, headers });
     } catch {}
     // 文本类资源 gzip（app.js 体积大，压缩后传输约 1/4，加快已加载页面的二次打开速度）
     if (req && /\.(html|css|js|svg)$/.test(ext) && (req.headers.get("accept-encoding") || "").includes("gzip")) {
@@ -4493,7 +4496,9 @@ const server = Bun.serve({
       }
     }
     if (path === "/" || path === "/index.html") {
-      return serveFile(join(PUBLIC_DIR, checkAuth(req) ? "index.html" : "login.html"), req);
+      // 该 URL 按登录态返回不同页面（表示随 Cookie 变化）：禁用协商缓存，
+      // 否则登录后 If-Modified-Since 命中 304，浏览器会继续展示缓存的登录页
+      return serveFile(join(PUBLIC_DIR, checkAuth(req) ? "index.html" : "login.html"), req, { noNegotiate: true });
     }
     // 本地模组库图标：/local-icon?id=<modId> → PNG（直接解码客户端目录里的 modicon.tex，磁盘缓存）
     if (path === "/local-icon" && req.method === "GET") {
