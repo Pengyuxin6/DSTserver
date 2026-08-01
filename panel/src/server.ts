@@ -753,6 +753,8 @@ async function shardRunning(shard: string): Promise<boolean> {
 async function startShard(shard: string): Promise<string> {
   // 既有世界文件夹（客户端存档）可能缺 server.ini，启动前自动补全
   ensureServerIni(shard);
+  // 确保已启用模组在服务器 mods/ 目录中有符号链接（避免 Workshop 下载超时导致缺模组）
+  ensureServerModSymlinks();
   const extraArgs: string[] = [];
   if (clusterRoot() !== DEFAULT_CLUSTER_ROOT) {
     const parent = clusterRoot().replace(/[\\/][^\\/]+$/, "") || (IS_WIN ? "C:\\" : "/");
@@ -975,7 +977,17 @@ function writeSetupIds(ids: string[]): void {
   }
   // 语言包类模组（含 DST_chs.po 的）固定最后加载，使其能覆盖其他模组的字符串
   const isLangPack = (id: string) => existsSync(join(ugcSharedDir(), id, "DST_chs.po"));
-  const body = [...ids].sort((a, b) => Number(isLangPack(a)) - Number(isLangPack(b))).map((id) => `ServerModSetup("${id}")`).join("\n");
+  // 已在 mods/ 目录中存在的模组（符号链接或真实目录）不再调用 ServerModSetup，
+  // 避免 Workshop 下载阶段删除已有链接/文件后超时失败导致模组丢失
+  const serverModsDir = join(SERVER_DIR, "mods");
+  const alreadyInMods = (id: string) => {
+    try { return existsSync(join(serverModsDir, `workshop-${id}`, "modinfo.lua")); } catch { return false; }
+  };
+  const body = [...ids]
+    .filter((id) => !alreadyInMods(id))
+    .sort((a, b) => Number(isLangPack(a)) - Number(isLangPack(b)))
+    .map((id) => `ServerModSetup("${id}")`)
+    .join("\n");
   writeFileSync(SETUP_LUA, keep.join("\n").replace(/\n{3,}/g, "\n\n").replace(/^\n+/, "") + "\n\n" + body + "\n");
 }
 
@@ -1075,6 +1087,30 @@ function ensureUgcLayout(): void {
       try {
         if (existsSync(oldShared) && readdirSync(oldShared).length === 0) rmSync(oldShared, { recursive: true, force: true });
       } catch {}
+    }
+  } catch {}
+}
+// 确保 dst_mods/ 中的模组在服务器的 mods/ 目录中有对应的符号链接，
+// 避免 Steam Workshop 下载超时导致服务器找不到模组
+function ensureServerModSymlinks(): void {
+  try {
+    const shared = ugcSharedDir();
+    if (!existsSync(shared)) return;
+    const serverModsDir = join(SERVER_DIR, "mods");
+    if (!existsSync(serverModsDir)) return;
+    const linkType = IS_WIN ? "junction" : "dir";
+    for (const id of readdirSync(shared)) {
+      if (!/^\d+$/.test(id)) continue;
+      const src = join(shared, id);
+      try { if (!statSync(src).isDirectory()) continue; } catch { continue; }
+      if (!existsSync(join(src, "modinfo.lua"))) continue;
+      const link = join(serverModsDir, `workshop-${id}`);
+      // 已存在且有效 → 跳过
+      try {
+        if (existsSync(join(link, "modinfo.lua"))) continue;
+      } catch {}
+      // 创建符号链接（不覆盖已有真实目录）
+      try { symlinkSync(src, link, linkType); } catch {}
     }
   } catch {}
 }
@@ -1906,6 +1942,21 @@ function normalizeAtlas(ref: string): string {
 }
 function parseModCustomizeFile(text: string, modId = ""): ModWorldgenOption[] {
   text = stripLuaComments(text);
+  // 解析 local 变量定义（如 local sw_atlas = "images/hud/customization_shipwrecked.xml"）
+  const luaLocals: Record<string, string> = {};
+  for (const lm of text.matchAll(/local\s+([A-Za-z_]\w*)\s*=\s*"([^"]+)"/g)) {
+    luaLocals[lm[1]] = lm[2];
+  }
+  // normalizeAtlas 的增强版：支持变量引用解析
+  const resolveAtlas = (ref: string): string => {
+    if (!ref) return "";
+    // 直接是路径字符串
+    const na = normalizeAtlas(ref);
+    if (na) return na;
+    // 变量引用 → 从 luaLocals 查找
+    if (luaLocals[ref]) return normalizeAtlas(luaLocals[ref]);
+    return "";
+  };
   const descMaps: Record<string, { v: string; label: string }[]> = { ...STD_DESC };
   // 模组内联 desc 表：local xxx_descriptions = { { text = ..., data = "..." }, ... }
   const descRe = /local\s+([A-Za-z_]\w*[Dd]escriptions)\s*=\s*\{/g;
@@ -2040,6 +2091,41 @@ function parseModCustomizeFile(text: string, modId = ""): ModWorldgenOption[] {
       }
     }
   }
+  // --- Island Adventures / Shipwrecked 风格：ia_worldgen_customize_table + ia_settings_customize_table ---
+  // 结构：local ia_xxx_customize_table = { global = { key = { value=, image=, atlas=, desc= }, ... } }
+  // 注意：IA 没有 items 子层，条目直接在分组块中
+  // atlas 字段通常是变量引用（如 sw_atlas = "images/hud/customization_shipwrecked.xml"）
+  for (const iaTableName of ["ia_worldgen_customize_table", "ia_settings_customize_table"]) {
+    const iaRe = new RegExp("\\b" + iaTableName + "\\s*=\\s*\\{", "g");
+    let iaM: RegExpExecArray | null;
+    while ((iaM = iaRe.exec(text))) {
+      const iaEnd = braceMatch(text, iaM.index + iaM[0].length - 1);
+      if (iaEnd === -1) { iaRe.lastIndex = text.length; break; }
+      const iaBody = text.slice(iaM.index + iaM[0].length, iaEnd);
+      iaRe.lastIndex = iaEnd;
+      const grpRe = /([A-Za-z_]\w*)\s*=\s*\{/g;
+      let gr: RegExpExecArray | null;
+      while ((gr = grpRe.exec(iaBody))) {
+        const ge = braceMatch(iaBody, grpRe.lastIndex - 1);
+        if (ge === -1) continue;
+        const gblk = iaBody.slice(grpRe.lastIndex, ge);
+        grpRe.lastIndex = ge;
+        const groupTextExpr = (/\btext\s*=\s*([^,\n]+)/.exec(gblk) || [])[1] || "";
+        const groupLabel = resolveStringsRef(groupTextExpr, modId) || gr[1];
+        const gaM = /\batlas\s*=\s*(?:"([^"]+)"|([A-Za-z_]\w*))/.exec(gblk);
+        let groupAtlas = resolveAtlas((gaM && (gaM[1] || gaM[2])) || "") || "customization_shipwrecked";
+        // IA 无 items 子层：整个分组块即为条目容器
+        // 但如果有 items 子表则用之（兼容变体）
+        const im = /items\s*=\s*\{/.exec(gblk);
+        const iBody = im ? (() => { const ie = braceMatch(gblk, im.index + im[0].length - 1); return ie === -1 ? gblk : gblk.slice(im.index + im[0].length, ie); })() : gblk;
+        for (const it of extractItemsFromGroup(iBody)) {
+          const itemAtlasM = /\batlas\s*=\s*(?:"([^"]+)"|([A-Za-z_]\w*))/.exec(it.block);
+          if (itemAtlasM) groupAtlas = resolveAtlas(itemAtlasM[1] || itemAtlasM[2]) || groupAtlas;
+          pushItem(it.key, it.block, groupLabel, "shipwrecked", groupAtlas);
+        }
+      }
+    }
+  }
   // customize_items：[LEVELCATEGORY.WORLDGEN/SETTINGS] → 分组 → 条目
   const SUBGROUP_CN: Record<string, string> = { global: "全局", monsters: "怪物", animals: "动物", resources: "资源", misc: "杂项", survivors: "生存者", events: "事件" };
   const ciRe = /\bcustomize_items\s*=\s*\{/g;
@@ -2158,6 +2244,8 @@ function modWorldgenDataFromDir(id: string, dir: string): { name: string; option
   const files: string[] = [];
   const mw = join(dir, "modworldgenmain.lua");
   if (existsSync(mw)) files.push(mw);
+  const msc = join(dir, "modservercreationmain.lua");
+  if (existsSync(msc)) files.push(msc);
   const cust = join(dir, "scripts", "map", "customize_patch.lua");
   if (existsSync(cust)) files.push(cust);
   const custItems = join(dir, "modcustomizeitems.lua");
@@ -2332,6 +2420,7 @@ async function ensureSteamCache(ids: string[], force = false): Promise<boolean> 
 // ---------- 模组列表合并 ----------
 function localModDirs(): string[] {
   ensureUgcLayout();
+  ensureServerModSymlinks();
   const set = new Set<string>();
   try {
     for (const d of readdirSync(MODS_DIR)) {
@@ -2872,16 +2961,20 @@ async function applyEnabledMods(ids: string[]): Promise<Response> {
     const key = `workshop-${id}`;
     map.set(key, { enabled: true, options: old.get(key)?.options || {} });
   }
+  // 先确保符号链接就位，再写 setup（writeSetupIds 会跳过已通过链接存在的模组，避免 Workshop 下载删除链接）
+  ensureServerModSymlinks();
   writeSetupIds(ids);
   writeModOverridesBoth(map);
   const omitted = [...old.keys()].filter((k) => !enabledSet.has(k.replace("workshop-", "")));
   // 检测启用的地图模组是否有洞穴预设
+  // 注意：火山（volcanoworld）是独立世界分片，不是洞穴替代
+  // 只有 location 含 "cave"/"under" 才算真正的洞穴预设
   const activeWorldMods = ids.filter((id) => {
     const d = modWorldgenData(id);
     if (!d) return false;
-    const hasCavePreset = d.presets.some((p) => /volcano|cave|under/i.test(p.location || ""));
-    const hasOverworldPreset = d.presets.some((p) => !/volcano|cave|under/i.test(p.location || ""));
-    // 只有地上预设、没有洞穴预设 = 纯地上地图模组（如猪镇）
+    const hasCavePreset = d.presets.some((p) => /(?:^cave$|^under|underground)/i.test(p.location || ""));
+    const hasOverworldPreset = d.presets.some((p) => !/(?:^cave$|^under|underground|volcano)/i.test(p.location || ""));
+    // 只有地上预设、没有洞穴预设 = 纯地上地图模组（如猪镇、海难）
     return hasOverworldPreset && !hasCavePreset;
   });
   // 自动删除不支持的 Caves 分片
@@ -2898,12 +2991,15 @@ async function applyEnabledMods(ids: string[]): Promise<Response> {
   const autoApplied: string[] = [];
   // VANILLA_PRESETS 已在文件顶部定义为全局常量
   const pickPreset = (presets: ModWorldgenPreset[], isMaster: boolean): ModWorldgenPreset | null => {
-    const isCaveLoc = (l: string) => /volcano|cave|under/i.test(l || "");
+    // 火山（volcanoworld）是独立世界分片，不是洞穴
+    // 只有 cave/underground 才是真正的洞穴预设
+    const isCaveLoc = (l: string) => /(?:^cave$|^under|underground)/i.test(l || "");
     if (isMaster) {
       return presets.find((p) => /SURVIVAL_TOGETHER/i.test(p.id) && !isCaveLoc(p.location))
-        || presets.find((p) => !isCaveLoc(p.location))
+        || presets.find((p) => !isCaveLoc(p.location) && !/volcano/i.test(p.location))
         || null;
     }
+    // 非主分片：只匹配真正的洞穴预设（cave/underground），不匹配火山
     return presets.find((p) => isCaveLoc(p.location)) || null;
   };
   for (const id of ids) {
@@ -3187,8 +3283,8 @@ async function api(req: Request, url: URL): Promise<Response> {
           const id = key.replace("workshop-", "");
           const d = modWorldgenData(id);
           if (!d) continue;
-          const hasCavePreset = d.presets.some((p) => /volcano|cave|under/i.test(p.location || ""));
-          const hasOverworldPreset = d.presets.some((p) => !/volcano|cave|under/i.test(p.location || ""));
+          const hasCavePreset = d.presets.some((p) => /(?:^cave$|^under|underground)/i.test(p.location || ""));
+          const hasOverworldPreset = d.presets.some((p) => !/(?:^cave$|^under|underground|volcano)/i.test(p.location || ""));
           if (hasOverworldPreset && !hasCavePreset) {
             const name = modCache.items[id]?.title || parseModInfo(id)?.name || id;
             return fail(`已启用地图模组「${name}」不支持地下世界，无法添加洞穴分片。该模组的世界（如猪镇）不需要地下世界。`);
@@ -3379,7 +3475,7 @@ async function api(req: Request, url: URL): Promise<Response> {
       }
       if (changed) {
         const ids = readSetupIds();
-        if (!ids.includes(id)) { ids.push(id); writeSetupIds(ids); }
+        if (!ids.includes(id)) { ids.push(id); ensureServerModSymlinks(); writeSetupIds(ids); }
       }
       return changed;
     };
@@ -3578,6 +3674,7 @@ async function api(req: Request, url: URL): Promise<Response> {
       if (!modCache.items[id]) continue;
       if (!cur.includes(id)) { cur.push(id); added.push(id); }
     }
+    ensureServerModSymlinks();
     writeSetupIds(cur);
     const names = added.map((id) => modCache.items[id]?.title || id).join("、");
     return ok({ added, missing }, missing.length
@@ -3598,6 +3695,7 @@ async function api(req: Request, url: URL): Promise<Response> {
     refreshLinkManifest();
     // 2. 从 dedicated_server_mods_setup.lua 移除
     const cur = readSetupIds().filter((x) => x !== String(b.id));
+    ensureServerModSymlinks();
     writeSetupIds(cur);
     // 3. 从所有分片的 modoverrides.lua 移除
     for (const shard of listShards()) {
@@ -4108,6 +4206,7 @@ async function api(req: Request, url: URL): Promise<Response> {
     const setupIds = new Set(readSetupIds());
     setupIds.add(LANG_SERVER_MOD);
     setupIds.add(LANG_CNPLUS_MOD);
+    ensureServerModSymlinks();
     writeSetupIds([...setupIds]);
     msgs.push("已启用服务器汉化（1301033176）+ Chinese++（1418746242），语言设为简体中文");
     return ok(null, msgs.join("；"));

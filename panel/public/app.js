@@ -940,7 +940,9 @@ async function loadModWorldgen() {
             .then(() => loadModWorldgen());
         } else {
           worldState.overrides[o.key] = val;
-          loadWorldOverrides();
+          // 保存到服务器（不要调用 loadWorldOverrides 重新加载，会覆盖其他未保存的修改）
+          api("world/overrides", { method: "POST", body: { shard: worldState.shard, overrides: { [o.key]: val } } })
+            .then(() => loadModWorldgen());
         }
       });
     };

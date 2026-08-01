@@ -182,7 +182,8 @@ function parseAtlasXml(xml: string): { texFile: string; elements: AtlasElement[]
 }
 
 // ---------- 从图集 (xml+tex) 导出全部元素 PNG ----------
-function exportAtlas(xmlPath: string, texPath: string, outDir: string): { count: number; indexLines: string[] } {
+// seen: 可选的去重集合，同名元素只在第一次出现时导出，避免多图集覆盖导致内容错乱
+function exportAtlas(xmlPath: string, texPath: string, outDir: string, seen?: Set<string>): { count: number; indexLines: string[] } {
   const xml = readFileSync(xmlPath, "utf-8");
   const atlas = parseAtlasXml(xml);
   if (!atlas) { console.log(`  [跳过] ${xmlPath}: 未找到 Texture 声明`); return { count: 0, indexLines: [] }; }
@@ -195,6 +196,10 @@ function exportAtlas(xmlPath: string, texPath: string, outDir: string): { count:
   const indexLines: string[] = [];
   for (const el of atlas.elements) {
     const pngName = el.name.replace(/\.(tex|png)$/i, "") + ".png";
+    if (seen) {
+      if (seen.has(pngName)) continue; // 已从更早的图集导出，跳过
+      seen.add(pngName);
+    }
     try {
       const crop = cropRGBA(decoded, el.u1, el.u2, el.v1, el.v2);
       writeFileSync(join(outDir, pngName), encodePNG(crop.rgba, crop.width, crop.height));
@@ -263,8 +268,9 @@ if (DO_MINIMAP) {
   const outDir = join(OUT_ROOT, "minimap");
   let total = 0;
   const allIndex: string[] = [];
+  const seen = new Set<string>(); // 去重：同名元素只从第一个出现的图集提取，避免后续图集覆盖
   for (const p of pairs) {
-    const { count, indexLines } = exportAtlas(p.xml, p.tex, outDir);
+    const { count, indexLines } = exportAtlas(p.xml, p.tex, outDir, seen);
     console.log(`  ${p.xml.split(/[\\/]/).pop()}: ${count} 个图标`);
     total += count;
     allIndex.push(...indexLines);
