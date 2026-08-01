@@ -7,7 +7,12 @@
 //      例: bun run tools/extract_icons.ts --minimap --server-dir /home/steam/dst_server
 // 说明：KTEX 解码支持 DXT1 / DXT5 / 未压缩 RGBA。PNG 编码为零依赖内置实现。
 import { existsSync, readFileSync, readdirSync, mkdirSync, writeFileSync, statSync } from "node:fs";
-import { join, basename } from "node:path";
+import { join, basename, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { deflateSync } from "node:zlib";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
 
 const args = process.argv.slice(2);
 function argVal(name: string): string {
@@ -18,8 +23,8 @@ const MOD_ID = argVal("--mod");
 const MODS_DIR = argVal("--mods-dir") || "/home/steam/dst_mods";
 const SERVER_DIR = argVal("--server-dir") || "/home/steam/dst_server";
 const DO_MINIMAP = args.includes("--minimap");
-const OUT_ROOT = join(import.meta.dir, "..", "public", "icons");
-const INVICON_DIR = join(import.meta.dir, "..", "data", "invicons");
+const OUT_ROOT = join(__dirname, "..", "public", "icons");
+const INVICON_DIR = join(__dirname, "..", "data", "invicons");
 
 if (!MOD_ID && !DO_MINIMAP) {
   console.log(`用法:
@@ -116,7 +121,6 @@ function decodeDXT(data: Buffer, width: number, height: number, dxt5: boolean): 
 }
 // ---------- PNG 编码（零依赖） ----------
 function encodePNG(rgba: Buffer, width: number, height: number): Buffer {
-  const { deflateSync } = require("node:zlib");
   const crc32Table: number[] = [];
   for (let i = 0; i < 256; i++) { let c = i; for (let j = 0; j < 8; j++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; crc32Table.push(c); }
   const crc32 = (buf: Buffer) => { let c = 0xffffffff; for (const b of buf) c = crc32Table[(c ^ b) & 0xff] ^ (c >>> 8); return (c ^ 0xffffffff) >>> 0; };
@@ -138,10 +142,14 @@ function encodePNG(rgba: Buffer, width: number, height: number): Buffer {
   const idat = deflateSync(raw, { level: 9 });
   return Buffer.concat([sig, chunk("IHDR", ihdr), chunk("IDAT", idat), chunk("IEND", Buffer.alloc(0))]);
 }
-// UV 裁剪（KTEX/DXT 像素自上而下，UV v 坐标原点在上方）
+// UV 裁剪（RGBA 已翻转为自上而下，与 PNG 一致，UV v 坐标原点在上方）
+// Klei 的 UV 坐标指向像素中心：u = (pixel_index + 0.5) / texture_width
+// 因此 pixel_index = floor(u * width)，像素范围 [floor(u1*W), floor(u2*W)] 闭区间
 function cropRGBA(img: { width: number; height: number; rgba: Buffer }, u1: number, u2: number, v1: number, v2: number): { width: number; height: number; rgba: Buffer } {
-  let x = Math.round(u1 * img.width), w = Math.round((u2 - u1) * img.width);
-  let y = Math.round(v1 * img.height), h = Math.round((v2 - v1) * img.height);
+  let x = Math.floor(u1 * img.width);
+  let y = Math.floor(v1 * img.height);
+  let w = Math.floor(u2 * img.width) - x + 1;
+  let h = Math.floor(v2 * img.height) - y + 1;
   if (w <= 0 || h <= 0) return img;
   x = Math.max(0, Math.min(x, img.width - 1)); y = Math.max(0, Math.min(y, img.height - 1));
   w = Math.min(w, img.width - x); h = Math.min(h, img.height - y);

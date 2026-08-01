@@ -1250,7 +1250,7 @@ function decodeKTEX(buf: Buffer): { width: number; height: number; png: Buffer }
   const pixelData = buf.subarray(dataOffset, dataOffset + mip0Size);
   let rgba: Buffer | null;
   if (fmt === 4) {
-    // 未压缩 RGBA8：直接拷贝（KTEX 像素自上而下，与 PNG 行序一致）
+    // 未压缩 RGBA8：直接拷贝（与 PNG 行序一致）
     rgba = Buffer.alloc(mip0W * mip0H * 4);
     pixelData.copy(rgba, 0, 0, Math.min(pixelData.length, rgba.length));
   } else if (fmt === 0) {
@@ -1352,12 +1352,14 @@ function encodePNG(rgba: Buffer, width: number, height: number): Buffer {
   return Buffer.concat([sig, chunk("IHDR", ihdr), chunk("IDAT", idat), chunk("IEND", Buffer.alloc(0))]);
 }
 // 根据 UV 坐标裁剪已解码的 KTEX 图像并输出 PNG
-// DXT 解码器输出自上而下的 RGBA（与 PNG 一致），UV 坐标直接使用
+// DXT 解码器输出自上而下的 RGBA（与 PNG 一致），UV v 坐标原点在上方
+// Klei 的 UV 坐标指向像素中心：u = (pixel_index + 0.5) / texture_width
+// 因此 pixel_index = floor(u * width)，像素范围 [floor(u1*W), floor(u2*W)] 闭区间
 function cropPNG(decoded: { width: number; height: number; png: Buffer }, u1: number, u2: number, v1: number, v2: number): Buffer {
-  const cropX = Math.round(u1 * decoded.width);
-  const cropW = Math.round((u2 - u1) * decoded.width);
-  const cropY = Math.round(v1 * decoded.height);
-  const cropH = Math.round((v2 - v1) * decoded.height);
+  const cropX = Math.floor(u1 * decoded.width);
+  const cropW = Math.floor(u2 * decoded.width) - cropX + 1;
+  const cropY = Math.floor(v1 * decoded.height);
+  const cropH = Math.floor(v2 * decoded.height) - cropY + 1;
   if (cropW <= 0 || cropH <= 0 || cropX < 0 || cropY < 0) return decoded.png;
   // 从 PNG 解码回 RGBA（简单方式：直接重新解码 KTEX→RGBA 再裁剪）
   // 更高效：直接从 decodeKTEX 返回 rgba，但当前结构返回 png
