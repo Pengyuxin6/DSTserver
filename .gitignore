@@ -13,3 +13,7 @@ panel/steamcmd/
 
 # 社区图床运行时缓存（自动重建，不提交）
 panel/public/icons/wiki/
+
+# 个人生产 nginx 配置（含真实域名/内部端口地图，严禁入库；备份见 F:\kimiwork\nginx-configs-backup）
+nginx/blog-web.conf
+nginx/dcu.conf
