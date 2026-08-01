@@ -2970,6 +2970,16 @@ const HELP_TECH = `
   </tbody></table>
   <div class="doc-tip">📖 更完整的算法细节（含取图位置全清单、切片算法、社区图床补全算法、数据文件清单）见项目文档 <code>docs/一脸懵逼.md</code>。</div>
 
+  <h4>4.9 实战踩坑：后缀差异、覆盖统计、CDN 人机校验</h4>
+  <table class="grid"><thead><tr><th>坑</th><th>真相与对策</th></tr></thead><tbody>
+    <tr><td>小地图 XML 元素名是 <code>.png</code> 结尾（物品栏是 <code>.tex</code>）</td><td>科雷原始命名就不统一，不是 bug。解析索引用 <code>(tex|png)</code> 双后缀兼容，少兼容一个，547 个小地图图标<b>整组静默失踪</b>（格罗姆/大触手/大号华丽箱子这类只有小地图图标的实体全没图）</td></tr>
+    <tr><td>小地图图集有 3 组文件</td><td><code>minimap_data.xml↔minimap_atlas.tex</code>、<code>_data1↔_atlas1</code>、<code>_data2↔_atlas2</code> 按编号配对，切错组合 UV 全错位</td></tr>
+    <tr><td>索引 XML 与 TEX 版本必须一致</td><td>游戏更新后图集元素重新排列，跨版本配对会导致切出来的图张冠李戴</td></tr>
+    <tr><td>社区图床 CDN 人机校验</td><td>①无 UA→403；②UA 版本号造假（如不存在的 Chrome/150）→403；③<b>Bun/Node fetch 的 TLS 指纹与浏览器不同，机房 IP 必被拦</b>——必须调系统 curl 借 TLS 栈（Linux/Win10+ 自带），落盘前校验 PNG 魔数</td></tr>
+    <tr><td><code>.404</code> 负缓存挡住修复</td><td>负缓存只代表"当时没取到"。取图链路修好后要清空 <code>public/icons/wiki/*.404</code> 再验证，否则历史失败继续挡 24 小时</td></tr>
+  </tbody></table>
+  <p><b>覆盖率全量扫描</b>（3944 个原版 prefab，索引↔磁盘逐一核对）：图集直接覆盖 <b>1662</b> 个；仅社区图床兜底 <b>715</b> 个（有英文名但科雷没给图标，如悲惨的毒菌蟾蜍）；内部实体 <b>1567</b> 个（<code>_fx</code> 特效等，本来就没图，占位块是正常行为）。物品列表实展 2370 条，其中 1633 条带图集图标。排障手法：先查索引→再查磁盘 PNG→再 curl 看 HTTP 状态码→最后才怀疑切片算法。</p>
+
   <h4>五、声音系统：FMOD 引擎</h4>
   <p>DST 使用 <b>FMOD 音频引擎</b>，声音资源分两种文件：</p>
   <table class="grid"><thead><tr><th>文件类型</th><th>内容</th><th>作用</th></tr></thead><tbody>
