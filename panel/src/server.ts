@@ -4542,22 +4542,27 @@ const server = Bun.serve({
       if (!enName) return new Response("Not found", { status: 404 });
       // 候选文件名：原始英文名 / 去撇号变体（MediaWiki 规则：空格→下划线）
       const cands = [...new Set([enName, enName.replace(/['’]/g, "")])].map((n) => n.replace(/\s+/g, "_") + ".png");
-      const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36";
+      // CDN 有人机校验：①无 UA 或版本号虚假（如不存在的 Chrome/150）会被 403；
+      // ②Bun fetch 的 TLS 指纹与浏览器不同，机房 IP 下必被拦——必须借系统 curl 的
+      // TLS 栈（Linux 与 Win10+ 均自带 curl.exe），UA 用真实存在过的浏览器版本
+      const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36";
+      try { mkdirSync(diskDir, { recursive: true }); } catch {}
       for (const fn of cands) {
+        const tmp = join(diskDir, ".dl_" + prefab + "_" + Date.now() + ".tmp");
         try {
           const md5 = createHash("md5").update(fn).digest("hex");
           const cdn = `https://huiji-public.huijistatic.com/dontstarve/uploads/${md5[0]}/${md5.slice(0, 2)}/${encodeURIComponent(fn)}`;
-          const r = await fetch(cdn, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(8000) });
-          if (!r.ok) continue;
-          const ct = r.headers.get("content-type") || "";
-          if (!ct.startsWith("image/")) continue;
-          const buf = Buffer.from(await r.arrayBuffer());
-          if (buf.length < 100) continue;
-          try { mkdirSync(diskDir, { recursive: true }); writeFileSync(diskFile, buf); } catch {}
-          return new Response(buf, { status: 200, headers: { "Content-Type": ct, "Cache-Control": "public, max-age=604800, immutable" } });
+          const p = Bun.spawn(["curl", "-sS", "-f", "-L", "--max-time", "8", "-A", UA, "-e", "https://dontstarve.huijiwiki.com/", "-o", tmp, cdn], { stdout: "ignore", stderr: "ignore" });
+          await p.exited;
+          if (p.exitCode !== 0 || !existsSync(tmp)) continue;
+          const buf = Buffer.from(readFileSync(tmp));
+          if (buf.length < 100 || buf[0] !== 0x89 || buf[1] !== 0x50) continue; // 非 PNG
+          try { renameSync(tmp, diskFile); } catch { try { writeFileSync(diskFile, buf); } catch {} }
+          return new Response(buf, { status: 200, headers: pngHeaders });
         } catch { continue; }
+        finally { try { if (existsSync(tmp)) unlinkSync(tmp); } catch {} }
       }
-      try { mkdirSync(diskDir, { recursive: true }); writeFileSync(negFile, ""); } catch {}
+      try { writeFileSync(negFile, ""); } catch {}
       return new Response("Not found", { status: 404 });
     }
     // 本地模组库图标：/local-icon?id=<modId> → PNG（直接解码客户端目录里的 modicon.tex，磁盘缓存）
