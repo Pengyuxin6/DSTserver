@@ -1133,7 +1133,7 @@ async function renderLocalSteamBox(modsDir) {
       mods.map((m) => `<tr>
         <td><button class="fav-star${m.favorite ? " on" : ""}" data-localfav="${esc(m.id)}" title="${m.favorite ? "取消收藏" : "收藏（置顶）"}">${m.favorite ? "★" : "☆"}</button></td>
         <td style="min-width:180px"><div style="display:flex;align-items:center;gap:8px">
-          ${m.hasIcon ? `<img src="/local-icon?id=${esc(m.id)}" style="width:36px;height:36px;object-fit:contain;border-radius:6px;border:1px solid var(--border);flex-shrink:0" onerror="this.style.display='none'">` : ""}
+          ${m.hasIcon ? `<img src="/local-icon?id=${esc(m.id)}" style="width:36px;height:36px;object-fit:contain;border-radius:6px;border:1px solid var(--border);flex-shrink:0" onerror="this.style.display='none'">` : m.preview ? `<img src="/img-proxy?url=${encodeURIComponent(m.preview)}" title="官网预览图（本地无图标）" style="width:36px;height:36px;object-fit:cover;border-radius:6px;border:1px solid var(--border);flex-shrink:0" onerror="this.style.display='none'">` : ""}
           <div><b>${esc(m.name || m.id)}</b><div class="hint" style="font-family:monospace">${esc(m.id)}</div></div></div></td>
         <td style="font-size:12px;max-width:260px"><div style="max-height:48px;overflow:hidden" title="${esc(m.desc)}">${esc(m.desc || "（无说明）")}</div></td>
         <td style="white-space:nowrap">${typeTag(m)}${m.wgPresetCount ? `<div class="hint">预设 ${m.wgPresetCount} 个</div>` : ""}</td>

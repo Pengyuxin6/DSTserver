@@ -3625,7 +3625,10 @@ async function api(req: Request, url: URL): Promise<Response> {
     const master = listShards().find((s) => s.isMaster) || listShards()[0];
     const enabledIds = new Set<string>();
     if (master) for (const [k, e] of readModOverrides(master.name)) if (e.enabled) enabledIds.add(k.replace("workshop-", ""));
-    const mods = scanLocalSteamMods().map((m) => {
+    const scanned = scanLocalSteamMods();
+    // 批量补全创意工坊元数据（拿到官网预览图 preview_url，无本地图标时前端回退展示；6小时缓存，网络失败不影响）
+    try { await ensureSteamCache(scanned.map((m) => m.id)); } catch {}
+    const mods = scanned.map((m) => {
       const p = join(store, m.id);
       let linked = false, inStore = false;
       try { if (lstatSync(p).isSymbolicLink()) linked = true; else if (existsSync(p)) inStore = true; } catch {}
@@ -3649,6 +3652,8 @@ async function api(req: Request, url: URL): Promise<Response> {
       return {
         ...m, linked, inStore, name, desc,
         hasIcon: existsSync(join(m.path, "modicon.tex")),
+        // 官网预览图（无本地 modicon.tex 时前端回退用，走 /img-proxy 防直连失败）
+        preview: modCache.items[m.id]?.preview_url || "",
         worldMode, wgPresetCount: wg?.presets.length || 0,
         enabled: enabledIds.has(m.id),
         favorite: panelConfig.favorites.includes(m.id),
