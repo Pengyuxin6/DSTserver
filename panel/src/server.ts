@@ -1506,6 +1506,24 @@ function vanillaPrefabs(): Set<string> {
   }
   return vanillaPrefabSet;
 }
+// 世界设置项权威图标映射（key → 图集/元素名，由游戏 scripts/map/customize.lua 生成，见 docs/一脸懵逼.md）
+let worldoptionIcons: Record<string, { atlas: string; img: string }> | null = null;
+function worldoptionIconMap(): Record<string, { atlas: string; img: string }> {
+  if (!worldoptionIcons) {
+    try { worldoptionIcons = JSON.parse(readText(join(PANEL_DIR, "data", "worldoption_icons.json"))); }
+    catch { worldoptionIcons = {}; }
+  }
+  return worldoptionIcons!;
+}
+// prefab → 英文显示名（由游戏 strings.lua 的 STRINGS.NAMES 提取，用于社区图床补全无图实体的图标）
+let prefabEnNameMap: Record<string, string> | null = null;
+function prefabEnNames(): Record<string, string> {
+  if (!prefabEnNameMap) {
+    try { prefabEnNameMap = JSON.parse(readText(join(PANEL_DIR, "data", "prefab_en_names.json"))); }
+    catch { prefabEnNameMap = {}; }
+  }
+  return prefabEnNameMap!;
+}
 const modItemsCache = new Map<string, { name: string; prefab: string; cat: string }[]>();
 function modItems(id: string): { name: string; prefab: string; cat: string }[] {
   if (modItemsCache.has(id)) return modItemsCache.get(id)!;
@@ -2730,7 +2748,9 @@ const validKeyVal = (s: any) => typeof s === "string" && /^[A-Za-z0-9_]{1,40}$/.
 const validWorldVal = (s: any) => typeof s === "string" && /^[A-Za-z0-9_|]{1,60}$/.test(s);
 
 function worldOptionTable(isMaster: boolean) {
-  return isMaster ? FOREST_OPTIONS : CAVE_OPTIONS;
+  // 附带权威图标映射（前端不再按 key 名猜图，避免 crow_carnival→crowcarnival 这类对不上）
+  const icons = worldoptionIconMap();
+  return (isMaster ? FOREST_OPTIONS : CAVE_OPTIONS).map((o: any) => ({ ...o, icon: icons[o.key] || null }));
 }
 
 // ---------- 物品分类修正 ----------
@@ -4504,6 +4524,41 @@ const server = Bun.serve({
       // 该 URL 按登录态返回不同页面（表示随 Cookie 变化）：禁用协商缓存，
       // 否则登录后 If-Modified-Since 命中 304，浏览器会继续展示缓存的登录页
       return serveFile(join(PUBLIC_DIR, checkAuth(req) ? "index.html" : "login.html"), req, { noNegotiate: true });
+    }
+    // 物品图标补全：/wiki-icon?prefab=<prefab> → PNG
+    // 针对既无物品栏图标也无小地图图标的实体（如阿比盖尔），按 MediaWiki 存储规则
+    // （文件名首字母大写、空格转下划线，md5(文件名) 前1/前2位作目录）直接取社区图床；
+    // 磁盘缓存 + 404 负缓存（24h）。注意：取图渠道不出现在任何日志里
+    if (path === "/wiki-icon" && req.method === "GET") {
+      const prefab = (url.searchParams.get("prefab") || "").trim();
+      if (!/^[a-z0-9_]{2,64}$/.test(prefab)) return new Response("Bad request", { status: 400 });
+      const pngHeaders = { "Content-Type": "image/png", "Cache-Control": "public, max-age=604800, immutable" };
+      const diskDir = join(PUBLIC_DIR, "icons", "wiki");
+      const diskFile = join(diskDir, prefab + ".png");
+      if (existsSync(diskFile)) return new Response(Bun.file(diskFile), { status: 200, headers: pngHeaders });
+      const negFile = diskFile + ".404";
+      try { if (existsSync(negFile) && Date.now() - statSync(negFile).mtimeMs < 86400_000) return new Response("Not found", { status: 404 }); } catch {}
+      const enName = prefabEnNames()[prefab];
+      if (!enName) return new Response("Not found", { status: 404 });
+      // 候选文件名：原始英文名 / 去撇号变体（MediaWiki 规则：空格→下划线）
+      const cands = [...new Set([enName, enName.replace(/['’]/g, "")])].map((n) => n.replace(/\s+/g, "_") + ".png");
+      const UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36";
+      for (const fn of cands) {
+        try {
+          const md5 = createHash("md5").update(fn).digest("hex");
+          const cdn = `https://huiji-public.huijistatic.com/dontstarve/uploads/${md5[0]}/${md5.slice(0, 2)}/${encodeURIComponent(fn)}`;
+          const r = await fetch(cdn, { headers: { "User-Agent": UA }, signal: AbortSignal.timeout(8000) });
+          if (!r.ok) continue;
+          const ct = r.headers.get("content-type") || "";
+          if (!ct.startsWith("image/")) continue;
+          const buf = Buffer.from(await r.arrayBuffer());
+          if (buf.length < 100) continue;
+          try { mkdirSync(diskDir, { recursive: true }); writeFileSync(diskFile, buf); } catch {}
+          return new Response(buf, { status: 200, headers: { "Content-Type": ct, "Cache-Control": "public, max-age=604800, immutable" } });
+        } catch { continue; }
+      }
+      try { mkdirSync(diskDir, { recursive: true }); writeFileSync(negFile, ""); } catch {}
+      return new Response("Not found", { status: 404 });
     }
     // 本地模组库图标：/local-icon?id=<modId> → PNG（直接解码客户端目录里的 modicon.tex，磁盘缓存）
     if (path === "/local-icon" && req.method === "GET") {

@@ -237,28 +237,35 @@ if (MOD_ID) {
 
 // ================= 模式 2: 游戏 minimap 图集 =================
 if (DO_MINIMAP) {
-  const zip = join(SERVER_DIR, "data", "databundles", "images.zip");
-  if (!existsSync(zip)) {
-    console.log(`未找到游戏图片包: ${zip}（用 --server-dir 指定服务端目录）`);
+  // 真实文件布局：data/minimap/minimap_data.xml + minimap_atlas.tex（及 _data1/_atlas1、_data2/_atlas2 共3组，散文件非zip）
+  // 专用服务端与完整客户端的 data/minimap/ 目录都带这组文件；合并所有元素到 public/icons/minimap/
+  const mmDir = join(SERVER_DIR, "data", "minimap");
+  if (!existsSync(mmDir)) {
+    console.log(`未找到 minimap 图集目录: ${mmDir}（用 --server-dir 指定游戏/服务端目录）`);
     process.exit(1);
   }
-  const tmp = `/tmp/dst_minimap_x_${Date.now()}`;
-  mkdirSync(tmp, { recursive: true });
-  // 用系统 unzip 解出 minimap/minimap.xml + minimap/minimap.tex
-  const uz = Bun.spawnSync(["unzip", "-o", "-q", zip, "minimap/minimap.xml", "minimap/minimap.tex", "-d", tmp]);
-  if (uz.exitCode !== 0) {
-    console.log("unzip 失败（需要系统 unzip 命令；注意专用服务端的 images.zip 不含 minimap 图集，该功能需要完整客户端的游戏文件）: " + Buffer.from(uz.stderr).toString());
-    process.exit(1);
+  const pairs: { xml: string; tex: string }[] = [];
+  for (const f of readdirSync(mmDir)) {
+    const m = /^(minimap_data\d*)\.xml$/i.exec(f);
+    if (!m) continue;
+    const tex = join(mmDir, m[1].replace("minimap_data", "minimap_atlas") + ".tex");
+    pairs.push({ xml: join(mmDir, f), tex });
   }
-  const xmlPath = join(tmp, "minimap", "minimap.xml");
-  const texPath = join(tmp, "minimap", "minimap.tex");
+  if (!pairs.length) { console.log(`${mmDir} 里没有 minimap_data*.xml`); process.exit(1); }
   const outDir = join(OUT_ROOT, "minimap");
-  const { count, indexLines } = exportAtlas(xmlPath, texPath, outDir);
-  console.log(`minimap: ${count} 个图标 → ${outDir}`);
+  let total = 0;
+  const allIndex: string[] = [];
+  for (const p of pairs) {
+    const { count, indexLines } = exportAtlas(p.xml, p.tex, outDir);
+    console.log(`  ${p.xml.split(/[\\/]/).pop()}: ${count} 个图标`);
+    total += count;
+    allIndex.push(...indexLines);
+  }
+  console.log(`minimap: 共 ${total} 个图标 → ${outDir}`);
   // 生成物品图标索引（itemIconAtlas 读取）：元素名 → minimap 图集
-  if (count) {
+  if (total) {
     mkdirSync(INVICON_DIR, { recursive: true });
-    writeFileSync(join(INVICON_DIR, "minimap.xml"), `<Atlas><Texture filename="minimap.tex" /><Elements>\n${indexLines.join("\n")}\n</Elements></Atlas>\n`);
+    writeFileSync(join(INVICON_DIR, "minimap.xml"), `<Atlas><Texture filename="minimap.tex" /><Elements>\n${allIndex.join("\n")}\n</Elements></Atlas>\n`);
     console.log(`索引已写入 ${join(INVICON_DIR, "minimap.xml")}`);
   }
 }

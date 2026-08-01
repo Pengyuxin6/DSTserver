@@ -10,3 +10,6 @@ panel/mod_cache.json
 panel/dst_mods/
 panel/dst_server/
 panel/steamcmd/
+
+# 社区图床运行时缓存（自动重建，不提交）
+panel/public/icons/wiki/

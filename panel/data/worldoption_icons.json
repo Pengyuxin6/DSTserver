@@ -1,0 +1,946 @@
+{
+ "acidrain_enabled": {
+  "atlas": "worldsettings_customization",
+  "img": "acid_rain"
+ },
+ "alternatehunt": {
+  "atlas": "worldsettings_customization",
+  "img": "alternatehunt"
+ },
+ "angrybees": {
+  "atlas": "worldgen_customization",
+  "img": "wasphive"
+ },
+ "antliontribute": {
+  "atlas": "worldsettings_customization",
+  "img": "antlion_tribute"
+ },
+ "atriumgate": {
+  "atlas": "worldsettings_customization",
+  "img": "atriumgate"
+ },
+ "autumn": {
+  "atlas": "worldsettings_customization",
+  "img": "autumn"
+ },
+ "balatro": {
+  "atlas": "worldgen_customization",
+  "img": "balatro_machine"
+ },
+ "banana": {
+  "atlas": "worldgen_customization",
+  "img": "banana"
+ },
+ "bananabush_portalrate": {
+  "atlas": "worldsettings_customization",
+  "img": "bananabush"
+ },
+ "basicresource_regrowth": {
+  "atlas": "worldsettings_customization",
+  "img": "basicresource_regrowth"
+ },
+ "bats": {
+  "atlas": "worldgen_customization",
+  "img": "batcave"
+ },
+ "bats_setting": {
+  "atlas": "worldsettings_customization",
+  "img": "bats"
+ },
+ "bearger": {
+  "atlas": "worldsettings_customization",
+  "img": "bearger"
+ },
+ "beefalo": {
+  "atlas": "worldgen_customization",
+  "img": "beefalo"
+ },
+ "beefaloheat": {
+  "atlas": "worldsettings_customization",
+  "img": "beefaloheat"
+ },
+ "beequeen": {
+  "atlas": "worldsettings_customization",
+  "img": "beequeen"
+ },
+ "bees": {
+  "atlas": "worldgen_customization",
+  "img": "beehive"
+ },
+ "bees_setting": {
+  "atlas": "worldsettings_customization",
+  "img": "bees"
+ },
+ "berrybush": {
+  "atlas": "worldgen_customization",
+  "img": "berrybush"
+ },
+ "birds": {
+  "atlas": "worldsettings_customization",
+  "img": "birds"
+ },
+ "boons": {
+  "atlas": "worldgen_customization",
+  "img": "skeletons"
+ },
+ "branching": {
+  "atlas": "worldgen_customization",
+  "img": "world_branching"
+ },
+ "brightmarecreatures": {
+  "atlas": "worldsettings_customization",
+  "img": "brightmarecreatures"
+ },
+ "bunnymen": {
+  "atlas": "worldgen_customization",
+  "img": "bunnyhutch"
+ },
+ "bunnymen_setting": {
+  "atlas": "worldsettings_customization",
+  "img": "bunnymen"
+ },
+ "butterfly": {
+  "atlas": "worldsettings_customization",
+  "img": "butterfly"
+ },
+ "buzzard": {
+  "atlas": "worldgen_customization",
+  "img": "buzzard"
+ },
+ "cactus": {
+  "atlas": "worldsettings_customization",
+  "img": "cactus"
+ },
+ "cactus_regrowth": {
+  "atlas": "worldsettings_customization",
+  "img": "cactus"
+ },
+ "carrot": {
+  "atlas": "worldgen_customization",
+  "img": "carrot"
+ },
+ "carrots_regrowth": {
+  "atlas": "worldsettings_customization",
+  "img": "carrots"
+ },
+ "catcoon": {
+  "atlas": "worldgen_customization",
+  "img": "catcoonden"
+ },
+ "catcoons": {
+  "atlas": "worldsettings_customization",
+  "img": "catcoons"
+ },
+ "cave_ponds": {
+  "atlas": "worldgen_customization",
+  "img": "ponds"
+ },
+ "cave_spiders": {
+  "atlas": "worldgen_customization",
+  "img": "cave_spiderden"
+ },
+ "cavelight": {
+  "atlas": "worldgen_customization",
+  "img": "cavelight"
+ },
+ "chess": {
+  "atlas": "worldgen_customization",
+  "img": "chess_monsters"
+ },
+ "chest_mimics": {
+  "atlas": "worldsettings_customization",
+  "img": "chest_mimics"
+ },
+ "cookiecutters": {
+  "atlas": "worldsettings_customization",
+  "img": "cookiecutters"
+ },
+ "crabking": {
+  "atlas": "worldsettings_customization",
+  "img": "crabking"
+ },
+ "crow_carnival": {
+  "atlas": "worldsettings_customization",
+  "img": "crowcarnival"
+ },
+ "darkness": {
+  "atlas": "worldsettings_customization",
+  "img": "darkness"
+ },
+ "day": {
+  "atlas": "worldsettings_customization",
+  "img": "day"
+ },
+ "daywalker": {
+  "atlas": "worldsettings_customization",
+  "img": "daywalker"
+ },
+ "daywalker2": {
+  "atlas": "worldsettings_customization",
+  "img": "daywalker2"
+ },
+ "deciduousmonster": {
+  "atlas": "worldsettings_customization",
+  "img": "deciduouspoison"
+ },
+ "deciduoustree_regrowth": {
+  "atlas": "worldsettings_customization",
+  "img": "deciduoustree"
+ },
+ "deerclops": {
+  "atlas": "worldsettings_customization",
+  "img": "deerclops"
+ },
+ "dragonfly": {
+  "atlas": "worldsettings_customization",
+  "img": "dragonfly"
+ },
+ "dropeverythingondespawn": {
+  "atlas": "worldsettings_customization",
+  "img": "dropeverythingondespawn"
+ },
+ "dustmoths": {
+  "atlas": "worldsettings_customization",
+  "img": "dustmoths"
+ },
+ "earthquakes": {
+  "atlas": "worldsettings_customization",
+  "img": "earthquakes"
+ },
+ "evergreen_regrowth": {
+  "atlas": "worldsettings_customization",
+  "img": "evergreen"
+ },
+ "extrastartingitems": {
+  "atlas": "worldsettings_customization",
+  "img": "extrastartingitems"
+ },
+ "eyeofterror": {
+  "atlas": "worldsettings_customization",
+  "img": "eyeofterror"
+ },
+ "fern": {
+  "atlas": "worldgen_customization",
+  "img": "fern"
+ },
+ "fishschools": {
+  "atlas": "worldsettings_customization",
+  "img": "fishschool"
+ },
+ "fissure": {
+  "atlas": "worldgen_customization",
+  "img": "fissure"
+ },
+ "flint": {
+  "atlas": "worldsettings_customization",
+  "img": "flint"
+ },
+ "flower_cave": {
+  "atlas": "worldsettings_customization",
+  "img": "flower_cave"
+ },
+ "flower_cave_regrowth": {
+  "atlas": "worldsettings_customization",
+  "img": "flower_cave"
+ },
+ "flowers": {
+  "atlas": "worldsettings_customization",
+  "img": "flowers"
+ },
+ "flowers_regrowth": {
+  "atlas": "worldsettings_customization",
+  "img": "flowers"
+ },
+ "frograin": {
+  "atlas": "worldsettings_customization",
+  "img": "frog_rain"
+ },
+ "frogs": {
+  "atlas": "worldsettings_customization",
+  "img": "frogs"
+ },
+ "fruitfly": {
+  "atlas": "worldsettings_customization",
+  "img": "fruitfly"
+ },
+ "ghostenabled": {
+  "atlas": "worldsettings_customization",
+  "img": "ghostenabled"
+ },
+ "ghostsanitydrain": {
+  "atlas": "worldsettings_customization",
+  "img": "ghostsanitydrain"
+ },
+ "gnarwail": {
+  "atlas": "worldsettings_customization",
+  "img": "gnarwail"
+ },
+ "goosemoose": {
+  "atlas": "worldsettings_customization",
+  "img": "goosemoose"
+ },
+ "grass": {
+  "atlas": "worldsettings_customization",
+  "img": "grass"
+ },
+ "grassgekkos": {
+  "atlas": "worldsettings_customization",
+  "img": "grassgekkos"
+ },
+ "hallowed_nights": {
+  "atlas": "worldsettings_customization",
+  "img": "hallowednights"
+ },
+ "healthpenalty": {
+  "atlas": "worldsettings_customization",
+  "img": "healthpenalty"
+ },
+ "hound_mounds": {
+  "atlas": "worldsettings_customization",
+  "img": "hounds"
+ },
+ "houndmound": {
+  "atlas": "worldgen_customization",
+  "img": "houndmound"
+ },
+ "hounds": {
+  "atlas": "worldsettings_customization",
+  "img": "houndattacks"
+ },
+ "hunger": {
+  "atlas": "worldsettings_customization",
+  "img": "hunger"
+ },
+ "hunt": {
+  "atlas": "worldsettings_customization",
+  "img": "tracks"
+ },
+ "itemmimics": {
+  "atlas": "worldsettings_customization",
+  "img": "itemmimics"
+ },
+ "junkyard": {
+  "atlas": "worldgen_customization",
+  "img": "junkyard"
+ },
+ "klaus": {
+  "atlas": "worldsettings_customization",
+  "img": "klaus"
+ },
+ "krampus": {
+  "atlas": "worldsettings_customization",
+  "img": "krampus"
+ },
+ "lessdamagetaken": {
+  "atlas": "worldsettings_customization",
+  "img": "lessdamagetaken"
+ },
+ "lichen": {
+  "atlas": "worldgen_customization",
+  "img": "lichen"
+ },
+ "liefs": {
+  "atlas": "worldsettings_customization",
+  "img": "liefs"
+ },
+ "lightcrab_portalrate": {
+  "atlas": "worldsettings_customization",
+  "img": "lightcrab"
+ },
+ "lightflier_flower_regrowth": {
+  "atlas": "worldsettings_customization",
+  "img": "lightflier_flower"
+ },
+ "lightfliers": {
+  "atlas": "worldsettings_customization",
+  "img": "lightfliers"
+ },
+ "lightning": {
+  "atlas": "worldsettings_customization",
+  "img": "lightning"
+ },
+ "lightninggoat": {
+  "atlas": "worldgen_customization",
+  "img": "lightning_goat"
+ },
+ "loop": {
+  "atlas": "worldgen_customization",
+  "img": "world_loop"
+ },
+ "lunarhail_frequency": {
+  "atlas": "worldsettings_customization",
+  "img": "lunar_hail"
+ },
+ "lureplants": {
+  "atlas": "worldsettings_customization",
+  "img": "lureplants"
+ },
+ "malbatross": {
+  "atlas": "worldsettings_customization",
+  "img": "malbatross"
+ },
+ "marshbush": {
+  "atlas": "worldgen_customization",
+  "img": "marsh_bush"
+ },
+ "merm": {
+  "atlas": "worldgen_customization",
+  "img": "mermhut"
+ },
+ "merms": {
+  "atlas": "worldsettings_customization",
+  "img": "merms"
+ },
+ "meteorshowers": {
+  "atlas": "worldsettings_customization",
+  "img": "meteor"
+ },
+ "meteorspawner": {
+  "atlas": "worldgen_customization",
+  "img": "burntground"
+ },
+ "molebats": {
+  "atlas": "worldsettings_customization",
+  "img": "molebats"
+ },
+ "moles": {
+  "atlas": "worldgen_customization",
+  "img": "molehill"
+ },
+ "moles_setting": {
+  "atlas": "worldsettings_customization",
+  "img": "moles"
+ },
+ "monkey": {
+  "atlas": "worldgen_customization",
+  "img": "monkeybarrel"
+ },
+ "monkey_setting": {
+  "atlas": "worldsettings_customization",
+  "img": "monkeys"
+ },
+ "monkeytail_portalrate": {
+  "atlas": "worldsettings_customization",
+  "img": "monkeytail"
+ },
+ "moon_berrybush": {
+  "atlas": "worldgen_customization",
+  "img": "moon_berrybush"
+ },
+ "moon_bullkelp": {
+  "atlas": "worldgen_customization",
+  "img": "moon_bullkelp"
+ },
+ "moon_carrot": {
+  "atlas": "worldgen_customization",
+  "img": "moon_carrot"
+ },
+ "moon_fissure": {
+  "atlas": "worldgen_customization",
+  "img": "moon_fissure"
+ },
+ "moon_fruitdragon": {
+  "atlas": "worldgen_customization",
+  "img": "moon_fruitdragon"
+ },
+ "moon_hotspring": {
+  "atlas": "worldgen_customization",
+  "img": "moon_hotspring"
+ },
+ "moon_rock": {
+  "atlas": "worldgen_customization",
+  "img": "moon_rock"
+ },
+ "moon_sapling": {
+  "atlas": "worldgen_customization",
+  "img": "moon_sapling"
+ },
+ "moon_spider": {
+  "atlas": "worldsettings_customization",
+  "img": "moon_spider"
+ },
+ "moon_spiders": {
+  "atlas": "worldgen_customization",
+  "img": "moon_spiders"
+ },
+ "moon_starfish": {
+  "atlas": "worldgen_customization",
+  "img": "moon_starfish"
+ },
+ "moon_tree": {
+  "atlas": "worldsettings_customization",
+  "img": "moon_tree"
+ },
+ "moon_tree_regrowth": {
+  "atlas": "worldsettings_customization",
+  "img": "moon_tree"
+ },
+ "mosquitos": {
+  "atlas": "worldsettings_customization",
+  "img": "mosquitos"
+ },
+ "mushgnome": {
+  "atlas": "worldsettings_customization",
+  "img": "mushgnome"
+ },
+ "mushroom": {
+  "atlas": "worldgen_customization",
+  "img": "mushrooms"
+ },
+ "mushtree": {
+  "atlas": "worldsettings_customization",
+  "img": "mushtree"
+ },
+ "mushtree_moon_regrowth": {
+  "atlas": "worldsettings_customization",
+  "img": "mushtree_moon"
+ },
+ "mushtree_regrowth": {
+  "atlas": "worldsettings_customization",
+  "img": "mushtree"
+ },
+ "mutated_bearger": {
+  "atlas": "worldsettings_customization",
+  "img": "mutated_bearger"
+ },
+ "mutated_bird_gestalt": {
+  "atlas": "worldsettings_customization",
+  "img": "mutated_bird_gestalt"
+ },
+ "mutated_birds": {
+  "atlas": "worldsettings_customization",
+  "img": "mutated_birds"
+ },
+ "mutated_buzzard_gestalt": {
+  "atlas": "worldsettings_customization",
+  "img": "mutated_buzzard_gestalt"
+ },
+ "mutated_deerclops": {
+  "atlas": "worldsettings_customization",
+  "img": "mutated_deerclops"
+ },
+ "mutated_hounds": {
+  "atlas": "worldsettings_customization",
+  "img": "mutated_hounds"
+ },
+ "mutated_merm": {
+  "atlas": "worldsettings_customization",
+  "img": "mutated_merm"
+ },
+ "mutated_spiderqueen": {
+  "atlas": "worldsettings_customization",
+  "img": "mutated_spiderqueen"
+ },
+ "mutated_warg": {
+  "atlas": "worldsettings_customization",
+  "img": "mutated_warg"
+ },
+ "nightmarecreatures": {
+  "atlas": "worldsettings_customization",
+  "img": "nightmarecreatures"
+ },
+ "ocean_bullkelp": {
+  "atlas": "worldgen_customization",
+  "img": "ocean_bullkelp"
+ },
+ "ocean_otterdens": {
+  "atlas": "worldgen_customization",
+  "img": "ocean_otterdens"
+ },
+ "ocean_seastack": {
+  "atlas": "worldgen_customization",
+  "img": "ocean_seastack"
+ },
+ "ocean_shoal": {
+  "atlas": "worldgen_customization",
+  "img": "ocean_shoal"
+ },
+ "ocean_waterplant": {
+  "atlas": "worldgen_customization",
+  "img": "ocean_waterplant"
+ },
+ "ocean_wobsterden": {
+  "atlas": "worldgen_customization",
+  "img": "ocean_wobsterden"
+ },
+ "otters_setting": {
+  "atlas": "worldsettings_customization",
+  "img": "otter"
+ },
+ "palmcone_seed_portalrate": {
+  "atlas": "worldsettings_customization",
+  "img": "palmcone_seed"
+ },
+ "palmconetree": {
+  "atlas": "worldsettings_customization",
+  "img": "palmconetree"
+ },
+ "palmconetree_regrowth": {
+  "atlas": "worldsettings_customization",
+  "img": "palmconetree"
+ },
+ "penguins": {
+  "atlas": "worldsettings_customization",
+  "img": "pengull"
+ },
+ "penguins_moon": {
+  "atlas": "worldsettings_customization",
+  "img": "moon_pengull"
+ },
+ "perd": {
+  "atlas": "worldsettings_customization",
+  "img": "perd"
+ },
+ "petrification": {
+  "atlas": "worldsettings_customization",
+  "img": "petrified_tree"
+ },
+ "pigs": {
+  "atlas": "worldgen_customization",
+  "img": "pighouse"
+ },
+ "pigs_setting": {
+  "atlas": "worldsettings_customization",
+  "img": "pigs"
+ },
+ "pirateraids": {
+  "atlas": "worldsettings_customization",
+  "img": "pirateattacks"
+ },
+ "ponds": {
+  "atlas": "worldgen_customization",
+  "img": "ponds"
+ },
+ "portal_spawnrate": {
+  "atlas": "worldsettings_customization",
+  "img": "monkeyportal"
+ },
+ "portalresurection": {
+  "atlas": "worldsettings_customization",
+  "img": "portalresurection"
+ },
+ "powder_monkey_portalrate": {
+  "atlas": "worldsettings_customization",
+  "img": "powder_monkey"
+ },
+ "prefabswaps_start": {
+  "atlas": "worldgen_customization",
+  "img": "starting_variety"
+ },
+ "rabbits": {
+  "atlas": "worldgen_customization",
+  "img": "rabbithole"
+ },
+ "rabbits_setting": {
+  "atlas": "worldsettings_customization",
+  "img": "rabbits"
+ },
+ "reeds": {
+  "atlas": "worldsettings_customization",
+  "img": "reeds"
+ },
+ "reeds_regrowth": {
+  "atlas": "worldsettings_customization",
+  "img": "reeds"
+ },
+ "regrowth": {
+  "atlas": "worldsettings_customization",
+  "img": "regrowth"
+ },
+ "resettime": {
+  "atlas": "worldsettings_customization",
+  "img": "resettime"
+ },
+ "rifts_enabled": {
+  "atlas": "worldsettings_customization",
+  "img": "lunarrift_portal"
+ },
+ "rifts_enabled_cave": {
+  "atlas": "worldsettings_customization",
+  "img": "shadowrift_portal"
+ },
+ "rifts_frequency": {
+  "atlas": "worldsettings_customization",
+  "img": "lunarrift_portal"
+ },
+ "rifts_frequency_cave": {
+  "atlas": "worldsettings_customization",
+  "img": "shadowrift_portal"
+ },
+ "roads": {
+  "atlas": "worldgen_customization",
+  "img": "roads"
+ },
+ "rock": {
+  "atlas": "worldgen_customization",
+  "img": "rock"
+ },
+ "rock_ice": {
+  "atlas": "worldsettings_customization",
+  "img": "iceboulder"
+ },
+ "rocky": {
+  "atlas": "worldgen_customization",
+  "img": "rocky"
+ },
+ "rocky_setting": {
+  "atlas": "worldsettings_customization",
+  "img": "rock_lobsters"
+ },
+ "saltstack_regrowth": {
+  "atlas": "worldsettings_customization",
+  "img": "saltstack"
+ },
+ "sapling": {
+  "atlas": "worldgen_customization",
+  "img": "sapling"
+ },
+ "season_start": {
+  "atlas": "worldgen_customization",
+  "img": "season_start"
+ },
+ "seasonalstartingitems": {
+  "atlas": "worldsettings_customization",
+  "img": "seasonalstartingitems"
+ },
+ "shadowcreatures": {
+  "atlas": "worldsettings_customization",
+  "img": "shadowcreatures"
+ },
+ "sharkboi": {
+  "atlas": "worldsettings_customization",
+  "img": "sharkboi"
+ },
+ "sharks": {
+  "atlas": "worldsettings_customization",
+  "img": "sharks"
+ },
+ "slurper": {
+  "atlas": "worldgen_customization",
+  "img": "slurper"
+ },
+ "slurtles": {
+  "atlas": "worldgen_customization",
+  "img": "slurtleden"
+ },
+ "slurtles_setting": {
+  "atlas": "worldsettings_customization",
+  "img": "slurtles"
+ },
+ "snurtles": {
+  "atlas": "worldsettings_customization",
+  "img": "snurtles"
+ },
+ "spawnmode": {
+  "atlas": "worldsettings_customization",
+  "img": "spawnmode"
+ },
+ "spawnprotection": {
+  "atlas": "worldsettings_customization",
+  "img": "spawnprotection"
+ },
+ "specialevent": {
+  "atlas": "worldsettings_customization",
+  "img": "events"
+ },
+ "spider_dropper": {
+  "atlas": "worldsettings_customization",
+  "img": "spider_dropper"
+ },
+ "spider_hider": {
+  "atlas": "worldsettings_customization",
+  "img": "spider_hider"
+ },
+ "spider_spitter": {
+  "atlas": "worldsettings_customization",
+  "img": "spider_spitter"
+ },
+ "spider_warriors": {
+  "atlas": "worldsettings_customization",
+  "img": "spider_warriors"
+ },
+ "spiderqueen": {
+  "atlas": "worldsettings_customization",
+  "img": "spiderqueen"
+ },
+ "spiders": {
+  "atlas": "worldgen_customization",
+  "img": "spiderden"
+ },
+ "spiders_setting": {
+  "atlas": "worldsettings_customization",
+  "img": "spiders"
+ },
+ "spring": {
+  "atlas": "worldsettings_customization",
+  "img": "spring"
+ },
+ "squid": {
+  "atlas": "worldsettings_customization",
+  "img": "squid"
+ },
+ "stageplays": {
+  "atlas": "worldgen_customization",
+  "img": "stageplays"
+ },
+ "start_location": {
+  "atlas": "worldgen_customization",
+  "img": "world_start"
+ },
+ "summer": {
+  "atlas": "worldsettings_customization",
+  "img": "summer"
+ },
+ "summerhounds": {
+  "atlas": "worldsettings_customization",
+  "img": "summerhounds"
+ },
+ "tallbirds": {
+  "atlas": "worldgen_customization",
+  "img": "tallbirdnest"
+ },
+ "task_set": {
+  "atlas": "worldgen_customization",
+  "img": "world_map"
+ },
+ "temperaturedamage": {
+  "atlas": "worldsettings_customization",
+  "img": "temperaturedamage"
+ },
+ "tentacles": {
+  "atlas": "worldgen_customization",
+  "img": "tentacles"
+ },
+ "terrariumchest": {
+  "atlas": "worldgen_customization",
+  "img": "terrarium"
+ },
+ "toadstool": {
+  "atlas": "worldsettings_customization",
+  "img": "toadstool"
+ },
+ "touchstone": {
+  "atlas": "worldgen_customization",
+  "img": "touchstone"
+ },
+ "tree_rock": {
+  "atlas": "worldsettings_customization",
+  "img": "tree_rock"
+ },
+ "tree_rock_regrowth": {
+  "atlas": "worldsettings_customization",
+  "img": "tree_rock"
+ },
+ "trees": {
+  "atlas": "worldgen_customization",
+  "img": "trees"
+ },
+ "tumbleweed": {
+  "atlas": "worldgen_customization",
+  "img": "tumbleweeds"
+ },
+ "twiggytrees_regrowth": {
+  "atlas": "worldsettings_customization",
+  "img": "twiggytrees"
+ },
+ "walrus": {
+  "atlas": "worldgen_customization",
+  "img": "mactuskcamp"
+ },
+ "walrus_setting": {
+  "atlas": "worldsettings_customization",
+  "img": "mactusk"
+ },
+ "wanderingtrader_enabled": {
+  "atlas": "worldsettings_customization",
+  "img": "wanderingtrader"
+ },
+ "wasps": {
+  "atlas": "worldsettings_customization",
+  "img": "wasps"
+ },
+ "weather": {
+  "atlas": "worldsettings_customization",
+  "img": "rain"
+ },
+ "wildfires": {
+  "atlas": "worldsettings_customization",
+  "img": "smoke"
+ },
+ "winter": {
+  "atlas": "worldsettings_customization",
+  "img": "winter"
+ },
+ "winterhounds": {
+  "atlas": "worldsettings_customization",
+  "img": "winterhounds"
+ },
+ "winters_feast": {
+  "atlas": "worldsettings_customization",
+  "img": "wintersfeast"
+ },
+ "wobsters": {
+  "atlas": "worldsettings_customization",
+  "img": "wobsters"
+ },
+ "world_size": {
+  "atlas": "worldgen_customization",
+  "img": "world_size"
+ },
+ "wormattacks": {
+  "atlas": "worldsettings_customization",
+  "img": "wormattacks"
+ },
+ "wormattacks_boss": {
+  "atlas": "worldsettings_customization",
+  "img": "wormattacks_boss"
+ },
+ "wormlights": {
+  "atlas": "worldgen_customization",
+  "img": "wormlights"
+ },
+ "worms": {
+  "atlas": "worldgen_customization",
+  "img": "worms"
+ },
+ "year_of_the_beefalo": {
+  "atlas": "worldsettings_customization",
+  "img": "yotb_beefaloshrine"
+ },
+ "year_of_the_bunnyman": {
+  "atlas": "worldsettings_customization",
+  "img": "yotr_rabbitshrine"
+ },
+ "year_of_the_carrat": {
+  "atlas": "worldsettings_customization",
+  "img": "yotc_carratshrine"
+ },
+ "year_of_the_catcoon": {
+  "atlas": "worldsettings_customization",
+  "img": "yot_catcoonshrine"
+ },
+ "year_of_the_dragonfly": {
+  "atlas": "worldsettings_customization",
+  "img": "yotd_dragonshrine"
+ },
+ "year_of_the_gobbler": {
+  "atlas": "worldsettings_customization",
+  "img": "perdshrine"
+ },
+ "year_of_the_knight": {
+  "atlas": "worldsettings_customization",
+  "img": "yoth_knightshrine"
+ },
+ "year_of_the_pig": {
+  "atlas": "worldsettings_customization",
+  "img": "pigshrine"
+ },
+ "year_of_the_snake": {
+  "atlas": "worldsettings_customization",
+  "img": "yots_wormshrine"
+ },
+ "year_of_the_varg": {
+  "atlas": "worldsettings_customization",
+  "img": "wargshrine"
+ }
+}

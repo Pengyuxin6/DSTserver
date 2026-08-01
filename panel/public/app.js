@@ -823,7 +823,7 @@ async function loadWorldOverrides() {
     const tr = document.createElement("tr");
     tr.dataset.key = o.key;
     const labelOf = (v) => (o.values.find((x) => x.v === v) || {}).label || v;
-    const ico = optIcon([`icons/worldsettings_customization/${o.key}.png`, `icons/worldgen_customization/${o.key}.png`]);
+    const ico = optIcon([...(o.icon ? [`icons/${o.icon.atlas}/${o.icon.img}.png`] : []), `icons/worldsettings_customization/${o.key}.png`, `icons/worldgen_customization/${o.key}.png`]);
     tr.innerHTML = `<td>${ico}${esc(o.label)}</td><td>${esc(labelOf(cur))} <span class="hint">(${esc(cur)})</span></td><td>${esc(o.group)}</td>`;
     if (worldState.selKey === o.key) tr.className = "sel";
     tr.onclick = () => {
@@ -2254,7 +2254,7 @@ async function pageConsole() {
     itemTable.querySelector(".item-more")?.remove();
     const batch = itemView.slice(itemShown, itemShown + ITEM_BATCH);
     itemTable.insertAdjacentHTML("beforeend", batch.map((it) => {
-      const iconSrcs = it.icon ? [`icons/${it.icon}/${it.prefab}.png`] : (it.modId ? [`mod-icon?id=${it.modId}&prefab=${it.prefab}`] : [""]);
+      const iconSrcs = it.icon ? [`icons/${it.icon}/${it.prefab}.png`] : (it.modId ? [`mod-icon?id=${it.modId}&prefab=${it.prefab}`] : [`wiki-icon?prefab=${it.prefab}`]);
       return `<div class="item-row" data-p="${it.prefab}"><span class="item-name">${optIcon(iconSrcs, it.name)}${esc(it.name)}</span><span class="hint"><span class="tag">${esc(it.cat || "其他")}</span> ${it.prefab}</span></div>`;
     }).join(""));
     itemShown += batch.length;
@@ -2935,6 +2935,40 @@ const HELP_TECH = `
     <tr><td>模组 <code>modicon.xml + modicon.tex</code></td><td>模组列表里显示的模组图标</td></tr>
   </tbody></table>
   <div class="doc-tip">💡 本面板"物品带图搜索"功能原理：启动时把 4 个物品图集 XML 读进内存，建成"物品代码 → 在哪张图集、什么坐标"的字典；网页上搜"木头"就按坐标把对应小图从解码好的 PNG 大图里裁出来显示。</div>
+
+  <h4>4.5 图集在游戏目录里的真实位置（客户端 vs 服务端）</h4>
+  <table class="grid"><thead><tr><th>图集</th><th>客户端位置</th><th>专用服务端</th></tr></thead><tbody>
+    <tr><td>物品栏图集 inventoryimages1~4</td><td><code>data\databundles\images.zip</code> 内（打包）</td><td>❌ 没有（服务端不渲染，Klei 不放）</td></tr>
+    <tr><td>世界设置 worldsettings_customization / 世界生成 worldgen_customization</td><td><code>data\images\</code>（散文件）</td><td>❌ 没有</td></tr>
+    <tr><td>小地图 minimap_data / _data1 / _data2（3 组）</td><td><code>data\minimap\</code>（散文件）</td><td>✅ 有，同样位置</td></tr>
+    <tr><td>设置项权威对照 customize.lua / 英文名 strings.lua</td><td><code>data\databundles\scripts.zip</code> 内</td><td>✅ <code>data\scripts\</code> 散装</td></tr>
+  </tbody></table>
+  <div class="doc-tip">💡 结论：<b>物品栏/设置项图集必须从客户端切</b>；小地图图集和脚本两边都有。本面板的做法：本地切好全部小图存 <code>panel/public/icons/</code>（4000+ 张），随部署同步到服务器，网页直接按相对路径取，秒开。</div>
+
+  <h4>4.6 面板的五级取图链（任何一张小图的完整旅程）</h4>
+  <div class="doc-pre">① 游戏图集预切片（public/icons/&lt;图集&gt;/&lt;名字&gt;.png，本地秒开）
+   ↓ 没有
+② 模组自带图集切片（模组 images/ 目录预切，或 /mod-icon 运行时现切现缓存）
+   ↓ 没有
+③ 小地图图集切片（minimap/，给没有物品栏图标的生物/实体兜底，补 207+ 个）
+   ↓ 没有
+④ 社区图床补全（/wiki-icon，按 MediaWiki 规则 md5(文件名) 算地址，
+   取一次落盘缓存 public/icons/wiki/，404 负缓存 24h；渠道不写进任何日志）
+   ↓ 没有
+⑤ 首字符占位块（多为 _fx 特效，本来就没图，属正常）</div>
+
+  <h4>4.7 世界设置图标：为什么不能按名字猜</h4>
+  <p>设置项的<b>键名</b>和图集<b>元素名经常不一样</b>：<code>crow_carnival</code> 的图标文件叫 <code>crowcarnival</code>、<code>antliontribute</code> 叫 <code>antlion_tribute</code>。按名字猜会漏 90 个图标。正确做法是读游戏权威对照表 <code>scripts/map/customize.lua</code>（每个设置项直接写明 <code>image = "xxx.tex"</code>），离线生成 <code>data/worldoption_icons.json</code> 映射（236 项全覆盖）。解析时必须用<b>花括号配对</b>找条目边界——条目里有 <code>options_remap={...}</code> 嵌套表，简单正则会吞掉相邻条目。同名元素出现在多个图集时按 <code>worldsettings_customization &gt; worldgen_customization &gt; 其他</code> 取优先。</p>
+
+  <h4>4.8 五类世界的图片来源速查</h4>
+  <table class="grid"><thead><tr><th>世界类型</th><th>设置图标</th><th>物品/实体图标</th><th>判定方式</th></tr></thead><tbody>
+    <tr><td><b>原版</b></td><td>worldsettings / worldgen_customization（权威映射 236 项）</td><td>inventoryimages1~4 + minimap 兜底 + 社区图床补全</td><td>无模组或仅功能模组</td></tr>
+    <tr><td><b>猪镇（哈姆雷特）</b></td><td>模组图集 customization_porkland（93 个，modcustomizeitems.lua 的 pl_customize_table 定义）</td><td>模组 pl_inventoryimages（703 个）等 pl_* 图集</td><td>modworldgenmain.lua 含 AddLevel/AddPreset → 覆盖型，纯地上（无洞穴预设会自动删 Caves 分片）</td></tr>
+    <tr><td><b>海难</b></td><td>customization_shipwrecked / shipwrecked2（71 个）</td><td>模组自带图集</td><td>覆盖型；预设 location 含 volcano 的按地下类处理</td></tr>
+    <tr><td><b>熔炉/暴食</b></td><td colspan="2">官方活动模式，内容就在原版游戏里（LAVAARENA/QUAGMIRE 白名单预设），图标全走原版通道</td><td>原版预设白名单识别</td></tr>
+    <tr><td><b>三合一</b></td><td>原版 236 项仍生效 + 模组设置项追加</td><td>原版通道 + 模组图集</td><td>只有 AddLevelPreInitAny → 叠加型(extend)，不与覆盖型冲突</td></tr>
+  </tbody></table>
+  <div class="doc-tip">📖 更完整的算法细节（含取图位置全清单、切片算法、社区图床补全算法、数据文件清单）见项目文档 <code>docs/一脸懵逼.md</code>。</div>
 
   <h4>五、声音系统：FMOD 引擎</h4>
   <p>DST 使用 <b>FMOD 音频引擎</b>，声音资源分两种文件：</p>
