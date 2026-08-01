@@ -2966,15 +2966,15 @@ async function applyEnabledMods(ids: string[]): Promise<Response> {
   writeSetupIds(ids);
   writeModOverridesBoth(map);
   const omitted = [...old.keys()].filter((k) => !enabledSet.has(k.replace("workshop-", "")));
-  // 检测启用的地图模组是否有洞穴预设
-  // 注意：火山（volcanoworld）是独立世界分片，不是洞穴替代
-  // 只有 location 含 "cave"/"under" 才算真正的洞穴预设
+  // 检测启用的地图模组是否有地下/独立世界预设（洞穴、火山等）
+  // 猪镇等纯地上模组没有地下预设 → 自动删除 Caves 分片
+  // 海难模组有火山预设（volcanoworld） → 保留 Caves 分片，预设设为火山
   const activeWorldMods = ids.filter((id) => {
     const d = modWorldgenData(id);
     if (!d) return false;
-    const hasCavePreset = d.presets.some((p) => /(?:^cave$|^under|underground)/i.test(p.location || ""));
-    const hasOverworldPreset = d.presets.some((p) => !/(?:^cave$|^under|underground|volcano)/i.test(p.location || ""));
-    // 只有地上预设、没有洞穴预设 = 纯地上地图模组（如猪镇、海难）
+    const hasCavePreset = d.presets.some((p) => /volcano|cave|under/i.test(p.location || ""));
+    const hasOverworldPreset = d.presets.some((p) => !/volcano|cave|under/i.test(p.location || ""));
+    // 只有地上预设、没有地下预设 = 纯地上地图模组（如猪镇）
     return hasOverworldPreset && !hasCavePreset;
   });
   // 自动删除不支持的 Caves 分片
@@ -2991,15 +2991,13 @@ async function applyEnabledMods(ids: string[]): Promise<Response> {
   const autoApplied: string[] = [];
   // VANILLA_PRESETS 已在文件顶部定义为全局常量
   const pickPreset = (presets: ModWorldgenPreset[], isMaster: boolean): ModWorldgenPreset | null => {
-    // 火山（volcanoworld）是独立世界分片，不是洞穴
-    // 只有 cave/underground 才是真正的洞穴预设
-    const isCaveLoc = (l: string) => /(?:^cave$|^under|underground)/i.test(l || "");
+    const isCaveLoc = (l: string) => /volcano|cave|under/i.test(l || "");
     if (isMaster) {
       return presets.find((p) => /SURVIVAL_TOGETHER/i.test(p.id) && !isCaveLoc(p.location))
-        || presets.find((p) => !isCaveLoc(p.location) && !/volcano/i.test(p.location))
+        || presets.find((p) => !isCaveLoc(p.location))
         || null;
     }
-    // 非主分片：只匹配真正的洞穴预设（cave/underground），不匹配火山
+    // 非主分片：匹配地下/独立世界预设（洞穴、火山等）
     return presets.find((p) => isCaveLoc(p.location)) || null;
   };
   for (const id of ids) {
@@ -3012,11 +3010,11 @@ async function applyEnabledMods(ids: string[]): Promise<Response> {
       if (!VANILLA_PRESETS.has(cur)) continue; // 已是模组预设则不覆盖
       const pick = pickPreset(d.presets, shard.isMaster);
       if (!pick) continue;
-      const ov = readLevelOverrides(shard.name).overrides;
-      for (const [k, v] of Object.entries(pick.overrides)) {
-        if (validKeyVal(k) && validWorldVal(v)) ov[k] = String(v);
-      }
-      writeLevelOverrides(shard.name, shard.isMaster, ov, pick.id);
+      // 预设自带的 overrides 由 DST 引擎加载预设时自动应用（在 level_data.overrides 中），
+      // 不需要面板重复写入 worldgenoverride.lua。
+      // IA 模组的 water.lua 会把 yesno 类型值（如 volcano="yes"）当作 MULTIPLY 频率值处理，
+      // 重复写入会导致 nil 算术错误。
+      writeLevelOverrides(shard.name, shard.isMaster, {}, pick.id);
       autoApplied.push(`${shard.name}→${pick.id}`);
     }
   }
@@ -3283,8 +3281,8 @@ async function api(req: Request, url: URL): Promise<Response> {
           const id = key.replace("workshop-", "");
           const d = modWorldgenData(id);
           if (!d) continue;
-          const hasCavePreset = d.presets.some((p) => /(?:^cave$|^under|underground)/i.test(p.location || ""));
-          const hasOverworldPreset = d.presets.some((p) => !/(?:^cave$|^under|underground|volcano)/i.test(p.location || ""));
+          const hasCavePreset = d.presets.some((p) => /volcano|cave|under/i.test(p.location || ""));
+          const hasOverworldPreset = d.presets.some((p) => !/volcano|cave|under/i.test(p.location || ""));
           if (hasOverworldPreset && !hasCavePreset) {
             const name = modCache.items[id]?.title || parseModInfo(id)?.name || id;
             return fail(`已启用地图模组「${name}」不支持地下世界，无法添加洞穴分片。该模组的世界（如猪镇）不需要地下世界。`);
@@ -3428,7 +3426,23 @@ async function api(req: Request, url: URL): Promise<Response> {
       // 模组世界生成选项（写入 worldgenoverride.lua）
       if (modAllowed.has(k)) {
         if (!validWorldVal(String(v))) continue;
-        if (modAllowed.get(k)!.has(String(v))) current[k] = String(v);
+        // yesno 类选项（值 yes/no）的特殊处理：
+        // IA 的 water.lua 用 MULTIPLY 表查频率值控制水域实体散布。
+        // volcano=yes/no 会进入 MULTIPLY 查询，需要映射为 default/never 避免 nil 算术错误。
+        const vals = modAllowed.get(k)!;
+        const isYesNo = vals.has("yes") && vals.has("no") && vals.size <= 3;
+        if (isYesNo) {
+          current[k] = String(v) === "no" ? "never" : "default";
+          continue;
+        }
+        // volcanoisland=disabled 时，IA 的 level postinit 检查 overrides.volcanoisland ~= "none"
+        // 来决定是否添加 VolcanoIsland 任务。设为 "none" 才能阻止火山岛生成。
+        // volcano 保持 default（yes）以保留火山水域实体。
+        if (k === "volcanoisland" && (String(v) === "disabled" || String(v) === "none")) {
+          current[k] = "none";
+          continue;
+        }
+        if (vals.has(String(v))) current[k] = String(v);
         continue;
       }
     }
