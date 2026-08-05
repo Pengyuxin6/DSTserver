@@ -1995,7 +1995,9 @@ async function pageServer() {
 const consoleState = { players: [], sel: null, items: [], world: null, cachedPlayers: null, cachedWorld: null, itemHistory: [] };
 function luaEsc(s) { return String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"'); }
 async function execLua(lua) {
-  const r = await api("console/exec", { method: "POST", body: { lua } });
+  // 同时发送到所有分片（Master + Caves/火山），确保玩家在哪个分片都能生效
+  const r = await api("console/exec", { method: "POST", body: { lua, shard: "Master" } });
+  const r2 = await api("console/exec", { method: "POST", body: { lua, shard: "Caves" } });
   toast(r.msg);
 }
 async function pageConsole() {

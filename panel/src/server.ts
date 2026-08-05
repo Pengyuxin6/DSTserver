@@ -2788,16 +2788,17 @@ async function workshopSearch(q: string): Promise<{ id: string; title: string; p
 }
 
 // ---------- 日志解析 ----------
-function chatLogPath(): string | null {
-  for (const shard of ["Master", "Caves"]) {
-    const p = join(clusterDir(), shard, "server_chat_log.txt");
-    if (existsSync(p)) return p;
-  }
+function chatLogPaths(): string[] {
+  const out: string[] = [];
   for (const s of listShards()) {
     const p = join(shardDir(s.name), "server_chat_log.txt");
-    if (existsSync(p)) return p;
+    if (existsSync(p)) out.push(p);
   }
-  return null;
+  return out;
+}
+function chatLogPath(): string | null {
+  const paths = chatLogPaths();
+  return paths.length ? paths[0] : null;
 }
 function serverLogPaths(): string[] {
   const out: string[] = [];
@@ -4363,13 +4364,15 @@ async function api(req: Request, url: URL): Promise<Response> {
   }
   if (path === "console/players" && method === "POST") {
     const shards = listShards();
-    const master = shards.find((s) => s.isMaster) || shards[0];
-    if (!master || !(await shardRunning(master.name))) return fail("服务器未运行");
-    // 直接输出玩家名（日志通道 UTF-8 无损），不再需要转义
-    const tail = await execAndCapture(master.name, `for _,p in ipairs(AllPlayers) do print("DSTPANEL".."_".."PL:"..tostring(p.userid)..":"..tostring(p.name)) end`);
     const players: { userid: string; name: string }[] = [];
-    for (const m of tail.matchAll(/DSTPANEL_PL:([^:\s]+):([^\n\r]+)/g)) {
-      players.push({ userid: m[1].trim(), name: m[2].trim() });
+    const seen = new Set<string>();
+    for (const shard of shards) {
+      if (!(await shardRunning(shard.name))) continue;
+      const tail = await execAndCapture(shard.name, `for _,p in ipairs(AllPlayers) do print("DSTPANEL".."_".."PL:"..tostring(p.userid)..":"..tostring(p.name)) end`);
+      for (const m of tail.matchAll(/DSTPANEL_PL:([^:\s]+):([^\n\r]+)/g)) {
+        const uid = m[1].trim();
+        if (!seen.has(uid)) { seen.add(uid); players.push({ userid: uid, name: m[2].trim() }); }
+      }
     }
     return ok({ players });
   }
@@ -4500,9 +4503,17 @@ async function api(req: Request, url: URL): Promise<Response> {
 
   // ===== 聊天记录 =====
   if (path === "chatlog" && method === "GET") {
-    const p = chatLogPath();
-    if (!p) return ok({ lines: [], msg: "暂无记录" });
-    return ok({ lines: tailLines(p, 500), file: basename(p) });
+    // 合并所有分片的聊天记录（Master + Caves/火山），按行排序返回
+    const paths = chatLogPaths();
+    if (!paths.length) return ok({ lines: [], msg: "暂无记录" });
+    const allLines: string[] = [];
+    for (const p of paths) {
+      const shardName = basename(dirname2(p));
+      for (const line of tailLines(p, 500)) {
+        allLines.push(`[${shardName}] ${line}`);
+      }
+    }
+    return ok({ lines: allLines.slice(-500), file: paths.map((p) => basename(p)).join(" + ") });
   }
 
   // ===== 日志历史记录（每次开服自动归档到 backup/ 下） =====
