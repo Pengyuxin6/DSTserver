@@ -2325,7 +2325,15 @@ async function pageConsole() {
   $("#spawnFeet").onclick = () => { const p = resolveItem(); if (p) { const n = Math.min(100, Math.max(1, +$("#itemCount").value || 1)); forPlayer(`local p=UserToPlayer("<ID>") if p then local x,_,z=p.Transform:GetWorldPosition() for i=1,${n} do pcall(function() local it=SpawnPrefab("${p}") if it and it.Transform then it.Transform:SetPosition(x+math.random(-2,2)+0.5,0,z+math.random(-2,2)+0.5) end end) end end`); addHistory(p); } };
 
   $("#cSave").onclick = () => execLua("c_save()");
-  $("#cRegen").onclick = async () => { if (await dlgConfirm("确定重新生成世界？当前世界存档将被清除，不可恢复！", { danger: true })) execLua("c_regenerateworld()"); };
+  $("#cRegen").onclick = async () => {
+    if (!(await dlgConfirm("确定重新生成世界？当前世界存档将被清除，不可恢复！", { danger: true }))) return;
+    if (worldState.shard && worldState.overrides) {
+      const r = await api("world/overrides", { method: "POST", body: { shard: worldState.shard, overrides: worldState.overrides } });
+      toast(r.msg);
+    }
+    const r2 = await api("world/regenerate", { method: "POST", body: { cluster: panelConfig.cluster } });
+    toast(r2.msg || "正在重新生成世界…");
+  };
   $("#cRollback").onclick = async () => { if (await dlgConfirm("确定回档一天？")) execLua("c_rollback(1)"); };
 
   // 存档列表

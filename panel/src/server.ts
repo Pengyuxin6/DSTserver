@@ -3579,6 +3579,28 @@ async function api(req: Request, url: URL): Promise<Response> {
     writeLevelOverrides(shard, target.isMaster, current, presetArg);
     return ok(null, `已保存 ${shard} 的世界设置（每设置完一个世界之后，都需要点击保存）` + (autoLoaded.length ? `；已自动加载模组: ${autoLoaded.join("、")}` : ""));
   }
+  if (path === "world/regenerate" && method === "POST") {
+    for (const s of listShards()) {
+      if (await shardRunning(s.name)) {
+        await stopShard(s.name);
+        await sleep(1000);
+      }
+    }
+    await sleep(3000);
+    for (const s of listShards()) {
+      const saveDir = join(shardDir(s.name), "save");
+      try { rmSync(saveDir, { recursive: true, force: true }); } catch {}
+      const sessDir = join(shardDir(s.name), "save", "session");
+      try { rmSync(sessDir, { recursive: true, force: true }); } catch {}
+    }
+    try { rmSync(join(SERVER_DIR, "mods", "modindex"), { force: true }); } catch {}
+    await sleep(1000);
+    for (const s of listShards()) {
+      await startShard(s.name);
+      await sleep(2000);
+    }
+    return ok(null, "世界正在重新生成…（已使用最新的世界设置，请等待1-2分钟）");
+  }
 
   // ===== mod 设置 =====
   if (path === "mods" && method === "GET") {
