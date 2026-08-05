@@ -21,8 +21,17 @@ const PANEL_CONFIG_FILE = join(PANEL_DIR, "panel_config.json");
 const MOD_CACHE_FILE = join(PANEL_DIR, "mod_cache.json");
 const isAbsPath = (p: string) => p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p);
 function readServerDirFromConfig(): string {
-  try { const c = JSON.parse(readText(PANEL_CONFIG_FILE)); if (c.serverDir && typeof c.serverDir === "string") return c.serverDir; } catch {}
-  return IS_WIN ? join(PANEL_DIR, "dst_server") : join(HOME, "dst_server");
+  try { const c = JSON.parse(readText(PANEL_CONFIG_FILE)); if (c.serverDir && typeof c.serverDir === "string" && existsSync(join(c.serverDir, "bin"))) return c.serverDir; } catch {}
+  // Windows 自动检测 Steam 库中的 DST 专用服务器
+  if (IS_WIN) {
+    for (const lib of steamLibs()) {
+      const d = join(lib, "steamapps", "common", "Don't Starve Together Dedicated Server");
+      if (existsSync(d)) return d;
+    }
+    // 回退到 PANEL_DIR 下的 dst_server（用户手动部署）
+    return join(PANEL_DIR, "dst_server");
+  }
+  return join(HOME, "dst_server");
 }
 const SERVER_DIR = readServerDirFromConfig();
 // Windows 版 Dedicated Server 可执行文件在 bin/ 下；Linux 在 bin64/ 下
@@ -587,6 +596,7 @@ interface PanelConfig {
   modsDir: string;
   clientDir: string; // Windows：DST 客户端安装目录（留空=自动检测），用于直接读取客户端模组
   langCheck: boolean;
+  steamProxy: string; // Steam Community 代理（国内访问 steamcommunity 会被墙，可填另一台能直连的面板地址）
 }
 function loadPanelConfig(): PanelConfig {
   try {
@@ -612,9 +622,10 @@ function loadPanelConfig(): PanelConfig {
       modsDir: typeof c.modsDir === "string" && isAbsPath(c.modsDir) ? c.modsDir : DEFAULT_MODS_DIR,
       clientDir: typeof c.clientDir === "string" ? c.clientDir : "",
       langCheck: c.langCheck !== false,
+      steamProxy: typeof c.steamProxy === "string" && /^https?:\/\/[^\s]+$/.test(c.steamProxy) ? c.steamProxy : "",
     };
   } catch {
-    return { cluster: "MyDediServer", beta: false, betaBranch: "", mode: "online", autorestart: false, announcements: [], announceAuto: { enabled: false, intervalSec: 300, idx: 0, lastSent: 0 }, itemHistory: [], favorites: [], serverDir: readServerDirFromConfig(), clusterRoot: DEFAULT_CLUSTER_ROOT, clusterRoots: [], modsDir: DEFAULT_MODS_DIR, clientDir: "", langCheck: true };
+    return { cluster: "MyDediServer", beta: false, betaBranch: "", mode: "online", autorestart: false, announcements: [], announceAuto: { enabled: false, intervalSec: 300, idx: 0, lastSent: 0 }, itemHistory: [], favorites: [], serverDir: readServerDirFromConfig(), clusterRoot: DEFAULT_CLUSTER_ROOT, clusterRoots: [], modsDir: DEFAULT_MODS_DIR, clientDir: "", langCheck: true, steamProxy: "" };
   }
 }
 let panelConfig = loadPanelConfig();
@@ -756,7 +767,13 @@ async function startShard(shard: string): Promise<string> {
   // 确保已启用模组在服务器 mods/ 目录中有符号链接（避免 Workshop 下载超时导致缺模组）
   ensureServerModSymlinks();
   const extraArgs: string[] = [];
-  if (clusterRoot() !== DEFAULT_CLUSTER_ROOT) {
+  if (IS_WIN) {
+    // Windows 上 DST 默认 APP: 存储根解析有缺陷：不带参数时读不到 cluster_token.txt/server.ini
+    // （导致 token 验证失败、端口用默认值、不写日志）。必须始终显式指定存储根。
+    const parent = clusterRoot().replace(/[\\/][^\\/]+$/, "") || "C:\\";
+    const conf = clusterRoot().split(/[\\/]/).pop()!;
+    extraArgs.push("-persistent_storage_root", parent, "-conf_dir", conf);
+  } else if (clusterRoot() !== DEFAULT_CLUSTER_ROOT) {
     const parent = clusterRoot().replace(/[\\/][^\\/]+$/, "") || (IS_WIN ? "C:\\" : "/");
     const conf = clusterRoot().split(/[\\/]/).pop()!;
     extraArgs.push("-persistent_storage_root", parent, "-conf_dir", conf);
@@ -769,8 +786,33 @@ async function startShard(shard: string): Promise<string> {
     if (old && old.exitCode === null) return "ok";
     try {
       const proc = Bun.spawn([BIN, "-cluster", panelConfig.cluster, "-shard", shard, ...extraArgs, "-console"], {
-        cwd: BIN_DIR, stdin: "pipe", stdout: "ignore", stderr: "ignore",
+        cwd: BIN_DIR, stdin: "pipe", stdout: "pipe", stderr: "pipe",
       });
+      // 捕获 stdout/stderr 到环形缓冲：server_log.txt 尚未生成（启动早期/令牌验证失败等）时，
+      // 日志页可展示这些启动输出，避免"暂无日志"干等
+      const outBuf: string[] = [];
+      const cap = 500;
+      const pump = async (stream: ReadableStream | null) => {
+        if (!stream) return;
+        const reader = stream.getReader();
+        const dec = new TextDecoder();
+        let rem = "";
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          rem += dec.decode(value, { stream: true });
+          let idx: number;
+          while ((idx = rem.indexOf("\n")) >= 0) {
+            const line = rem.slice(0, idx).replace(/\r$/, "");
+            rem = rem.slice(idx + 1);
+            if (line) outBuf.push(line);
+          }
+          if (outBuf.length > cap) outBuf.splice(0, outBuf.length - cap);
+        }
+      };
+      pump(proc.stdout).catch(() => {});
+      pump(proc.stderr).catch(() => {});
+      (proc as any).outBuf = outBuf;
       winProcs.set(key, proc);
       // 进程退出后自动清理
       proc.exited.finally(() => { try { const p = winProcs.get(key); if (p === proc) winProcs.delete(key); } catch {} });
@@ -2381,11 +2423,23 @@ let modCache = loadModCache();
 function saveModCache() {
   try { writeFileSync(MOD_CACHE_FILE, JSON.stringify(modCache)); } catch {}
 }
+// 通过配置的 steamProxy 请求外网 Steam 服务：
+// 把地址当作「通用 HTTP 代理」（Clash/V2Ray 等）使用；代理不通时回退直连。
+// 面板实例地址（http://IP:5323）本身不是 HTTP 代理，会走失败分支回退直连，不影响原逻辑。
+async function steamFetch(url: string, init: RequestInit, proxyTimeoutMs = 5000): Promise<Response> {
+  const p = panelConfig.steamProxy;
+  if (!p) return fetch(url, init);
+  try {
+    return await fetch(url, { ...init, proxy: p, signal: AbortSignal.timeout(proxyTimeoutMs) } as any);
+  } catch {
+    return fetch(url, init);
+  }
+}
 async function querySteam(ids: string[]): Promise<{ ok: boolean; items: Record<string, SteamItem>; msg?: string }> {
   if (!ids.length) return { ok: true, items: {} };
   try {
     const body = `itemcount=${ids.length}` + ids.map((id, i) => `&publishedfileids[${i}]=${encodeURIComponent(id)}`).join("");
-    const res = await fetch("https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/", {
+    const res = await steamFetch("https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/", {
       method: "POST",
       headers: { "Content-Type": "application/x-www-form-urlencoded" },
       body,
@@ -2619,7 +2673,12 @@ async function downloadViaCdn(id: string, task: Task): Promise<boolean> {
   try {
     task.totalBytes = st.file_size || 0;
     task.log += `[CDN] ${st.title || id}（${(st.file_size / 1048576).toFixed(1)} MB）\n${st.file_url}\n`;
-    const proc = Bun.spawn(["curl", "-fSL", "--connect-timeout", "15", "--retry", "2", "-o", zipPath, st.file_url], { stdout: "ignore", stderr: "ignore" });
+    // 配置了 steamProxy 时优先走代理下载（Clash 等），失败回退 steamcmd
+    const curlArgs = ["curl", "-fSL", "--connect-timeout", "15", "--retry", "2"];
+    const sp = panelConfig.steamProxy;
+    if (sp) curlArgs.push("-x", sp);
+    curlArgs.push("-o", zipPath, st.file_url);
+    const proc = Bun.spawn(curlArgs, { stdout: "ignore", stderr: "ignore" });
     const timer = setInterval(() => { try { task.downloadedBytes = statSync(zipPath).size; } catch {} }, 500);
     const code = await proc.exited;
     clearInterval(timer);
@@ -2666,7 +2725,7 @@ async function fetchModInfoLua(id: string): Promise<boolean> {
   const zipPath = join(TMP_DIR, `dst_modinfo_${id}.zip`);
   const tmpDir = join(TMP_DIR, `dst_modinfo_${id}_x`);
   try {
-    const res = await fetch(st.file_url, { signal: AbortSignal.timeout(20000) });
+    const res = await steamFetch(st.file_url, { signal: AbortSignal.timeout(20000) }, 8000);
     if (!res.ok) return false;
     const buf = await res.arrayBuffer();
     if (buf.byteLength < 100) return false;
@@ -2778,7 +2837,7 @@ function formatDate(ts: number): string {
 interface ChangeLogEntry { timestamp: number; date: string; text: string; }
 async function fetchChangeLogs(id: string): Promise<ChangeLogEntry[]> {
   try {
-    const res = await fetch(`https://steamcommunity.com/sharedfiles/filedetails/changelog/${id}?l=schinese`, {
+    const res = await steamFetch(`https://steamcommunity.com/sharedfiles/filedetails/changelog/${id}?l=schinese`, {
       headers: { "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36" },
       signal: AbortSignal.timeout(12000),
     });
@@ -2794,12 +2853,29 @@ async function fetchChangeLogs(id: string): Promise<ChangeLogEntry[]> {
     return entries.slice(0, 10);
   } catch { return []; }
 }
-async function workshopSearch(q: string): Promise<{ id: string; title: string; preview_url: string }[]> {
-  const res = await fetch(`https://steamcommunity.com/workshop/browse/?appid=322330&searchtext=${encodeURIComponent(q)}&browsesort=textsearch&section=readytouseitems&l=schinese`, {
-    headers: { "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36" },
-    signal: AbortSignal.timeout(15000),
-  });
-  const html = await res.text();
+async function workshopSearch(q: string, proxy?: string): Promise<{ id: string; title: string; preview_url: string }[]> {
+  let html: string;
+  const UA = { "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36" };
+  const target = `https://steamcommunity.com/workshop/browse/?appid=322330&searchtext=${encodeURIComponent(q)}&browsesort=textsearch&section=readytouseitems&l=schinese`;
+  if (proxy) {
+    // 兼容两种填法：
+    // 1) 另一台「面板实例」地址 → 先试其 /proxy/steam-workshop-browse 接口（6 秒内失败则降级）
+    // 2) 本地「通用 HTTP 代理」（Clash/V2Ray 等）→ steamFetch 会把它当代理用，不通自动回退直连
+    try {
+      const panelUrl = `${proxy.replace(/\/$/, "")}/proxy/steam-workshop-browse?q=${encodeURIComponent(q)}`;
+      const res = await fetch(panelUrl, { headers: UA, signal: AbortSignal.timeout(6000) });
+      if (!res.ok) throw new Error(`面板代理返回 HTTP ${res.status}`);
+      html = await res.text();
+    } catch {
+      const res = await steamFetch(target, { headers: UA, signal: AbortSignal.timeout(15000) });
+      if (!res.ok) throw new Error(`Steam 返回 HTTP ${res.status}`);
+      html = await res.text();
+    }
+  } else {
+    const res = await fetch(target, { headers: UA, signal: AbortSignal.timeout(15000) });
+    if (!res.ok) throw new Error(`Steam 返回 HTTP ${res.status}`);
+    html = await res.text();
+  }
   const map = new Map<string, { id: string; title: string; preview_url: string }>();
   let m: RegExpExecArray | null;
   const imgRe = /<a href="https:\/\/steamcommunity\.com\/sharedfiles\/filedetails\/\?id=(\d+)"[^>]*><img src="([^"]+)"[^>]*alt="([^"]*)"/g;
@@ -3095,12 +3171,15 @@ async function api(req: Request, url: URL): Promise<Response> {
     const runningClusters = [...new Set((await runningDstAll()).map((r) => r.cluster))];
     // Windows：客户端位置（手动设置优先，否则自动检测 Steam 库）
     const clientAuto = detectDstClient();
+    // Windows：服务器目录（手动设置优先，否则自动检测 Steam 库中的 DST 专用服务器）
+    const serverAuto = { dir: readServerDirFromConfig() };
     return ok({
       clusterRoot: clusterRoot(),
       clusterRoots: panelConfig.clusterRoots,
       defaultClusterRoot: DEFAULT_CLUSTER_ROOT,
       modsDir: modsStoreDir(),
-      serverDir: panelConfig.serverDir,
+      serverDir: panelConfig.serverDir || serverAuto.dir,
+      serverAuto,
       clientDir: panelConfig.clientDir || clientAuto?.dir || "",
       clientAuto,
       clusters,
@@ -3112,6 +3191,7 @@ async function api(req: Request, url: URL): Promise<Response> {
       runningClusters,
       isWin: IS_WIN,
       multiOpenMinMem: MULTI_OPEN_MIN_MEM,
+      steamProxy: panelConfig.steamProxy || "",
       // 凭证永不下发：只返回是否已设置，不返回内容
       has_token: !!token,
       has_cluster_password: !!roomPwd,
@@ -3211,6 +3291,13 @@ async function api(req: Request, url: URL): Promise<Response> {
       const dir = b.modsDir.trim();
       if (!isAbsPath(dir)) return fail("模组存放目录必须是绝对路径");
       try { mkdirSync(dir, { recursive: true }); panelConfig.modsDir = dir; } catch { return fail("无法创建模组存放目录: " + dir); }
+    }
+    // Steam Community 代理（供内网/墙内面板中转搜索请求）
+    if (typeof b.steamProxy === "string") {
+      const url = b.steamProxy.trim();
+      if (!url) { panelConfig.steamProxy = ""; }
+      else if (!/^https?:\/\/[^\s]+$/.test(url)) return fail("Steam搜索代理格式不正确，需为 http(s)://开头");
+      else panelConfig.steamProxy = url;
     }
     clearAllClusterCache();
     savePanelConfig();
@@ -3798,7 +3885,7 @@ async function api(req: Request, url: URL): Promise<Response> {
     const q = (url.searchParams.get("q") || "").trim();
     if (!q) return fail("请输入搜索关键词");
     try {
-      const results = await workshopSearch(q);
+      const results = await workshopSearch(q, panelConfig.steamProxy || undefined);
       // 批量补全订阅数/更新时间（走 GetPublishedFileDetails + 6 小时缓存，网络失败不影响基础结果）
       try { await ensureSteamCache(results.map((r) => r.id)); } catch {}
       const enriched = results.map((r) => {
@@ -3825,8 +3912,8 @@ async function api(req: Request, url: URL): Promise<Response> {
     const enabledIds = new Set<string>();
     if (master) for (const [k, e] of readModOverrides(master.name)) if (e.enabled) enabledIds.add(k.replace("workshop-", ""));
     const scanned = scanLocalSteamMods();
-    // 批量补全创意工坊元数据（拿到官网预览图 preview_url，无本地图标时前端回退展示；6小时缓存，网络失败不影响）
-    try { await ensureSteamCache(scanned.map((m) => m.id)); } catch {}
+    // 异步补全创意工坊元数据（不阻塞列表加载，超时1秒快失败）
+    ensureSteamCache(scanned.map((m) => m.id)).catch(() => {});
     const mods = scanned.map((m) => {
       const p = join(store, m.id);
       let linked = false, inStore = false;
@@ -4547,7 +4634,17 @@ async function api(req: Request, url: URL): Promise<Response> {
     for (const f of serverLogPaths()) {
       for (const line of tailLines(f, 2000)) lines.push(`[${basename(dirname(f))}] ${line}`);
     }
-    return ok({ lines, count: lines.length });
+    // server_log.txt 尚未生成（启动早期 / 令牌验证失败等）时，展示捕获的进程启动输出
+    if (!lines.length && IS_WIN) {
+      for (const [key, p] of winProcs) {
+        const buf = (p as any)?.outBuf;
+        if (buf?.length) {
+          const shard = String(key).split("::")[1] || "?";
+          for (const line of buf.slice(-500)) lines.push(`[${shard}] ${line}`);
+        }
+      }
+    }
+    return ok({ lines: lines.slice(-1000), count: lines.length });
   }
 
   // ===== 聊天记录 =====
@@ -4617,6 +4714,22 @@ async function api(req: Request, url: URL): Promise<Response> {
     return ok(null, panelConfig.announceAuto.enabled ? `已开启自动公告（每 ${panelConfig.announceAuto.intervalSec} 秒）` : "已关闭自动公告");
   }
 
+
+  // ===== Steam Community 代理（供内网/墙内面板中转搜索请求） =====
+  if (path === "proxy/steam-workshop-browse" && method === "GET") {
+    const q = (url.searchParams.get("q") || "").trim();
+    if (!q) return fail("缺少搜索关键词");
+    try {
+      const r = await fetch(`https://steamcommunity.com/workshop/browse/?appid=322330&searchtext=${encodeURIComponent(q)}&browsesort=textsearch&section=readytouseitems&l=schinese`, {
+        headers: { "User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36" },
+        signal: AbortSignal.timeout(20000),
+      });
+      if (!r.ok) return fail(`Steam 请求失败 (${r.status})`, 502);
+      return new Response(await r.text(), { status: 200, headers: { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "public, max-age=120" } });
+    } catch (e: any) {
+      return fail("代理请求失败: " + String(e?.message || e), 502);
+    }
+  }
   return fail("未知接口: " + path, 404);
 }
 
@@ -4700,6 +4813,14 @@ const server = Bun.serve({
     if (path === "/api/logout") {
       revokeToken(tokenFromReq(req));
       return json({ ok: true }, 200, { "Set-Cookie": "dstp_session=; Path=/; Max-Age=0" });
+    }
+    if (path === "/api/proxy/steam-workshop-browse") {
+      try {
+        return await api(req, url);
+      } catch (e: any) {
+        console.error(e);
+        return fail("服务器内部错误: " + (e?.message || e), 500);
+      }
     }
     if (path.startsWith("/api/")) {
       if (!checkAuth(req)) return fail("未登录", 401);
@@ -4823,7 +4944,7 @@ const server = Bun.serve({
         return new Response("Forbidden", { status: 403 });
       }
       try {
-        const res = await fetch(target, { signal: AbortSignal.timeout(8000) });
+        const res = await steamFetch(target, { signal: AbortSignal.timeout(8000) });
         if (!res.ok) return new Response("Fetch failed", { status: 502 });
         const buf = await res.arrayBuffer();
         return new Response(buf, { status: 200, headers: { "Content-Type": res.headers.get("Content-Type") || "image/png", "Cache-Control": "public, max-age=86400" } });

@@ -388,7 +388,7 @@ async function pageBasic() {
   content.innerHTML = `
   <div class="card">
     <h3>路径</h3>
-    <div class="row"><label>存档根目录</label><input type="text" id="clusterRootInput" value="${esc(d.clusterRoot)}" size="46">
+    <div class="row"><label>存档根目录</label><input type="text" id="clusterRootInput" value="${esc(d.clusterRoot)}" style="flex:1;min-width:280px">
       ${(d.clusterRoots || []).length ? `<select id="clusterRootHist" title="切换到历史使用过的存档位置"><option value="">历史位置…</option>${d.clusterRoots.map((r) => `<option value="${esc(r)}" ${r === d.clusterRoot ? "selected" : ""}>${esc(r)}</option>`).join("")}</select>` : ""}
       <button class="btn" id="clusterRootDefault" type="button" title="${esc(d.defaultClusterRoot || "")}">科雷默认位置</button>
       <span class="hint">默认用科雷存档位置；也可自定义绝对路径（勿含中文），用过的位置会记录可随时切换</span></div>
@@ -397,7 +397,12 @@ async function pageBasic() {
       <span class="hint">DST 客户端（饥荒联机版游戏本体）安装目录，可为空；用于直接读取客户端 mods 文件夹与创意工坊缓存的模组来开房间</span></div>
     ${d.clientAuto ? `<div class="row"><label></label><span class="hint" style="font-family:monospace;line-height:1.7">检测到客户端: ${esc(d.clientAuto.dir)}<br>客户端模组: ${esc(d.clientAuto.modsDir)}<br>创意工坊缓存: ${esc(d.clientAuto.workshopDir)}</span></div>` : `<div class="row"><label></label><span class="hint">未检测到本机 DST 客户端（安装客户端或手动填写位置后，可使用「本地模组库」直接读取/复用客户端模组）</span></div>`}
     <div class="row"><label>模组存放目录</label><input type="text" id="modsDirInput" value="${esc(d.modsDir || "")}" size="46"> <span class="hint">模组统一存放目录（绝对路径），改动后需迁移或重新下载模组</span></div>
-    <div class="row"><label>服务器目录</label><input type="text" id="serverDir" value="${esc(d.serverDir)}" size="46"> <span class="hint">修改后保存并重启面板生效</span></div>
+    <div class="row"><label>服务器目录</label><input type="text" id="serverDir" value="${esc(d.serverDir)}" style="flex:1;min-width:280px">
+      <button class="btn" id="serverDirAutoBtn" type="button" ${d.serverAuto?.dir ? "" : "disabled"}>自动检测</button>
+      <span class="hint">修改后保存并重启面板生效</span></div>
+    ${d.serverAuto?.dir && !d.serverDir ? `<div class="row"><label></label><span class="hint" style="font-family:monospace;line-height:1.7">检测到专用服务器: ${esc(d.serverAuto.dir)}<br>可点「自动检测」填入后保存</span></div>` : ""}
+    <div class="row"><label>Steam搜索代理</label><input type="text" id="steamProxy" value="${esc(d.steamProxy || "")}" style="flex:1;min-width:280px" placeholder="留空=直连"> <span class="hint">模组按名称搜索走代理。国内直连steamcommunity超时时可填，两种填法都支持</span></div>
+    <div class="row"><label></label><span class="hint" style="line-height:1.6">① 本机通用 HTTP 代理（Clash/V2Ray 等）：填 <code>http://127.0.0.1:7897</code>（Clash Verge 默认混合端口），自动识别并走代理抓取 Steam；<br>② 另一台面板实例：填 <code>http://IP:端口</code>，需能访问到对方面板的端口（代理接口仅监听本机，不对外公开）。留空 = 直连。</span></div>
   </div>
   <div class="card">
     <h3>存档列表 <span class="hint">点击「选择」切换到对应存档进行控制，所有操作在当前界面完成</span></h3>
@@ -441,6 +446,8 @@ async function pageBasic() {
   if (rootDefBtn) rootDefBtn.onclick = () => { $("#clusterRootInput").value = d.defaultClusterRoot || ""; toast("已填入科雷默认存档位置，点「保存」生效"); };
   const cliAutoBtn = $("#clientDirAutoBtn");
   if (cliAutoBtn) cliAutoBtn.onclick = () => { if (d.clientAuto) { $("#clientDirInput").value = d.clientAuto.dir; toast("已填入自动检测到的客户端位置，点「保存」生效"); } };
+  const srvAutoBtn = $("#serverDirAutoBtn");
+  if (srvAutoBtn) srvAutoBtn.onclick = () => { if (d.serverAuto?.dir) { $("#serverDir").value = d.serverAuto.dir; toast("已填入自动检测到的服务器目录，点「保存」生效"); } };
   $$("#clusterTable [data-sel]").forEach((b) => (b.onclick = async () => {
     const r = await api("cluster", { method: "POST", body: { cluster: b.dataset.sel } });
     toast(r.msg); route();
@@ -480,6 +487,7 @@ async function pageBasic() {
       clusterRoot: $("#clusterRootInput").value,
       modsDir: $("#modsDirInput").value,
       betaBranch: $("#betaBranch").value.trim(),
+      steamProxy: $("#steamProxy").value.trim(),
     };
     // Windows：客户端位置（元素存在时才提交，留空=清除手动设置回到自动检测）
     const cliInput = $("#clientDirInput");
@@ -1106,9 +1114,9 @@ async function renderModsLocal() {
 async function renderLocalSteamBox(modsDir) {
   const box = $("#localSteamBox");
   if (!box) return;
-  box.innerHTML = `<div class="card"><h3>本地模组库 <span class="hint">（扫描本机 Steam…）</span></h3></div>`;
+  box.innerHTML = `<div class="card"><h3>本地模组库</h3><div class="loading" style="padding:24px;text-align:center">🔍 正在扫描本机 Steam 库中的模组…</div></div>`;
   const j = await apiQuiet("mods/local-steam");
-  if (!j || !j.data) { box.innerHTML = ""; return; }
+  if (!j || !j.data) { box.innerHTML = '<div class="card"><h3>本地模组库</h3><div class="hint" style="padding:16px">未检测到本机 Steam 模组（请确认 DST 客户端已安装或客户端位置配置正确）</div></div>'; return; }
   const mods = j.data.mods || [];
   const client = j.data.client;
   const typeTag = (m) =>
@@ -2580,11 +2588,12 @@ async function pageHelp() {
     <button data-h="tech" class="${helpState.sub === "tech" ? "active" : ""}">🔧 技术解析</button>
     <button data-h="manual" class="${helpState.sub === "manual" ? "active" : ""}">⌨️ 手动操作</button>
     <button data-h="migrate" class="${helpState.sub === "migrate" ? "active" : ""}">📦 模组迁移</button>
+    <button data-h="config" class="${helpState.sub === "config" ? "active" : ""}">⚙️ 配置说明</button>
   </div>
   <div id="helpBody"></div>`;
   $$(".subtabs button").forEach((b) => (b.onclick = () => { helpState.sub = b.dataset.h; pageHelp(); }));
   const body = $("#helpBody");
-  const helpMap = { guide: HELP_GUIDE, panel: HELP_PANEL, faq: HELP_FAQ, tech: HELP_TECH, manual: HELP_MANUAL, migrate: HELP_MIGRATE };
+  const helpMap = { guide: HELP_GUIDE, panel: HELP_PANEL, faq: HELP_FAQ, tech: HELP_TECH, manual: HELP_MANUAL, migrate: HELP_MIGRATE, config: HELP_CONFIG };
   body.innerHTML = helpMap[helpState.sub] || HELP_GUIDE;
 }
 
@@ -2702,6 +2711,7 @@ const HELP_PANEL = `
     <li><b>路径</b>：存档根目录 / 模组存放目录 / 服务器目录，改动后按提示重启生效；</li>
     <li><b>存档列表</b>：一台服务器可建多个存档（cluster），点「选择」切换当前控制的存档，支持新建 / 重命名 / 删除（删除不可恢复）；</li>
     <li><b>当前存档设置</b>：房间名、描述、密码、游戏模式、人数、PVP、投票、无人暂停、服务器令牌（可显示/复制）、内测分支。保存后重启服务器生效。</li>
+    <li><b>Steam搜索代理</b>：模组按名称搜索需要访问 steamcommunity，国内可能被墙。两种填法都支持：① 本机通用 HTTP 代理（Clash/V2Ray，如 <code>http://127.0.0.1:7897</code>）；② 另一台面板实例地址（需能访问其端口，代理接口只监听面板本机不对外公开）。留空 = 直连。详见「配置说明」。</li>
   </ul>
   <h4>编辑世界</h4>
   <ul>
@@ -3793,6 +3803,68 @@ Linux:    ~/.klei/DoNotStarveTogether/Cluster_1/</div>
   </ul>
 </div>`;
 
+
+// ---- 配置说明 ----
+const HELP_CONFIG = `
+<div class="card help-doc">
+  <h3>⚙️ panel_config.json 配置参数说明</h3>
+  <p>面板所有参数保存在与面板程序同级的 <code>panel_config.json</code> 中，可在「基本设置」页面可视化修改，也可直接编辑 JSON 文件。</p>
+  <h4>全部配置项</h4>
+  <table class="grid"><thead><tr><th>参数</th><th>类型</th><th>默认</th><th>说明</th></tr></thead><tbody>
+    <tr><td><code>cluster</code></td><td>string</td><td>MyDediServer</td><td>当前管理的存档名</td></tr>
+    <tr><td><code>clusterRoot</code></td><td>string</td><td>自动</td><td>存档根目录。Windows: 文档KleiDoNotStarveTogether；Linux: ~/.klei/DoNotStarveTogether。留空自动检测</td></tr>
+    <tr><td><code>clusterRoots</code></td><td>string[]</td><td>[]</td><td>历史存档位置，可在面板快速切换</td></tr>
+    <tr><td><code>serverDir</code></td><td>string</td><td>自动</td><td>DST 专用服务器目录。留空 = 自动扫描 Steam 库</td></tr>
+    <tr><td><code>modsDir</code></td><td>string</td><td>系统自动</td><td>模组统一存放目录，子文件夹为创意工坊 ID</td></tr>
+    <tr><td><code>clientDir</code></td><td>string</td><td>自动</td><td>DST 客户端目录。留空 = 自动扫描 Steam 库</td></tr>
+    <tr><td><code>mode</code></td><td>string</td><td>online</td><td>online 在线 / offline 离线局域网</td></tr>
+    <tr><td><code>autorestart</code></td><td>boolean</td><td>false</td><td>异常退出后自动重启</td></tr>
+    <tr><td><code>beta</code></td><td>boolean</td><td>false</td><td>测试分支</td></tr>
+    <tr><td><code>betaBranch</code></td><td>string</td><td>""</td><td>测试分支名</td></tr>
+    <tr><td><code>langCheck</code></td><td>boolean</td><td>true</td><td>中文语言包自动检测</td></tr>
+    <tr><td style="color:#f90;font-weight:bold"><code>steamProxy</code></td><td>string</td><td>""</td><td>Steam 搜索代理地址，详见下方</td></tr>
+    <tr><td><code>announcements</code></td><td>string[]</td><td>[]</td><td>自动公告内容</td></tr>
+    <tr><td><code>announceAuto</code></td><td>object</td><td>—</td><td>公告定时配置</td></tr>
+    <tr><td><code>itemHistory</code></td><td>string[]</td><td>[]</td><td>物品历史</td></tr>
+    <tr><td><code>favorites</code></td><td>string[]</td><td>[]</td><td>收藏模组 ID</td></tr>
+  </tbody></table>
+
+  <h4>steamProxy — Steam 搜索代理</h4>
+  <div class="doc-warn">⚠ 模组按名称搜索需要访问 steamcommunity.com，国内网络可能直连超时。设置本参数可让搜索走代理，<b>两种填法都兼容</b>，自动识别。</div>
+  <h4>① 本机通用 HTTP 代理（推荐，国内 Windows）</h4>
+  <p>填 Clash / V2Ray 等代理软件的本地端口，面板把它当 HTTP 代理用，自动抓取 Steam 搜索页：</p>
+  <pre><code>{
+  "steamProxy": "http://127.0.0.1:7897"
+}</code></pre>
+  <ul>
+    <li>Clash Verge 默认混合端口为 <code>7897</code>（以代理软件实际端口为准，可在其设置里查看）；</li>
+    <li>代理不通时自动回退直连，不会卡死；</li>
+    <li>此模式下 Steam API 元数据、模组更新日志等请求也一并走代理。</li>
+  </ul>
+  <h4>② 另一台面板实例地址</h4>
+  <p>填能直连 Steam Community 的另一台面板（如海外服务器），走其 <code>/proxy/steam-workshop-browse</code> 接口：</p>
+  <pre><code>{
+  "steamProxy": "http://127.0.0.1:5323"
+}</code></pre>
+  <ul>
+    <li>注意：面板代理接口只监听本机 <code>127.0.0.1:5323</code>，<b>不对外公开</b>（nginx 也不转发）；</li>
+    <li>需借道其他面板时，必须自行保证能访问到对方面板的 5323 端口（同机 / 内网互通 / SSH 隧道），否则填了也连不通。</li>
+  </ul>
+  <h4>工作流程</h4>
+  <pre><code>搜模组 → steamProxy 有值？
+    ├─ 尝试「面板接口」/proxy/steam-workshop-browse
+    │    └─ 失败（非面板实例）↓
+    ├─ 当作「通用 HTTP 代理」请求 steamcommunity.com
+    │    └─ 失败 ↓
+    └─ 回退直连 steamcommunity.com</code></pre>
+  <h4>注意事项</h4>
+  <ul>
+    <li>必须是完整 http(s):// URL</li>
+    <li>通用代理模式需代理软件已开启、端口正确（面板会先试面板接口，6 秒内失败自动降级）</li>
+    <li>搜索结果来自 Steam Community 公开页面，不涉及个人账号</li>
+    <li>面板「基本设置」页面可直接修改，保存即生效</li>
+  </ul>
+</div>`;
 // ============ 启动 ============
 renderTabs();
 startTopFx();

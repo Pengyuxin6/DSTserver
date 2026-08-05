@@ -17,3 +17,6 @@ panel/public/icons/wiki/
 # 个人生产 nginx 配置（含真实域名/内部端口地图，严禁入库；备份见 F:\kimiwork\nginx-configs-backup）
 nginx/blog-web.conf
 nginx/dcu.conf
+
+# Bun 构建缓存（自动生成，不提交）
+panel/.*.bun-build
