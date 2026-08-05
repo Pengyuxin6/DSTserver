@@ -19,6 +19,8 @@ const PUBLIC_DIR = join(PANEL_DIR, "public");
 const PASSWORD_FILE = join(PANEL_DIR, ".panel_password");
 const PANEL_CONFIG_FILE = join(PANEL_DIR, "panel_config.json");
 const MOD_CACHE_FILE = join(PANEL_DIR, "mod_cache.json");
+// 面板版本号：显示在登录页/主界面顶栏（html 注入），软著/发布材料与此保持一致
+const PANEL_VERSION = "1.0.0";
 const isAbsPath = (p: string) => p.startsWith("/") || /^[A-Za-z]:[\\/]/.test(p);
 function readServerDirFromConfig(): string {
   try { const c = JSON.parse(readText(PANEL_CONFIG_FILE)); if (c.serverDir && typeof c.serverDir === "string" && existsSync(join(c.serverDir, "bin"))) return c.serverDir; } catch {}
@@ -3192,6 +3194,7 @@ async function api(req: Request, url: URL): Promise<Response> {
       isWin: IS_WIN,
       multiOpenMinMem: MULTI_OPEN_MIN_MEM,
       steamProxy: panelConfig.steamProxy || "",
+      version: PANEL_VERSION,
       // 凭证永不下发：只返回是否已设置，不返回内容
       has_token: !!token,
       has_cluster_password: !!roomPwd,
@@ -4746,6 +4749,16 @@ const MIME: Record<string, string> = {
   ".gif": "image/gif",
   ".ico": "image/x-icon",
 };
+// 带版本注入的 HTML 服务：替换 __PANEL_VERSION__ 占位符（版本单一来源 PANEL_VERSION）
+function serveHtml(name: string, noStore = false): Response {
+  try {
+    const html = readText(join(PUBLIC_DIR, name)).replace(/__PANEL_VERSION__/g, PANEL_VERSION);
+    const headers: Record<string, string> = { "Content-Type": "text/html; charset=utf-8", "Cache-Control": noStore ? "no-store" : "no-cache" };
+    return new Response(html, { status: 200, headers });
+  } catch {
+    return new Response("Not Found", { status: 404 });
+  }
+}
 function serveFile(path: string, req?: Request, opts?: { noNegotiate?: boolean }): Response {
   try {
     const ext = path.slice(path.lastIndexOf("."));
@@ -4834,7 +4847,7 @@ const server = Bun.serve({
     if (path === "/" || path === "/index.html") {
       // 该 URL 按登录态返回不同页面（表示随 Cookie 变化）：禁用协商缓存，
       // 否则登录后 If-Modified-Since 命中 304，浏览器会继续展示缓存的登录页
-      return serveFile(join(PUBLIC_DIR, checkAuth(req) ? "index.html" : "login.html"), req, { noNegotiate: true });
+      return serveHtml(checkAuth(req) ? "index.html" : "login.html", true);
     }
     // 物品图标补全：/wiki-icon?prefab=<prefab> → PNG
     // 针对既无物品栏图标也无小地图图标的实体（如阿比盖尔），按 MediaWiki 存储规则
@@ -4932,6 +4945,8 @@ const server = Bun.serve({
         return new Response("Error", { status: 500 });
       }
     }
+    // HTML 页面：注入面板版本号（登录页/主界面显示，版本单一来源 PANEL_VERSION）
+    if (/^\/[\w.\-]+\.html$/.test(path) && !path.includes("..")) return serveHtml(path.slice(1));
     // 静态资源（相对路径引用，无敏感数据；允许 bg/ 等一层子目录，禁止 .. 穿越）
     if (/^\/[\w.\-/]+$/.test(path) && !path.includes("..")) {
       const fp = join(PUBLIC_DIR, path);

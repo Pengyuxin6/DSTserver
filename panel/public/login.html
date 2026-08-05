@@ -62,6 +62,8 @@
   }
   button:hover { filter: brightness(1.15); box-shadow: 0 0 16px var(--amber-d); }
   .msg { margin-top: 14px; text-align: center; font-size: 13px; color: #ff7b6b; min-height: 18px; text-shadow: 0 1px 3px rgba(0,0,0,.6); }
+  .ver { margin-top: 16px; text-align: center; font-size: 12px; color: var(--muted); opacity: .72; letter-spacing: 1px; }
+  .ver span { color: var(--amber); font-weight: bold; }
 </style>
 </head>
 <body>
@@ -91,6 +93,7 @@ document.body.dataset.theme = localStorage.getItem("dstp_theme") || "amber";
   <input id="pass" type="password" placeholder="面板密码" autocomplete="current-password">
   <button id="btn">登 录</button>
   <div class="msg" id="msg"></div>
+  <div class="ver">DSTserver <span>v__PANEL_VERSION__</span></div>
 </div>
 <script>
 // 前端调试保护：延迟到页面加载完成后启动，不阻塞首屏

@@ -20,3 +20,6 @@ nginx/dcu.conf
 
 # Bun 构建缓存（自动生成，不提交）
 panel/.*.bun-build
+
+# 视频推广分镜（内部策略，不公开推送）
+docs/视频推广分镜.md
