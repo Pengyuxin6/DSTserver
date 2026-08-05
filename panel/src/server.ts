@@ -2531,17 +2531,44 @@ const downloadQueue: string[] = [];
 const slotBusy: boolean[] = new Array(MAX_PARALLEL).fill(false);
 const slotHome = (s: number) => join(TMP_DIR, `dst_dl_home_${s}`);
 
+// Windows steamcmd 首次运行需自更新（~30MB），提前跑一次 +quit 完成初始化
+let steamcmdBootstrapped = false;
+async function ensureSteamcmdReady(): Promise<void> {
+  if (steamcmdBootstrapped || !IS_WIN) return;
+  if (!existsSync(STEAMCMD)) {
+    // 如果 exe 不存在，尝试自动下载
+    const exeDir = dirname(STEAMCMD);
+    try {
+      mkdirSync(exeDir, { recursive: true });
+      const zip = join(exeDir, "steamcmd.zip");
+      const res = await fetch("https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip");
+      if (res.ok) writeFileSync(zip, Buffer.from(await res.arrayBuffer()));
+      const r = await run(["powershell", "-NoProfile", "-Command", `Expand-Archive -Force -LiteralPath '${zip.replace(/'/g, "''")}' -DestinationPath '${exeDir.replace(/'/g, "''")}'`], { timeoutMs: 60000 });
+      try { rmSync(zip, { force: true }); } catch {}
+      if (r.code !== 0 || !existsSync(STEAMCMD)) return;
+    } catch (e: any) { return; }
+  }
+  // 首次运行 bootstrap（自更新），超时 3 分钟
+  const r = await run([STEAMCMD, "+quit"], { cwd: dirname(STEAMCMD), timeoutMs: 180000 });
+  steamcmdBootstrapped = true;
+}
+
 async function downloadOneMod(id: string, task: Task, slot: number): Promise<boolean> {
+  if (!existsSync(STEAMCMD)) {
+    task.log += `[失败] steamcmd 未安装，请将 steamcmd.exe 放置到 ${STEAMCMD}\n`;
+    return false;
+  }
+  await ensureSteamcmdReady();
   const home = slotHome(slot);
   mkdirSync(home, { recursive: true });
   task.log += `\n===== steamcmd 下载模组 ${id}（并行槽位 ${slot + 1}）=====\n`;
   const r = await run([STEAMCMD, "+login", "anonymous", "+workshop_download_item", "322330", id, "+quit"], {
-    cwd: IS_WIN ? dirname(STEAMCMD) : join(HOME, "steamcmd"),
-    env: IS_WIN ? undefined : { HOME: home },
+    cwd: dirname(STEAMCMD),
+    env: { HOME: home },
     timeoutMs: 10 * 60 * 1000,
   });
   task.log += r.out.slice(-4000) + `\n(exit=${r.code})\n`;
-  // steamcmd 检测到 ~/Steam 已存在时会用它作数据目录，而非 steamcmd 安装目录
+  // HOME 覆盖后 steamcmd 统一下载到临时目录
   const candidates = [
     join(home, "Steam", "steamapps", "workshop", "content", "322330", id),
     join(home, "steamcmd", "steamapps", "workshop", "content", "322330", id),
