@@ -1295,7 +1295,9 @@ function decodeKTEX(buf: Buffer): { width: number; height: number; png: Buffer }
     rgba = decodeDXT5(pixelData, mip0W, mip0H);
   }
   if (!rgba) return null;
-  const png = encodePNG(rgba, mip0W, mip0H);
+  // KTEX 纹理按 D3D 惯例自下而上存储，需垂直翻转以匹配 PNG 自上而下的行序
+  const flipped = flipVerticalRGBA(rgba, mip0W, mip0H);
+  const png = encodePNG(flipped, mip0W, mip0H);
   return { width: mip0W, height: mip0H, png };
 }
 function decodeDXT1(data: Buffer, width: number, height: number): Buffer {
@@ -1387,15 +1389,28 @@ function encodePNG(rgba: Buffer, width: number, height: number): Buffer {
   const idat = deflateSync(raw, { level: 9 });
   return Buffer.concat([sig, chunk("IHDR", ihdr), chunk("IDAT", idat), chunk("IEND", Buffer.alloc(0))]);
 }
+// KTEX 中纹理行自下而上存储（D3D 惯例），翻转后自上而下以匹配 PNG/UV 坐标
+function flipVerticalRGBA(rgba: Buffer, width: number, height: number): Buffer {
+  const bpp = 4;
+  const stride = width * bpp;
+  const out = Buffer.alloc(stride * height);
+  for (let y = 0; y < height; y++) {
+    const srcRow = (height - 1 - y) * stride;
+    rgba.copy(out, y * stride, srcRow, srcRow + stride);
+  }
+  return out;
+}
 // 根据 UV 坐标裁剪已解码的 KTEX 图像并输出 PNG
-// DXT 解码器输出自上而下的 RGBA（与 PNG 一致），UV v 坐标原点在上方
+// 经 flipVertical 后 RGBA 自上而下，UV v 坐标原点在上方
 // Klei 的 UV 坐标指向像素中心：u = (pixel_index + 0.5) / texture_width
 // 因此 pixel_index = floor(u * width)，像素范围 [floor(u1*W), floor(u2*W)] 闭区间
 function cropPNG(decoded: { width: number; height: number; png: Buffer }, u1: number, u2: number, v1: number, v2: number): Buffer {
   const cropX = Math.floor(u1 * decoded.width);
   const cropW = Math.floor(u2 * decoded.width) - cropX + 1;
-  const cropY = Math.floor(v1 * decoded.height);
-  const cropH = Math.floor(v2 * decoded.height) - cropY + 1;
+  // 纹理已通过 flipVerticalRGBA 翻转为自上而下，但 Klei 图集 UV v 是自下而上原点
+  // 需反转 v: v=0(底)→row H, v=1(顶)→row 0; v1<v2 所以 (1-v2) < (1-v1)
+  const cropY = Math.floor((1 - v2) * decoded.height);
+  const cropH = Math.floor((1 - v1) * decoded.height) - cropY + 1;
   if (cropW <= 0 || cropH <= 0 || cropX < 0 || cropY < 0) return decoded.png;
   // 从 PNG 解码回 RGBA（简单方式：直接重新解码 KTEX→RGBA 再裁剪）
   // 更高效：直接从 decodeKTEX 返回 rgba，但当前结构返回 png
