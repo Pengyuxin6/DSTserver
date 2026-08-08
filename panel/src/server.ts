@@ -53,7 +53,7 @@ const SETUP_LUA = join(MODS_DIR, "dedicated_server_mods_setup.lua");
 const DEFAULT_CLUSTER_ROOT = IS_WIN ? join(HOME, "Documents", "Klei", "DoNotStarveTogether") : join(HOME, ".klei", "DoNotStarveTogether");
 const DEFAULT_MODS_DIR = IS_WIN ? join(PANEL_DIR, "dst_mods") : join(HOME, "dst_mods");
 // 原版预设白名单：这些预设使用原版世界设置项，不是模组世界
-const VANILLA_PRESETS = new Set(["", "SURVIVAL_TOGETHER", "DST_CAVE", "LAVAARENA", "QUAGMIRE"]);
+const VANILLA_PRESETS = new Set(["", "forest", "cave", "SURVIVAL_TOGETHER", "DST_CAVE", "LAVAARENA", "QUAGMIRE"]);
 // 存档根目录 / 模组存放目录可在面板「基本设置」修改（存 panelConfig）
 function clusterRoot(): string { return panelConfig.clusterRoot || DEFAULT_CLUSTER_ROOT; }
 function modsStoreDir(): string { return panelConfig.modsDir || DEFAULT_MODS_DIR; }
@@ -294,6 +294,8 @@ function scanLocalSteamMods(): { id: string; source: string; path: string; hasIn
 function findLocalModPath(id: string): string | null {
   const shared = ugcSharedDir();
   if (existsSync(join(shared, id))) return join(shared, id);
+  // 面板 dst_mods 目录（服务器模组存放处）
+  if (existsSync(join(DEFAULT_MODS_DIR, id))) return join(DEFAULT_MODS_DIR, id);
   for (const lib of steamLibs()) {
     const ws = join(lib, "steamapps", "workshop", "content", "322330", id);
     if (existsSync(ws)) return ws;
@@ -706,11 +708,15 @@ function shardDir(shard: string): string {
 interface ShardInfo {
   name: string;
   isMaster: boolean;
+  isSurface: boolean;
   port: string;
   running: boolean;
   // 是否有 server.ini：客户端游戏生成的存档（如 Cluster_1）只有世界文件夹，没有 server.ini，
   // 这类分片也要识别展示（hasIni=false），启动/添加世界时由 ensureServerIni 自动补全
   hasIni: boolean;
+}
+function isSurfaceShardName(name: string, isMaster = false): boolean {
+  return isMaster || /^(Master|Forest|Shipwrecked|Porkland)/i.test(name);
 }
 // 缓存 shard 列表（避免每次调用都扫描目录）
 let shardListCache: ShardInfo[] | null = null;
@@ -729,6 +735,7 @@ function listShards(): ShardInfo[] {
       out.push({
         name: e,
         isMaster,
+        isSurface: isSurfaceShardName(e, isMaster),
         // 未显式配置 server_port 时回退面板默认端口（地上 11000 / 地下 11001），保证世界列表/分片表始终可点改
         port: iniGet(lines, "NETWORK", "server_port") || (isMaster ? "11000" : "11001"),
         running: false,
@@ -740,6 +747,7 @@ function listShards(): ShardInfo[] {
       out.push({
         name: e,
         isMaster,
+        isSurface: isSurfaceShardName(e, isMaster),
         port: isMaster ? "11000" : "11001",
         running: false,
         hasIni: false,
@@ -969,7 +977,7 @@ function readLevelOverrides(shard: string): { overrides: Record<string, string>;
   const file = join(shardDir(shard), "worldgenoverride.lua");
   const text = readText(file);
   const presets = {
-    worldgen: (/worldgen_preset\s*=\s*"([^"]+)"/.exec(text) || [])[1] || "",
+    worldgen: (/worldgen_preset\s*=\s*"([^"]+)"/.exec(text) || /preset\s*=\s*"([^"]+)"/.exec(text) || [])[1] || "",
     settings: (/settings_preset\s*=\s*"([^"]+)"/.exec(text) || [])[1] || "",
   };
   if (!text) return { overrides: {}, presets, raw: "" };
@@ -985,9 +993,9 @@ function readLevelOverrides(shard: string): { overrides: Record<string, string>;
   }
   return { overrides, presets, raw: text };
 }
-function writeLevelOverrides(shard: string, isMaster: boolean, overrides: Record<string, string>, preset?: string | { worldgen?: string; settings?: string }): void {
+function writeLevelOverrides(shard: string, isSurface: boolean, overrides: Record<string, string>, preset?: string | { worldgen?: string; settings?: string }): void {
   const existing = readLevelOverrides(shard).presets;
-  let wg = existing.worldgen || (isMaster ? "SURVIVAL_TOGETHER" : "DST_CAVE");
+  let wg = existing.worldgen || (isSurface ? "SURVIVAL_TOGETHER" : "DST_CAVE");
   let st = existing.settings || wg;
   if (typeof preset === "string") { wg = preset; st = preset; }
   else if (preset) {
@@ -996,8 +1004,12 @@ function writeLevelOverrides(shard: string, isMaster: boolean, overrides: Record
   }
   const lines = Object.entries(overrides)
     .sort(([a], [b]) => a.localeCompare(b))
-    .map(([k, v]) => `    ${luaKey(k)} = ${luaVal(v)},`);
-  const text = `return {\n  override_enabled = true,\n  worldgen_preset = "${wg}",\n  settings_preset = "${st}",\n  overrides = {\n${lines.join("\n")}\n  },\n}\n`;
+    .map(([k, v]) => {
+      // 世界生成的 yes/no/true/false 必须写成 DST 认识的布尔/枚举，不能是字符串 "true"/"false"
+      const lv = v === "true" || v === "false" ? (v === "true") : v;
+      return `    ${luaKey(k)} = ${luaVal(lv)},`;
+    });
+  const text = `return {\n  override_enabled = true,\n  preset = "${wg}",\n  worldgen_preset = "${wg}",\n  settings_preset = "${st}",\n  overrides = {\n${lines.join("\n")}\n  },\n}\n`;
   writeFileSync(join(shardDir(shard), "worldgenoverride.lua"), text);
   // 删除可能残留的旧格式 leveldataoverride.lua，避免游戏校验失败
   try { unlinkSync(join(shardDir(shard), "leveldataoverride.lua")); } catch {}
@@ -1057,6 +1069,57 @@ function writeModOverridesBoth(map: Map<string, ModOverrideEntry>): void {
     const d = shardDir(shard.name);
     if (existsSync(d)) writeFileSync(join(d, "modoverrides.lua"), text);
   }
+}
+function modHasWorldgen(id: string): boolean {
+  const d = modWorldgenData(id);
+  return !!(d && (d.options.length || d.presets.length));
+}
+function modDependencyIds(id: string): string[] {
+  const modDir = findLocalModPath(id);
+  if (!modDir) return [];
+  const text = readText(join(modDir, "modinfo.lua"));
+  const ids: string[] = [];
+  for (const m of text.matchAll(/workshop\s*=\s*"workshop-(\d+)"/g)) {
+    if (!ids.includes(m[1])) ids.push(m[1]);
+  }
+  return ids;
+}
+function presetOwnerKey(pid: string): string | null {
+  for (const [key] of enabledClusterModOverrides()) {
+    const d = modWorldgenData(key.replace("workshop-", ""));
+    if (d?.presets.some((p) => p.id === pid)) return key;
+  }
+  for (const id of allModIds()) {
+    const d = modWorldgenData(id);
+    if (d?.presets.some((p) => p.id === pid)) return `workshop-${id}`;
+  }
+  return null;
+}
+function syncShardWorldMods(shard: string): void {
+  const global = enabledClusterModOverrides();
+  const cur = readModOverrides(shard);
+  const activeOwner = (() => {
+    const wg = readLevelOverrides(shard).presets.worldgen;
+    return wg && !VANILLA_PRESETS.has(wg) ? presetOwnerKey(wg) : null;
+  })();
+  const keep = new Set<string>();
+  if (activeOwner) {
+    keep.add(activeOwner);
+    for (const dep of modDependencyIds(activeOwner.replace("workshop-", ""))) keep.add(`workshop-${dep}`);
+  }
+  const out = new Map<string, ModOverrideEntry>();
+  // 当前预设的 owner 及其依赖即使不在 Master 全局列表，也强制启用（已安装的世界模组）
+  for (const k of keep) {
+    if (!out.has(k)) out.set(k, { enabled: true, options: cur.get(k)?.options || {} });
+  }
+  for (const [key, e] of global) {
+    const id = key.replace("workshop-", "");
+    const worldgen = modHasWorldgen(id);
+    const enabled = !worldgen || keep.has(key);
+    out.set(key, { enabled, options: cur.get(key)?.options || e.options || {} });
+  }
+  writeFileSync(join(shardDir(shard), "modoverrides.lua"), serializeModOverrides(out) + "\n");
+  modOverridesCache.delete(shard);
 }
 
 // ---------- dedicated_server_mods_setup.lua ----------
@@ -3072,10 +3135,18 @@ function modWorldgenDataFromDirRaw(id: string, dir: string): { name: string; opt
   const st = modCache.items[id];
   return { name: st?.title || mi?.name || id, options, presets, worldgenFiles };
 }
+function enabledClusterModOverrides(): Map<string, ModOverrideEntry> {
+  const master = listShards().find((s) => s.isMaster) || listShards()[0];
+  const source = master ? readModOverrides(master.name) : new Map<string, ModOverrideEntry>();
+  const out = new Map<string, ModOverrideEntry>();
+  for (const [key, e] of source) {
+    out.set(key, { enabled: true, options: { ...e.options } });
+  }
+  return out;
+}
 function enabledModWorldgenOptions(shard: string): Map<string, Set<string>> {
   const map = new Map<string, Set<string>>();
-  for (const [key, e] of readModOverrides(shard)) {
-    if (!e.enabled) continue;
+  for (const [key] of enabledClusterModOverrides()) {
     const d = modWorldgenData(key.replace("workshop-", ""));
     if (d) for (const o of d.options) map.set(o.key, new Set(o.values.map((v) => v.v)));
   }
@@ -3084,8 +3155,7 @@ function enabledModWorldgenOptions(shard: string): Map<string, Set<string>> {
 // 获取已启用模组的 modConfig 选项（写入 modoverrides.lua 的配置驱动型选项）
 function enabledModConfigOptions(shard: string): Map<string, Set<string>> {
   const map = new Map<string, Set<string>>();
-  for (const [key, e] of readModOverrides(shard)) {
-    if (!e.enabled) continue;
+  for (const [key] of enabledClusterModOverrides()) {
     const d = modWorldgenData(key.replace("workshop-", ""));
     if (d) for (const o of d.options) {
       if (o.modConfig) map.set(o.key, new Set(o.values.map((v) => v.v)));
@@ -3887,10 +3957,7 @@ async function applyEnabledMods(ids: string[]): Promise<Response> {
     // 仅有 AddLevelPreInitAny = 兼容型修改，不冲突
     return /AddLevel\s*\(|AddPreset\s*\(|LEVELTYPE\.\w+\s*,\s*\{/.test(text) && !text.includes("AddLevelPreInitAny");
   });
-  if (worldModIds.length > 1) {
-    const names = worldModIds.map((id) => modCache.items[id]?.title || parseModInfo(id)?.name || id).join("、");
-    return fail(`检测到大型地图模组冲突，不能一起开启：${names}。这些模组都会替换世界生成，请只保留一个（"三合一"类模组本身包含多生态，算一个）。`);
-  }
+  // 多层结构允许多个世界模组共存，不再限制冲突
   // 保留已有配置，未勾选的省略
   const master = listShards().find((s) => s.isMaster) || listShards()[0];
   const old = master ? readModOverrides(master.name) : new Map<string, ModOverrideEntry>();
@@ -3902,40 +3969,21 @@ async function applyEnabledMods(ids: string[]): Promise<Response> {
   // 先确保符号链接就位，再写 setup（writeSetupIds 会跳过已通过链接存在的模组，避免 Workshop 下载删除链接）
   ensureServerModSymlinks();
   writeSetupIds(ids);
-  writeModOverridesBoth(map);
+  writeFileSync(join(shardDir(master.name), "modoverrides.lua"), serializeModOverrides(map) + "\n");
+  modOverridesCache.delete(master.name);
   const omitted = [...old.keys()].filter((k) => !enabledSet.has(k.replace("workshop-", "")));
   // 检测启用的地图模组是否有地下/独立世界预设（洞穴、火山等）
-  // 猪镇等纯地上模组没有地下预设 → 自动删除 Caves 分片
-  // 海难模组有火山预设（volcanoworld） → 保留 Caves 分片，预设设为火山
-  const activeWorldMods = ids.filter((id) => {
-    const d = modWorldgenData(id);
-    if (!d) return false;
-    const hasCavePreset = d.presets.some((p) => /volcano|cave|under/i.test(p.location || ""));
-    const hasOverworldPreset = d.presets.some((p) => !/volcano|cave|under/i.test(p.location || ""));
-    // 只有地上预设、没有地下预设 = 纯地上地图模组（如猪镇）
-    return hasOverworldPreset && !hasCavePreset;
-  });
-  // 自动删除不支持的 Caves 分片
-  let cavesRemoved = false;
-  if (activeWorldMods.length) {
-    const shards = listShards();
-    const cavesShard = shards.find((s) => !s.isMaster);
-    if (cavesShard) {
-      if (await shardRunning(cavesShard.name)) return fail(`正在启用的地图模组不支持地下世界，请先关闭服务器再保存`);
-      try { rmSync(shardDir(cavesShard.name), { recursive: true, force: true }); cavesRemoved = true; } catch {}
-    }
-  }
   // 大型地图模组（海难/哈姆雷特/三合一等）：新启用时自动应用对应世界预设
   const autoApplied: string[] = [];
   // VANILLA_PRESETS 已在文件顶部定义为全局常量
-  const pickPreset = (presets: ModWorldgenPreset[], isMaster: boolean): ModWorldgenPreset | null => {
+  const pickPreset = (presets: ModWorldgenPreset[], isSurface: boolean): ModWorldgenPreset | null => {
     const isCaveLoc = (l: string) => /volcano|cave|under/i.test(l || "");
-    if (isMaster) {
+    if (isSurface) {
       return presets.find((p) => /SURVIVAL_TOGETHER/i.test(p.id) && !isCaveLoc(p.location))
         || presets.find((p) => !isCaveLoc(p.location))
         || null;
     }
-    // 非主分片：匹配地下/独立世界预设（洞穴、火山等）
+    // 地下分片：匹配地下/独立世界预设（洞穴、火山等）
     return presets.find((p) => isCaveLoc(p.location)) || null;
   };
   for (const id of ids) {
@@ -3946,16 +3994,17 @@ async function applyEnabledMods(ids: string[]): Promise<Response> {
     for (const shard of listShards()) {
       const cur = readLevelOverrides(shard.name).presets.worldgen;
       if (!VANILLA_PRESETS.has(cur)) continue; // 已是模组预设则不覆盖
-      const pick = pickPreset(d.presets, shard.isMaster);
+      const pick = pickPreset(d.presets, shard.isSurface);
       if (!pick) continue;
       // 预设自带的 overrides 由 DST 引擎加载预设时自动应用（在 level_data.overrides 中），
       // 不需要面板重复写入 worldgenoverride.lua。
       // IA 模组的 water.lua 会把 yesno 类型值（如 volcano="yes"）当作 MULTIPLY 频率值处理，
       // 重复写入会导致 nil 算术错误。
-      writeLevelOverrides(shard.name, shard.isMaster, {}, pick.id);
+      writeLevelOverrides(shard.name, shard.isSurface, {}, pick.id);
       autoApplied.push(`${shard.name}→${pick.id}`);
     }
   }
+  for (const shard of listShards()) syncShardWorldMods(shard.name);
   return ok(null, `已保存所选（启用 ${ids.length} 个模组）` + (omitted.length ? `；未勾选的 ${omitted.length} 个模组配置已省略` : "") + (autoApplied.length ? `；已自动应用大型模组预设: ${autoApplied.join("、")}` : ""));
 }
 
@@ -4213,35 +4262,20 @@ async function api(req: Request, url: URL): Promise<Response> {
   }
 
   // ===== 编辑世界 =====
-  // 层级类型基础配置：类型 → 中文名 / 地上或地下 / 需要自动启用的模组
-  // IA(Island Adventures) 海难/火山层级由 IA 模组生成；猪镇需另行安装对应模组
-  const LAYER_TYPES: Record<string, { label: string; surface: boolean; mods: string[]; note?: string }> = {
-    forest: { label: "原版地表", surface: true, mods: [] },
-    cave: { label: "原版洞穴", surface: false, mods: [] },
-    shipwrecked: { label: "海难", surface: true, mods: ["1467214795", "3435352667"] },
-    volcanoworld: { label: "火山", surface: false, mods: ["1467214795", "3435352667"] },
-    porkland: { label: "猪镇", surface: true, mods: [], note: "猪镇世界需自行安装对应的猪镇/哈姆雷特模组" },
-  };
+  // 层级类型来源：原版地表/洞穴 + 已启用世界模组（带 modworldgenmain.lua）提供的预设（海难/火山/猪镇等）
   const LAYER_LOC_CN: Record<string, string> = {
     shipwrecked: "海难", volcanoworld: "火山", porkland: "猪镇", hamlet: "哈姆雷特",
     tropical: "热带", cave: "洞穴", under: "地下", volcano: "火山", forest: "地表",
   };
-  // 可用「世界生成类型」：原版地表/洞穴 + 已启用模组提供的世界类型（海难/火山/猪镇/三合一等）
+  // 可用「世界生成类型」：原版地表/洞穴 + 已启用模组（带 modworldgenmain.lua）提供的世界类型
+  // 规则：只有启用对应模组后，其预设（海难/火山/猪镇等）才出现在类型下拉中
   function availableLayerTypes(): { type: string; label: string; surface: boolean; mods: string[]; modTitle: string }[] {
     const out: { type: string; label: string; surface: boolean; mods: string[]; modTitle: string }[] = [
       { type: "forest", label: "原版地表", surface: true, mods: [], modTitle: "" },
       { type: "cave", label: "原版洞穴", surface: false, mods: [], modTitle: "" },
     ];
     const seen = new Set<string>(["forest", "cave"]);
-    // IA 系列固定类型（已下载才列出）
-    for (const [t, base] of [["shipwrecked", "海难"], ["volcanoworld", "火山"], ["porkland", "猪镇"]] as const) {
-      if (seen.has(t)) continue;
-      const modIds = t === "porkland" ? [] : ["1467214795", "3435352667"];
-      if (modIds.length && !modIds.some((id) => localModDirs().includes(id))) continue;
-      seen.add(t);
-      out.push({ type: t, label: base, surface: t !== "volcanoworld", mods: modIds, modTitle: modIds.length ? modCache.items[modIds[0]]?.title || "Island Adventures" : "需自行安装猪镇模组" });
-    }
-    // 已启用模组提供的额外世界类型（三合一/其他地图模组）
+    // 已启用模组提供的世界类型（海难/火山/猪镇/三合一等）：以 Master 的启用列表为准
     const master = listShards().find((s) => s.isMaster) || listShards()[0];
     if (master) {
       for (const [key, e] of readModOverrides(master.name)) {
@@ -4254,7 +4288,9 @@ async function api(req: Request, url: URL): Promise<Response> {
           if (!loc || seen.has(loc) || /SURVIVAL_TOGETHER|DST_CAVE/.test(p.id)) continue;
           seen.add(loc);
           const isUnder = /volcano|cave|under|ruins/i.test(loc);
-          out.push({ type: loc, label: LAYER_LOC_CN[loc] || loc, surface: !isUnder, mods: [id], modTitle: modCache.items[id]?.title || parseModInfo(id)?.name || id });
+          // 类型条目携带 owner + 依赖，添加层级时自动启用完整模组链
+          const mods = [id, ...modDependencyIds(id)].filter((x, i, a) => a.indexOf(x) === i);
+          out.push({ type: loc, label: LAYER_LOC_CN[loc] || loc, surface: !isUnder, mods, modTitle: modCache.items[id]?.title || parseModInfo(id)?.name || id });
         }
       }
     }
@@ -4271,8 +4307,9 @@ async function api(req: Request, url: URL): Promise<Response> {
   if (path === "worlds/add" && method === "POST") {
     const b = await bodyJson(req);
     const layerType = String(b.type || "cave");
-    const lt = LAYER_TYPES[layerType] || availableLayerTypes().find((t) => t.type === layerType);
-    if (!lt) return fail(`不支持的层级类型: ${layerType}`);
+    // 只接受动态类型：原版地表/洞穴 + 已启用模组提供的世界预设（未启用对应模组则无法添加）
+    const lt = availableLayerTypes().find((t) => t.type === layerType);
+    if (!lt) return fail(`不支持或未启用的层级类型: ${layerType}（请先在 mod设置 启用对应世界模组）`);
     const shards = listShards();
     // 首个「地上」层级成为主世界（海难/原版地表都可做主世界）
     const wantMaster = lt.surface && !shards.some((s) => s.isMaster);
@@ -4287,23 +4324,6 @@ async function api(req: Request, url: URL): Promise<Response> {
       enableLayerMods(lt.mods);
     }
     // 检查是否有不兼容洞穴的地图模组已启用（仅地下类层级需要）
-    if (!wantMaster) {
-      const master = shards.find((s) => s.isMaster);
-      if (master) {
-        for (const [key, e] of readModOverrides(master.name)) {
-          if (!e.enabled) continue;
-          const id = key.replace("workshop-", "");
-          const d = modWorldgenData(id);
-          if (!d) continue;
-          const hasCavePreset = d.presets.some((p) => /volcano|cave|under/i.test(p.location || ""));
-          const hasOverworldPreset = d.presets.some((p) => !/volcano|cave|under/i.test(p.location || ""));
-          if (hasOverworldPreset && !hasCavePreset) {
-            const name = modCache.items[id]?.title || parseModInfo(id)?.name || id;
-            return fail(`已启用地图模组「${name}」不支持地下世界，无法添加该层级。`);
-          }
-        }
-      }
-    }
     // 优先识别既有世界文件夹（客户端存档只有文件夹没有 server.ini）：直接导入并补全配置
     if (layerType === "forest" || layerType === "cave") {
       const firstChoice = wantMaster ? "Master" : "Caves";
@@ -4351,7 +4371,6 @@ async function api(req: Request, url: URL): Promise<Response> {
     return ok({ name, isMaster, ports: { server: serverPort, steam: steamPort, auth: authPort } },
       `已创建${lt.label}世界 ${name}${isMaster ? "（主世界）" : ""}，端口 ${serverPort}/${steamPort}/${authPort} 已自动分配，请记得保存世界设置`
       + (lt.mods.length ? `（已自动启用对应模组: ${lt.mods.map((id) => modCache.items[id]?.title || id).join("、")}）` : "")
-      + (lt.note ? `。${lt.note}` : "")
       + (isExtraLayer ? `。注意：一个存档只有一个主世界（已标记），${name} 属于附加层，面板不维护附加层的世界设置` : ""));
   }
   if (path === "worlds/delete" && method === "POST") {
@@ -4396,32 +4415,47 @@ async function api(req: Request, url: URL): Promise<Response> {
     const hasWorldgenMod = !!worldgenModInfo;
     const hasReplaceWorldgenMod = worldgenModInfo?.replace === true;
     // 原版选项按层级类型：地表类（Master/Forest*/Shipwrecked*/Porkland*）用地表选项，地下类（Caves*/Volcano*）用洞穴选项
-    const isSurfaceShard = target.isMaster || /^(Master|Forest|Shipwrecked|Porkland)/i.test(shard);
-    return ok({ shard, isMaster: target.isMaster, overrides, presets, options: worldOptionTable(isSurfaceShard), hasWorldgenMod, hasReplaceWorldgenMod });
+    const isSurfaceShard = target.isSurface;
+    return ok({ shard, isMaster: target.isMaster, isSurfaceShard, overrides, presets, options: worldOptionTable(isSurfaceShard), hasWorldgenMod, hasReplaceWorldgenMod });
   }
   if (path === "world/modworldgen" && method === "GET") {
     const shard = url.searchParams.get("shard") || "";
     const target = listShards().find((s) => s.name === shard);
     if (!target) return fail("世界不存在");
     const mods: any[] = [];
-    for (const [key, e] of readModOverrides(shard)) {
-      if (!e.enabled) continue;
+    const shardOverrides = readModOverrides(shard);
+    for (const [key, globalEntry] of enabledClusterModOverrides()) {
       const id = key.replace("workshop-", "");
-      const d = modWorldgenData(id);
-      if (!d) continue;
-      // 为 modConfig 选项附加当前配置值（从 modoverrides.lua 读取）
-      const enriched = d.options.map((o) => {
+      const e = shardOverrides.get(key) || globalEntry;
+      const d = modWorldgenData(id) || (findLocalModPath(id) ? modWorldgenDataFromDir(id, findLocalModPath(id)!) : null);
+      const mi = parseModInfo(id) || (findLocalModPath(id) ? parseModInfo(id, join(findLocalModPath(id)!, "modinfo.lua")) : null);
+      // 有世界生成数据 或 有配置选项 → 显示该模组卡片
+      if ((!d || (!d.options.length && !d.presets.length)) && (!mi || !mi.configOptions.length)) continue;
+      // 合并世界选项和 modConfig 选项
+      const worldOpts = d?.options || [];
+      const modCfgOpts = (mi?.configOptions || []).map((o) => ({
+        key: o.name, label: worldConfigLabel(id, o), group: "世界设置", world: "",
+        default: String(o.default ?? ""),
+        values: o.options.length ? o.options.map((op) => ({ v: String(op.data), label: configValueLabel(id, op) })) : [{ v: String(o.default ?? "default"), label: configValueLabel(id, { description: o.label, data: o.default }) }],
+        modConfig: true,
+      })).filter((o) => !worldOpts.some((w) => w.key === o.key));
+      const allOpts = [...worldOpts, ...modCfgOpts];
+      const enriched = allOpts.map((o) => {
         if (o.modConfig) {
           const current = e.options[o.key] !== undefined ? e.options[o.key] : o.default;
           return { ...o, current: String(current) };
         }
         return o;
       });
-      mods.push({ id, ...d, options: enriched, enabledOnShard: e.enabled !== false });
+      const isActive = (() => {
+        const wg = readLevelOverrides(shard).presets?.worldgen || "";
+        return !!wg && d?.presets?.some((p) => p.id === wg);
+      })();
+      mods.push({ id, name: d?.name || mi?.name || id, options: enriched, presets: d?.presets || [], worldgenFiles: d?.worldgenFiles || [], enabledOnShard: isActive });
     }
     // 原版世界选项（模组世界时原版 optTable 被隐藏，这里附带原版选项供前端合并显示）
-    const isSurfaceShard = target.isMaster || /^(Master|Forest|Shipwrecked|Porkland)/i.test(shard);
-    return ok({ mods, vanilla: worldOptionTable(isSurfaceShard) });
+    const isSurfaceShard = target.isSurface;
+    return ok({ mods, vanilla: worldOptionTable(isSurfaceShard), isSurfaceShard });
   }
   // 切换某层级「模组世界生成」开关：修改该分片 modoverrides.lua 的 enabled，
   // 关闭后该层级生成世界时不再加载该模组的 modworldgenmain.lua 影响（仅影响当前层级）
@@ -4440,8 +4474,16 @@ async function api(req: Request, url: URL): Promise<Response> {
       if (!on) return ok(null, `层级 ${shard} 未启用模组「${title}」，无需关闭`);
       map.set(key, { enabled: true, options: {} });
     }
-    map.get(key)!.enabled = on;
-    writeFileSync(join(shardDir(shard), "modoverrides.lua"), serializeModOverrides(map));
+    map.get(key)!.enabled = true;  // 关滑块不取消模组启用
+    // 滑块状态通过 preset 控制（有预设=开，无预设=关）
+    const d = modWorldgenData(modId);
+    const firstPreset = d?.presets[0]?.id;
+    if (on && firstPreset) {
+      try { writeLevelOverrides(shard, target.isSurface, {}, firstPreset); } catch {}
+    } else if (!on) {
+      try { writeLevelOverrides(shard, target.isSurface, {}, target.isSurface ? "SURVIVAL_TOGETHER" : "DST_CAVE"); } catch {}
+    }
+    syncShardWorldMods(shard);
     clearModCaches();
     return ok(null, on ? `已在层级 ${shard} 启用「${title}」的世界生成（重新生成世界生效）` : `已在层级 ${shard} 停用「${title}」的世界生成（该层级不再受其 modworldgenmain.lua 影响，重新生成世界生效）`);
   }
@@ -4450,7 +4492,7 @@ async function api(req: Request, url: URL): Promise<Response> {
     const shard = String(b.shard || "");
     const target = listShards().find((s) => s.name === shard);
     if (!target) return fail("世界不存在");
-    const table = worldOptionTable(target.isMaster);
+    const table = worldOptionTable(target.isSurface);
     const allowed = new Map(table.map((o) => [o.key, new Set(o.values.map((v) => v.v))]));
     // 已启用大型地图模组提供的世界设置项
     const modAllowed = enabledModWorldgenOptions(shard);
@@ -4500,8 +4542,7 @@ async function api(req: Request, url: URL): Promise<Response> {
     }
     // 写入 modConfig 选项到 modoverrides.lua（对应模组）
     if (Object.keys(modConfigUpdates).length > 0) {
-      for (const [key, e] of readModOverrides(shard)) {
-        if (!e.enabled) continue;
+      for (const [key] of enabledClusterModOverrides()) {
         const d = modWorldgenData(key.replace("workshop-", ""));
         if (!d) continue;
         const hasTarget = d.options.some((o) => o.modConfig && o.key in modConfigUpdates);
@@ -4516,43 +4557,29 @@ async function api(req: Request, url: URL): Promise<Response> {
       }
     }
     // 应用模组关卡预设（海难/哈姆雷特等）：worldgen_preset=世界类型，settings_preset=模式难度，可分别设置并合并预设自带 overrides
-    const presetOwner = (pid: string): string | null => {
-      for (const [key] of readModOverrides(shard)) {
-        const d = modWorldgenData(key.replace("workshop-", ""));
-        if (d?.presets.some((p) => p.id === pid)) return key;
-      }
-      for (const id of allModIds()) {
-        const d = modWorldgenData(id);
-        if (d?.presets.some((p) => p.id === pid)) return `workshop-${id}`;
-      }
-      return null;
-    };
-    const ensureModEnabled = (wsKey: string): boolean => {
-      const id = wsKey.replace("workshop-", "");
-      let changed = false;
-      for (const sh of listShards()) {
-        const map = readModOverrides(sh.name);
-        const entry = map.get(wsKey);
-        if (!entry?.enabled) {
-          map.set(wsKey, { enabled: true, options: entry?.options || {} });
-          writeFileSync(join(shardDir(sh.name), "modoverrides.lua"), serializeModOverrides(map) + "\n");
-          changed = true;
-        }
-      }
-      if (changed) {
+    const presetOwner = (pid: string): string | null => presetOwnerKey(pid);
+    const ensureShardWorldModSelection = (ownerKey: string | null): boolean => {
+      const before = serializeModOverrides(readModOverrides(shard));
+      if (ownerKey) {
+        const id = ownerKey.replace("workshop-", "");
         const ids = readSetupIds();
-        if (!ids.includes(id)) { ids.push(id); ensureServerModSymlinks(); writeSetupIds(ids); }
+        for (const dep of [id, ...modDependencyIds(id)]) {
+          if (!ids.includes(dep)) ids.push(dep);
+        }
+        ensureServerModSymlinks();
+        writeSetupIds(ids);
       }
-      return changed;
+      syncShardWorldMods(shard);
+      return serializeModOverrides(readModOverrides(shard)) !== before;
     };
     const mergePresetOverrides = (pid: string) => {
-      for (const [key, e] of readModOverrides(shard)) {
-        if (!e.enabled) continue;
+      for (const [key] of enabledClusterModOverrides()) {
         const d = modWorldgenData(key.replace("workshop-", ""));
         const p = d?.presets.find((x) => x.id === pid);
         if (p) {
           for (const [k, v] of Object.entries(p.overrides)) {
-            if (validKeyVal(k) && validWorldVal(v)) current[k] = String(v);
+            const sv = typeof v === "boolean" ? (v ? "true" : "false") : v;
+            if (validKeyVal(k) && validWorldVal(sv)) current[k] = sv;
           }
         }
       }
@@ -4563,7 +4590,7 @@ async function api(req: Request, url: URL): Promise<Response> {
       presetArg = b.preset;
       mergePresetOverrides(b.preset);
       const owner = presetOwner(b.preset);
-      if (owner && ensureModEnabled(owner)) autoLoaded.push(modCache.items[owner.replace("workshop-", "")]?.title || owner);
+      if (owner && ensureShardWorldModSelection(owner)) autoLoaded.push(modCache.items[owner.replace("workshop-", "")]?.title || owner);
     } else {
       const wg = typeof b.worldgen_preset === "string" && /^[A-Za-z0-9_]{1,64}$/.test(b.worldgen_preset) ? b.worldgen_preset : "";
       const st = typeof b.settings_preset === "string" && /^[A-Za-z0-9_]{1,64}$/.test(b.settings_preset) ? b.settings_preset : "";
@@ -4573,7 +4600,7 @@ async function api(req: Request, url: URL): Promise<Response> {
       for (const pid of [wg, st]) {
         if (pid) {
           const owner = presetOwner(pid);
-          if (owner && ensureModEnabled(owner) && !autoLoaded.length) autoLoaded.push(modCache.items[owner.replace("workshop-", "")]?.title || owner);
+          if (owner && ensureShardWorldModSelection(owner) && !autoLoaded.length) autoLoaded.push(modCache.items[owner.replace("workshop-", "")]?.title || owner);
         }
       }
       // 模式难度统一同步到 cluster.ini 的 game_mode（轻松/无尽/荒野/暗无天日/生存）
@@ -4612,7 +4639,8 @@ async function api(req: Request, url: URL): Promise<Response> {
         for (const k of Object.keys(current)) if (!keep.has(k)) delete current[k];
       }
     }
-    writeLevelOverrides(shard, target.isMaster, current, presetArg);
+    writeLevelOverrides(shard, target.isSurface, current, presetArg);
+    syncShardWorldMods(shard);
     return ok(null, `已保存 ${shard} 的世界设置（每设置完一个世界之后，都需要点击保存）` + (autoLoaded.length ? `；已自动加载模组: ${autoLoaded.join("、")}` : ""));
   }
   if (path === "world/regenerate" && method === "POST") {
@@ -5449,6 +5477,15 @@ async function api(req: Request, url: URL): Promise<Response> {
     const b = await bodyJson(req);
     const lua = String(b.lua || "").trim();
     if (!lua || lua.length > 3500) return fail("命令为空或过长");
+    // all=true：广播到所有运行中的分片（玩家在哪个分片就在哪个分片生效）
+    if (b.all === true) {
+      const running: string[] = [];
+      for (const s of listShards()) if (await shardRunning(s.name)) running.push(s.name);
+      if (!running.length) return fail("没有运行中的分片");
+      let okCount = 0;
+      for (const name of running) if (await sendLua(name, lua)) okCount++;
+      return okCount ? ok(null, `命令已广播到 ${okCount}/${running.length} 个分片`) : fail("所有分片发送失败");
+    }
     const shard = String(b.shard || "Master");
     const target = listShards().find((s) => s.name === shard) || listShards()[0];
     if (!target) return fail("没有可用的分片");

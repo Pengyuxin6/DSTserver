@@ -651,7 +651,11 @@ async function pageWorld() {
     </div>
     <div class="right">
       <div class="card">
-        <h3>设置项 <span class="hint" id="curShard"></span></h3>
+        <h3>设置项 <span class="hint" id="curShard"></span>
+          <label class="mw-mod-toggle" style="margin-left:10px;font-weight:normal;display:inline-flex;align-items:center;gap:6px;cursor:pointer" title="开启后本层级按原版世界生成并显示原版设置项；关闭则折叠">
+            <span class="toggle-slider on" id="vanillaGenToggle"></span> 世界生成
+          </label></h3>
+        <div id="vanillaGenBody">
         <div class="row" style="margin-bottom:8px">
           <input type="text" id="optFilter" placeholder="按设置项名称 / key 过滤" value="${esc(worldState.filterText)}">
           <select id="optGroup"><option value="">全部分组</option></select>
@@ -661,6 +665,7 @@ async function pageWorld() {
         </table></div>
         <div class="btn-row" style="margin-top:12px"><button class="btn primary" id="saveOv">保存世界设置</button></div>
         <div class="hint">点击设置项查看详情并修改。每设置完一个世界后，点击保存。</div>
+        </div>
       </div>
       <div id="vanillaWorldBox"></div>
       <div id="modWorldBox"></div>
@@ -673,7 +678,8 @@ async function pageWorld() {
     div.className = "item" + (worldState.shard === s.name ? " sel" : "");
     // 经典两层 = Master(主世界)+Caves；其余为附加层（多开层），面板不维护其设置
     const isExtra = s.name !== "Master" && s.name !== "Caves";
-    div.innerHTML = `<span class="status-dot ${s.running ? "on" : "off"}"></span>#${i + 1} ${esc(s.name)}（${s.isMaster ? "地上·主世界" : "地下"}`;
+    const layerLabel = s.isMaster ? "地表·主世界" : (s.isSurface ? "地表" : "地下");
+    div.innerHTML = `<span class="status-dot ${s.running ? "on" : "off"}"></span>#${i + 1} ${esc(s.name)}（${layerLabel}`;
     // 端口可点击直接修改（运行中只读）
     if (s.port) {
       div.appendChild(document.createTextNode("，端口 "));
@@ -732,7 +738,15 @@ async function pageWorld() {
   apiQuiet("worlds/layer-types").then((j) => {
     const sel = $("#layerTypeSelect");
     if (!sel || !j?.data?.types?.length) return;
-    sel.innerHTML = j.data.types.map((t) => `<option value="${esc(t.type)}">${esc(t.label)}${t.modTitle ? `（${esc(t.modTitle)}）` : ""}</option>`).join("");
+    const hasMaster = shards.some((s) => s.isMaster);
+    const hasCaves = shards.some((s) => s.name === "Caves");
+    // 前两个层级锁定：第一位=原版地表，第二位=原版洞穴；第三个起全开放
+    sel.innerHTML = j.data.types.map((t) => {
+      const lockFirst = !hasMaster && t.type !== "forest";
+      const lockSecond = hasMaster && !hasCaves && t.type !== "cave";
+      return `<option value="${esc(t.type)}" ${(lockFirst || lockSecond) ? "disabled" : ""}>${esc(t.label)}${t.modTitle ? `（${esc(t.modTitle)}）` : ""}</option>`;
+    }).join("");
+    if (hasMaster && !hasCaves) sel.value = "cave";
   });
   $("#delWorld").onclick = async () => {
     if (!worldState.shard) return toast("请先选择世界", true);
@@ -749,7 +763,7 @@ async function pageWorld() {
   };
 
   // 存档管理
-  const wExec = async (lua) => { const r = await api("console/exec", { method: "POST", body: { lua } }); toast(r.msg); };
+  const wExec = async (lua) => { const r = await api("console/exec", { method: "POST", body: { lua, all: true } }); toast(r.msg, !r.ok); };
   $("#wSave").onclick = () => wExec("c_save()");
   $("#wRollback").onclick = async () => { if (await dlgConfirm("确定回档一天？")) wExec("c_rollback(1)"); };
   const renderWSaves = async () => {
@@ -783,13 +797,13 @@ function renderVanillaWorldCard(hide) {
   const box = $("#vanillaWorldBox");
   if (!box) return;
   if (hide || !worldState.shard) { box.innerHTML = ""; return; }
-  const isMaster = !!worldState.isMaster;
-  const wgCur = worldState.presets?.worldgen || (isMaster ? "SURVIVAL_TOGETHER" : "DST_CAVE");
-  const stCur = worldState.presets?.settings || (isMaster ? "SURVIVAL_TOGETHER" : "DST_CAVE");
-  const modes = isMaster
+  const isSurface = worldState.isSurface !== false;
+  const wgCur = worldState.presets?.worldgen || (isSurface ? "SURVIVAL_TOGETHER" : "DST_CAVE");
+  const stCur = worldState.presets?.settings || (isSurface ? "SURVIVAL_TOGETHER" : "DST_CAVE");
+  const modes = isSurface
     ? [["SURVIVAL_TOGETHER", "生存"], ["RELAXED", "轻松"], ["ENDLESS", "无尽"], ["WILDERNESS", "荒野"], ["LIGHTS_OUT", "暗无天日"], ["SURVIVAL_TOGETHER_CLASSIC", "经典（无巨人）"], ["SURVIVAL_DEFAULT_PLUS", "森林Plus"], ["TERRARIA", "泰拉瑞亚"]]
     : [["DST_CAVE", "洞穴"], ["DST_CAVE_PLUS", "洞穴Plus"], ["TERRARIA_CAVE", "泰拉洞穴"]];
-  const wgName = isMaster ? "森林（地上）" : "洞穴（地下）";
+  const wgName = isSurface ? "森林（地表）" : "洞穴（地下）";
   box.innerHTML = `<div class="card">
     <h3>世界类型与模式 <span class="hint">原版世界</span></h3>
     <div class="row"><label>世界类型</label><span><b>${wgName}</b>（${esc(wgCur)}）</span> <span class="hint">原版世界类型固定；想玩海难/猪镇等请在 mod设置 启用地图模组</span></div>
@@ -814,36 +828,38 @@ async function loadWorldOverrides() {
   worldState.overrides = j.data.overrides;
   worldState.options = j.data.options;
   worldState.isMaster = j.data.isMaster;
+  worldState.isSurface = j.data.isSurfaceShard !== false;
   worldState.presets = j.data.presets || { worldgen: "", settings: "" };
   const preset = j.data.presets?.worldgen || "";
   // 附加层（多开层）提示：面板不维护其设置，仅供参考
   const isExtraShard = !["Master", "Caves"].includes(j.data.shard);
-  $("#curShard").textContent = `— ${j.data.shard}（${j.data.isMaster ? "地上" : "地下"}）${preset ? `｜预设: ${preset}` : ""}${isExtraShard ? "｜附加层·面板不维护其设置" : ""}`;
-  // 只有替换型世界模组（海难/哈姆雷特等完全替换世界生成）才隐藏原版设置
-  // 兼容型模组（三合一等在原版基础上扩展）保留原版设置 + 额外显示模组设置
-  const hasReplaceWorldgenMod = !!j.data.hasReplaceWorldgenMod;
-  const isModWorld = (!!preset && !["SURVIVAL_TOGETHER", "DST_CAVE", "LAVAARENA", "QUAGMIRE", ""].includes(preset)) || hasReplaceWorldgenMod;
+  const shardKind = worldState.isMaster ? "地表·主世界" : (worldState.isSurface ? "地表" : "地下");
+  $("#curShard").textContent = `— ${j.data.shard}（${shardKind}）${preset ? `｜预设: ${preset}` : ""}${isExtraShard ? "｜附加层·面板不维护其设置" : ""}`;
+  // 原版「世界生成」开关：开启=按原版生成并显示原版设置项；关闭=折叠（模组世界默认关）
+  const isModWorld = (!!preset && !["SURVIVAL_TOGETHER", "DST_CAVE", "LAVAARENA", "QUAGMIRE", "forest", "cave", ""].includes(preset));
   worldState.isModWorld = isModWorld;
-  // 原版世界显示「世界类型与模式」卡片；模组世界/附加层隐藏
-  renderVanillaWorldCard(isModWorld || isExtraShard);
-  const filterRow = $("#optFilter")?.closest(".row");
-  const tableWrap = $("#optTable")?.parentElement;
-  const saveRow = $("#saveOv")?.closest(".btn-row");
-  if (filterRow) filterRow.style.display = isModWorld ? "none" : "";
-  if (tableWrap) tableWrap.style.display = isModWorld ? "none" : "";
-  if (saveRow) saveRow.style.display = isModWorld ? "none" : "";
-  let hint = $("#vanillaHiddenHint");
-  if (!hint && tableWrap) {
-    hint = document.createElement("div");
-    hint.id = "vanillaHiddenHint";
-    hint.className = "err-text";
-    tableWrap.after(hint);
+  const genTg = $("#vanillaGenToggle");
+  if (genTg) {
+    const on = !isModWorld;
+    genTg.classList.toggle("on", on);
+    genTg.onclick = async () => {
+      const nowOn = !genTg.classList.contains("on");
+      genTg.classList.toggle("on", nowOn);
+      const body = $("#vanillaGenBody");
+      if (body) body.style.display = nowOn ? "" : "none";
+      // 开启=应用原版世界生成预设；关闭=仅折叠（保留当前预设，不强制改动）
+      if (nowOn && isModWorld) {
+        const v = worldState.isSurface ? "SURVIVAL_TOGETHER" : "DST_CAVE";
+        const r = await api("world/overrides", { method: "POST", body: { shard: worldState.shard, worldgen_preset: v, overrides: {} } });
+        toast(r.msg, !r.ok);
+        if (r.ok) { worldState.isModWorld = false; loadWorldOverrides(); return; }
+      }
+    };
   }
-  if (hint) {
-    hint.style.display = isModWorld ? "" : "none";
-    hint.textContent = "⚠ 模组世界：原版世界选项已合并到下方「原版世界选项」卡片，可在其中修改并保存。";
-  }
-  if (isModWorld) { loadModWorldgen(); return; }
+  // 原版设置区始终渲染（不再因模组世界隐藏），模组世界时默认折叠
+  const body = $("#vanillaGenBody");
+  if (body) body.style.display = isModWorld ? "none" : "";
+  renderVanillaWorldCard(isExtraShard);
   // 分组下拉（保留当前选择）
   const groups = [...new Set(worldState.options.map((o) => o.group))];
   const gs = $("#optGroup");
@@ -888,9 +904,13 @@ async function loadModWorldgen() {
   const j = await apiQuiet("world/modworldgen?shard=" + encodeURIComponent(worldState.shard));
   const mods = j?.data?.mods || [];
   const vanilla = j?.data?.vanilla || [];
+  const isSurfaceShard = j?.data?.isSurfaceShard !== false;
   worldState.mwMods = mods;
   worldState.mwVanilla = vanilla;
+  worldState.mwIsSurface = isSurfaceShard;
   if (!mods.length) { box.innerHTML = ""; return; }
+  // 开启世界生成的模组置顶
+  mods.sort((a, b) => Number(b.enabledOnShard) - Number(a.enabledOnShard));
   box.innerHTML = mods.map((m, mi) => {
     // 世界类型：模组提供的预设（海难/火山/哈姆雷特等）；模式难度：生存/轻松/无尽等
     const caveLocs = ["volcano", "cave", "under", "caves"];
@@ -900,23 +920,21 @@ async function loadModWorldgen() {
     const locReps = new Map();
     for (const p of m.presets) {
       if (!p.location) continue;
-      // 只在对应分片显示：cave类预设只在Caves显示，其他在Master显示
+      // 按层级类型显示：地表层显示海难/哈姆雷特/猪镇等，地下层显示火山/洞穴类
       const presetIsCave = isCaveLoc(p.location);
-      if (presetIsCave !== !worldState.isMaster) continue;
+      if (presetIsCave === isSurfaceShard) continue;
       const has = locReps.get(p.location);
       if (!has || /SURVIVAL_TOGETHER$/.test(p.id)) locReps.set(p.location, p);
     }
-    // 地下分片但模组无地下预设：不渲染任何内容（Caves 分片应在保存模组时已自动删除）
-    if (!worldState.isMaster && locReps.size === 0) {
+    // 地下层但模组无地下预设，或地表层但模组无地表预设：不渲染空卡片
+    if (locReps.size === 0) {
       return "";
     }
     const curWg = worldState.presets?.worldgen || "";
     const curSt = worldState.presets?.settings || "";
-    // 世界类型下拉：原版类型（按地上/地下）+ 模组预设；默认选当前世界类型或首个模组预设
+    // 世界类型下拉：仅模组预设（原版地表/洞穴由上方「设置项」卡片的原版世界生成开关管理）
     const firstPresetId = [...locReps.values()][0]?.id || "";
     const wgOpts = [];
-    if (worldState.isMaster) wgOpts.push(`<option value="forest" ${curWg === "forest" ? "selected" : ""}>原版地表</option>`);
-    else wgOpts.push(`<option value="cave" ${curWg === "cave" ? "selected" : ""}>原版洞穴</option>`);
     for (const p of locReps.values()) {
       wgOpts.push(`<option value="${p.id}" ${curWg === p.id || (!curWg && p.id === firstPresetId) ? "selected" : ""}>${locCn(p.location)}（${p.id}）</option>`);
     }
@@ -924,9 +942,10 @@ async function loadModWorldgen() {
     return `
   <div class="card">
     <h3>模组世界设置：${esc(m.name)} <span class="hint">${esc(m.id)}</span>
-      <label class="mw-mod-toggle" style="margin-left:10px;font-weight:normal" title="关闭后该层级生成世界时不再加载此模组的 modworldgenmain.lua 影响（仅影响当前层级）">
-        <input type="checkbox" data-mwtoggle="${mi}" ${m.enabledOnShard ? "checked" : ""}> 世界生成
+      <label class="mw-mod-toggle" style="margin-left:10px;font-weight:normal;display:inline-flex;align-items:center;gap:6px;cursor:pointer" title="关闭后该层级生成世界时不再加载此模组的 modworldgenmain.lua 影响（仅影响当前层级）">
+        <span class="toggle-slider ${m.enabledOnShard ? "on" : ""}" data-mwtoggle="${mi}"></span> 世界生成
       </label></h3>
+    <div class="mw-card-body" ${m.enabledOnShard ? "" : 'style="display:none"'}>
     ${m.presets.length ? `
     <div class="row"><label>世界类型</label><select id="mwWg_${mi}" data-wgsel="${mi}">${wgOpts.join("")}</select>
     <button class="btn primary" data-wg="${mi}">应用世界类型</button> <span class="hint">切换世界类型需重新生成世界生效</span></div>
@@ -939,19 +958,17 @@ async function loadModWorldgen() {
       <select class="mwGroup" data-mi="${mi}"><option value="">全部分组</option>${[...new Set(m.options.map((o) => o.group))].map((g) => `<option value="${g}" ${g === worldState.mwGroup ? "selected" : ""}>${esc(g)}</option>`).join("")}</select>
     </div>
     <div style="max-height:520px;overflow-y:auto"><table class="grid"><thead><tr><th>设置项</th><th>设定值</th><th>分组</th></tr></thead><tbody id="mwTbody_${mi}"></tbody></table></div>
-    <div class="btn-row save-float" style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:8px"><button class="btn primary" id="saveModOv">保存模组世界设置</button></div>
+    <div class="btn-row save-float" style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:8px"><button class="btn primary" data-savemi="${mi}">保存模组世界设置</button></div>
     <div class="hint" style="text-align:center;margin:4px 0 2px">点击设置项查看详情并修改</div>` : ""}
+    </div>
   </div>`;
   }).join("");
-  // 模组设置项行渲染（支持搜索/分组过滤；世界类型选「原版」时切换显示原版选项）
+  // 模组设置项行渲染（支持搜索/分组过滤；下拉仅含模组预设，直接显示模组选项）
   const renderMwRows = (mi) => {
     const m = worldState.mwMods[mi];
     const tbody = $(`#mwTbody_${mi}`);
     if (!tbody || !m) return;
-    const wgSel = $(`#mwWg_${mi}`);
-    const wgType = wgSel ? wgSel.value : "";
-    const isVanillaType = wgType === "forest" || wgType === "cave";
-    const opts = isVanillaType ? (worldState.mwVanilla || []) : m.options;
+    const opts = m.options;
     const ft = (worldState.mwFilter || "").trim().toLowerCase();
     const fg = worldState.mwGroup || "";
     tbody.innerHTML = "";
@@ -978,8 +995,9 @@ async function loadModWorldgen() {
     renderMwRows(mi);
     // 层级级「世界生成」开关：关闭后该层级不再受此模组 modworldgenmain.lua 影响
     const tg = box.querySelector(`[data-mwtoggle="${mi}"]`);
-    if (tg) tg.onchange = async () => {
-      const on = tg.checked;
+    if (tg) tg.onclick = async () => {
+      tg.style.opacity = "0.4"; tg.style.pointerEvents = "none"; // 视觉反馈
+      const on = !tg.classList.contains("on");
       const r = await api("world/mod-enabled", { method: "POST", body: { shard: worldState.shard, modId: m.id, on } });
       toast(r.msg, !r.ok);
       loadModWorldgen();
@@ -995,14 +1013,10 @@ async function loadModWorldgen() {
       if (!tr) return;
       $$("tr", tbody).forEach((r) => r.classList.remove("sel"));
       tr.classList.add("sel");
-      const wgSel = $(`#mwWg_${mi}`);
-      const wgType = wgSel ? wgSel.value : "";
-      const isVanillaType = wgType === "forest" || wgType === "cave";
-      // 原版类型 → 从原版选项找；模组类型 → 从模组选项找
-      const pool = isVanillaType ? (worldState.mwVanilla || []) : worldState.mwMods[mi].options;
+      const pool = worldState.mwMods[mi].options;
       const o = pool.find((x) => x.key === tr.dataset.key);
       if (!o) return;
-      const curVal = isVanillaType ? (worldState.overrides[o.key] || "default") : (o.modConfig ? (o.current || o.default || "default") : (worldState.overrides[o.key] || o.default || "default"));
+      const curVal = o.modConfig ? (o.current || o.default || "default") : (worldState.overrides[o.key] || o.default || "default");
       const iconSrcs = o.img && o.atlas ? [`icons/${o.atlas}/${o.img.replace(/\.tex$/, ".png")}`] : (o.icon && o.icon.atlas ? [`icons/${o.icon.atlas}/${o.icon.img.replace(/\.tex$/, ".png")}`] : []);
       showWorldOptionPopup(o, curVal, iconSrcs, (val) => {
         if (o.modConfig) {
@@ -1019,12 +1033,12 @@ async function loadModWorldgen() {
         }
       });
     };
-    // 世界类型切换 → 选项区联动切换显示（原版选项 ⇄ 模组选项）
+    // 世界类型切换 → 选项区联动切换显示（仅模组预设间切换）
     const wgs = box.querySelector(`[data-wgsel="${mi}"]`);
     if (wgs) wgs.onchange = () => { renderMwRows(mi); };
   });
   mods.forEach((m, mi) => {
-    const svb = box.querySelector("#saveModOv");
+    const svb = box.querySelector(`[data-savemi="${mi}"]`);
     if (svb) svb.onclick = async () => {
       if (!worldState.shard) return toast("请先选择世界", true);
       const r = await api("world/overrides", { method: "POST", body: { shard: worldState.shard, overrides: worldState.overrides } });
@@ -1035,20 +1049,18 @@ async function loadModWorldgen() {
     const wgb = box.querySelector(`[data-wg="${mi}"]`);
     if (wgb) wgb.onclick = async () => {
       const v = $(`#mwWg_${mi}`).value;
-      const isVanillaType = v === "forest" || v === "cave";
-      const label = isVanillaType ? (v === "forest" ? "原版地表" : "原版洞穴") : v;
-      if (!(await dlgConfirm(`确定把 ${worldState.shard} 的世界类型设为「${label}」？需重新生成世界后生效。`))) return;
-      // 原版类型：清除模组世界类型 preset（该层按原版世界生成）；模组类型：写入对应 preset
-      const r = await api("world/overrides", { method: "POST", body: { shard: worldState.shard, worldgen_preset: isVanillaType ? "" : v, overrides: {} } });
-      toast(r.msg);
-      loadWorldOverrides();
+      if (!(await dlgConfirm(`确定把 ${worldState.shard} 的世界类型设为「${v}」？需重新生成世界后生效。`))) return;
+      // 写入对应模组 preset
+      const r = await api("world/overrides", { method: "POST", body: { shard: worldState.shard, worldgen_preset: v, overrides: {} } });
+      toast(r.msg, !r.ok);
+      if (r.ok) loadWorldOverrides();
     };
     const mb = box.querySelector(`[data-mode="${mi}"]`);
     if (mb) mb.onclick = async () => {
       const v = $(`#mwMode_${mi}`).value;
       const r = await api("world/overrides", { method: "POST", body: { shard: worldState.shard, settings_preset: v, overrides: {} } });
-      toast(r.msg);
-      loadWorldOverrides();
+      toast(r.msg, !r.ok);
+      if (r.ok) loadWorldOverrides();
     };
   });
 }
@@ -2173,10 +2185,9 @@ function startLogPolling() {
 const consoleState = { players: [], sel: null, items: [], world: null, cachedPlayers: null, cachedWorld: null, itemHistory: [] };
 function luaEsc(s) { return String(s).replace(/\\/g, "\\\\").replace(/"/g, '\\"'); }
 async function execLua(lua) {
-  // 同时发送到所有分片（Master + Caves/火山），确保玩家在哪个分片都能生效
-  const r = await api("console/exec", { method: "POST", body: { lua, shard: "Master" } });
-  const r2 = await api("console/exec", { method: "POST", body: { lua, shard: "Caves" } });
-  toast(r.msg);
+  // 广播到所有运行中的分片（Master + Caves + 附加层），玩家在哪个分片就在哪个分片生效
+  const r = await api("console/exec", { method: "POST", body: { lua, all: true } });
+  toast(r.msg, !r.ok);
 }
 async function pageConsole() {
   const histJ = await apiQuiet("item-history");
