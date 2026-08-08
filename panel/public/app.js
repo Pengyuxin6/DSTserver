@@ -461,7 +461,14 @@ async function pageBasic() {
     toast("已填入自动检测到的客户端位置，点「保存」生效");
   };
   const srvAutoBtn = $("#serverDirAutoBtn");
-  if (srvAutoBtn) srvAutoBtn.onclick = () => { if (d.serverAuto?.dir) { $("#serverDir").value = d.serverAuto.dir; toast("已填入自动检测到的服务器目录，点「保存」生效"); } };
+  if (srvAutoBtn) srvAutoBtn.onclick = async () => {
+    if (!d.serverAuto?.dir) return;
+    // 检测前告知：自动检测只扫描本机对应文件夹（纯目录检查），不会启动/弹出任何程序，也不会修改任何文件
+    const ok = await dlgConfirm(`「自动检测」只会扫描本机对应文件夹（纯目录检查），确认信息如下：\n\n· 检查路径：Steam 库中 "steamapps/common/Don't Starve Together Dedicated Server" 是否存在\n· 不会启动或弹出 Steam / DST 窗口\n· 不会修改任何文件\n\n确定开始自动检测？`);
+    if (!ok) return;
+    $("#serverDir").value = d.serverAuto.dir;
+    toast("已填入自动检测到的服务器目录，点「保存」生效");
+  };
   $$("#clusterTable [data-sel]").forEach((b) => (b.onclick = async () => {
     const r = await api("cluster", { method: "POST", body: { cluster: b.dataset.sel } });
     toast(r.msg); route();

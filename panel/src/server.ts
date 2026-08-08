@@ -3329,37 +3329,44 @@ async function steamFetch(url: string, init: RequestInit, proxyTimeoutMs = 5000)
 }
 async function querySteam(ids: string[]): Promise<{ ok: boolean; items: Record<string, SteamItem>; msg?: string }> {
   if (!ids.length) return { ok: true, items: {} };
+  const items: Record<string, SteamItem> = {};
+  // 分批查询（每批 50）：单请求过大易超时/被 Steam 拒；且保证总耗时可控
+  const BATCH = 50;
   try {
-    const body = `itemcount=${ids.length}` + ids.map((id, i) => `&publishedfileids[${i}]=${encodeURIComponent(id)}`).join("");
-    const res = await steamFetch("https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body,
-      signal: AbortSignal.timeout(12000),
-    });
-    const j: any = await res.json();
-    const details = j?.response?.publishedfiledetails || [];
-    const items: Record<string, SteamItem> = {};
-    for (const d of details) {
-      if (String(d.result) !== "1") continue;
-      items[String(d.publishedfileid)] = {
-        publishedfileid: String(d.publishedfileid),
-        title: d.title || "",
-        description: d.description || "",
-        preview_url: d.preview_url || "",
-        file_url: d.file_url || "",
-        file_size: Number(d.file_size) || 0,
-        tags: Array.isArray(d.tags) ? d.tags.map((t: any) => String(t.tag)) : [],
-        subscriptions: Number(d.subscriptions) || 0,
-        lifetime_subscriptions: Number(d.lifetime_subscriptions) || 0,
-        favorited: Number(d.favorited) || 0,
-        views: Number(d.views) || 0,
-        time_updated: Number(d.time_updated) || 0,
-      };
+    for (let i = 0; i < ids.length; i += BATCH) {
+      const batch = ids.slice(i, i + BATCH);
+      const body = `itemcount=${batch.length}` + batch.map((id, j) => `&publishedfileids[${j}]=${encodeURIComponent(id)}`).join("");
+      // 每批 8 秒超时，5 批以内共 40 秒？不——Bun.serve 默认 10 秒超时，
+      // 必须让整个 mods 请求在 ~9 秒内返回，因此批间不做重试，失败即中断
+      const res = await steamFetch("https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/", {
+        method: "POST",
+        headers: { "Content-Type": "application/x-www-form-urlencoded" },
+        body,
+        signal: AbortSignal.timeout(8000),
+      });
+      const j: any = await res.json();
+      const details = j?.response?.publishedfiledetails || [];
+      for (const d of details) {
+        if (String(d.result) !== "1") continue;
+        items[String(d.publishedfileid)] = {
+          publishedfileid: String(d.publishedfileid),
+          title: d.title || "",
+          description: d.description || "",
+          preview_url: d.preview_url || "",
+          file_url: d.file_url || "",
+          file_size: Number(d.file_size) || 0,
+          tags: Array.isArray(d.tags) ? d.tags.map((t: any) => String(t.tag)) : [],
+          subscriptions: Number(d.subscriptions) || 0,
+          lifetime_subscriptions: Number(d.lifetime_subscriptions) || 0,
+          favorited: Number(d.favorited) || 0,
+          views: Number(d.views) || 0,
+          time_updated: Number(d.time_updated) || 0,
+        };
+      }
     }
     return { ok: true, items };
   } catch (e: any) {
-    return { ok: false, items: {}, msg: String(e?.message || e) };
+    return { ok: false, items, msg: String(e?.message || e) };
   }
 }
 const CACHE_TTL = 6 * 3600 * 1000;
@@ -3409,7 +3416,15 @@ function allModIds(): string[] {
 async function buildModList(forceRefresh = false) {
   const ids = allModIds();
   let steamOk = true;
-  if (ids.length) steamOk = await ensureSteamCache(ids, forceRefresh);
+  // Steam API 查询限时：即使失败/超时也不阻塞列表返回（本地模组信息立即可用，Steam 信息后续可刷新补全）
+  if (ids.length) {
+    try {
+      steamOk = await Promise.race([
+        ensureSteamCache(ids, forceRefresh),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 8500)),
+      ]);
+    } catch { steamOk = false; }
+  }
   const overrides = new Map<string, ModOverrideEntry>();
   // 以 Master 的 modoverrides 为准决定 enabled
   const master = listShards().find((s) => s.isMaster) || listShards()[0];
@@ -5849,6 +5864,7 @@ setTimeout(() => { try { chinesePo(); } catch {} try { chsNames(); } catch {} },
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port: PORT,
+  idleTimeout: 60,
   async fetch(req) {
     const url = new URL(req.url);
     const path = url.pathname;
