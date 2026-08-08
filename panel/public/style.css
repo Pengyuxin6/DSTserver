@@ -197,15 +197,63 @@ textarea { width: 100%; min-height: 90px; resize: vertical; }
 /* 按钮 */
 .btn {
   background: var(--btn-bg); color: var(--text);
-  border: 1px solid var(--border); border-radius: 6px; padding: 7px 16px;
-  font-size: 13px; cursor: pointer; transition: all .15s;
+  border: 1px solid var(--border); border-radius: 8px; padding: 9px 22px;
+  font-size: 14px; cursor: pointer; transition: all .15s;
 }
 .btn:hover { border-color: var(--amber); color: var(--amber); transform: translateY(-1px); box-shadow: 0 0 10px var(--glow); }
-.btn.primary { background: linear-gradient(180deg, var(--amber), var(--amber-d)); color: var(--primary-text); border: none; font-weight: bold; }
+.btn.primary { background: linear-gradient(180deg, var(--amber), var(--amber-d)); color: var(--primary-text); border: none; font-weight: bold; padding: 11px 32px; font-size: 15px; }
 .btn.primary:hover { filter: brightness(1.12); color: var(--primary-text); box-shadow: 0 0 14px var(--glow); }
 .btn.danger:hover { border-color: var(--red); color: var(--red); box-shadow: 0 0 10px rgba(208, 80, 80, .4); }
 .btn:disabled { opacity: .45; cursor: not-allowed; transform: none; box-shadow: none; }
 .btn-row { display: flex; gap: 10px; flex-wrap: wrap; margin: 10px 0; }
+/* 按钮行：操作按钮居中（视觉统一，兼容旧浏览器不用 :has） */
+.btn-row { justify-content: center; }
+/* 卡片末尾的按钮行：滚动时吸附底部悬浮，下方留出空间 */
+.card > .btn-row:last-child {
+  position: sticky; bottom: 14px; z-index: 20;
+  background: linear-gradient(180deg, transparent, var(--bg) 35%);
+  padding: 10px 0 4px; margin: 14px 0 2px;
+}
+main { padding-bottom: 110px; }  /* 底部预留：悬浮保存按钮区域不遮挡页面内容 */
+
+/* 加载动画（分区域加载 / 日志加载） */
+.spinner {
+  display: inline-block; width: 18px; height: 18px;
+  border: 3px solid var(--border); border-top-color: var(--amber);
+  border-radius: 50%; animation: spin .8s linear infinite;
+  vertical-align: -4px; margin-right: 8px; flex-shrink: 0;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+.loading-box {
+  display: flex; align-items: center; gap: 8px;
+  color: var(--muted); font-size: 13px; padding: 14px 4px; min-height: 22px;
+}
+.logbox .loading-box { padding: 16px 4px; }
+
+/* 模组列表加载进度条 */
+.mod-progress-wrap { display: flex; align-items: center; gap: 10px; margin: 6px 0 8px; }
+.mod-progress { flex: 1; height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.mod-progress-bar { height: 100%; width: 0; background: linear-gradient(90deg, var(--amber), var(--amber-d)); border-radius: 3px; transition: width .15s; }
+.mod-progress-txt { white-space: nowrap; }
+
+/* 页面顶部整体加载进度条（服务器管理页各区域推进） */
+.page-progress { position: fixed; top: 0; left: 0; right: 0; height: 3px; z-index: 999; display: none; }
+.page-progress-bar { height: 100%; width: 0; background: linear-gradient(90deg, var(--amber), var(--amber-d)); transition: width .3s; box-shadow: 0 0 8px var(--glow); }
+
+/* 保存按钮悬浮：固定页面底部居中（基本设置「保存」/ 编辑世界「保存模组世界设置」） */
+/* 纯按钮悬浮（无外框/背景条），按钮自身带阴影提升悬浮感 */
+.btn-row.save-float {
+  position: fixed !important;
+  bottom: 22px; left: 50%; transform: translateX(-50%);
+  z-index: 60; margin: 0;
+  width: max-content;              /* 容器宽度随内容，防止收缩导致文字换行 */
+  display: flex; justify-content: center;
+}
+.btn-row.save-float .btn {
+  white-space: nowrap;             /* 按钮文字横向不换行 */
+  box-shadow: 0 6px 22px rgba(0, 0, 0, .55);
+}
+
 
 /* 表格 */
 table.grid { width: 100%; border-collapse: collapse; font-size: 13px; }

@@ -2,6 +2,17 @@
 
 Windows 版与网页版功能一致：基本设置、编辑世界、mod 设置、服务器管理、控制台、聊天记录、日志、公告，外加 Windows 专属能力。
 
+## 安装向导（推荐）
+
+把 `windows/setup.ps1` 和 `dist/` 里的 `DSTserver.exe` 放在同一目录（或直接用源码仓库形态），双击 `setup.ps1` 即可运行图形安装向导：
+
+1. 选择安装目录（默认 `C:\DSTserver`）；
+2. 自动复制程序文件，**保留已有数据**——目标目录中已存在的面板配置（`panel_config.json`）、密码（`.panel_password`）、模组（`dst_mods`）、服务器文件（`dst_server`）、缓存（`mod_cache.json`）**不会被覆盖**（升级安装安全）；
+3. 自动创建桌面快捷方式「DSTserver 管理面板」；
+4. 完成页显示安装目录、面板地址与密码文件位置。
+
+命令行方式：`powershell -NoProfile -ExecutionPolicy Bypass -File setup.ps1 -Source <dist目录> -InstallDir <目标目录>`
+
 ## 快速开始
 
 1. 双击 `windows/DSTserver.bat` 即可（自动定位项目根目录；也可以复制到项目根目录使用）。
@@ -11,7 +22,7 @@ Windows 版与网页版功能一致：基本设置、编辑世界、mod 设置�
    - **2. 打包为 DSTserver.exe** — 弹出 UAC 询问管理员权限，生成 `dist/DSTserver.exe`（单文件 + 配套 public/data 资源，双击即用，无需安装环境）
    - **3. 添加防火墙规则** — 放行 DST UDP 10999-11001（管理员）
    - **4. 安装/更新 DST 专用服务器** — 用 SteamCMD 下载 app 343050 到 `panel/dst_server`
-3. 首次运行会要求设置面板密码（存 `panel/.panel_password`）。
+3. 首次运行会要求设置面板密码（存 `panel/.panel_password`，完整路径会提示；忘记密码可查看该文件，或在面板「基本设置」页面修改）。
 
 只使用 Windows 自带命令（cmd + PowerShell），运行时仅需 Bun（首次经 `windows/install_bun.ps1` 自动安装到 `%USERPROFILE%\.bun`，优先走 npmmirror 国内镜像，失败自动回退官方脚本）。面板进程为 Bun 单进程，内存/CPU 占用极小（空闲时内存 < 100MB）。
 

@@ -157,7 +157,12 @@ function cropRGBA(img: { width: number; height: number; rgba: Buffer }, u1: numb
   for (let row = 0; row < h; row++) {
     img.rgba.copy(out, row * w * 4, ((y + row) * img.width + x) * 4, ((y + row) * img.width + x + w) * 4);
   }
-  return { width: w, height: h, rgba: out };
+  // 裁剪结果仍是 KTEX bottom-up 行序，而 PNG 编码要求 top-down → 垂直翻转，否则导出的图片上下颠倒
+  const flipped = Buffer.alloc(out.length);
+  for (let row = 0; row < h; row++) {
+    out.copy(flipped, row * w * 4, (h - 1 - row) * w * 4, (h - row) * w * 4);
+  }
+  return { width: w, height: h, rgba: flipped };
 }
 
 // ---------- 图集 XML 解析（属性顺序无关） ----------

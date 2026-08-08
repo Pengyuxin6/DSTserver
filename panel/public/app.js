@@ -385,8 +385,13 @@ async function pageBasic() {
   const sel = (id, opts, cur) =>
     `<select id="${id}">` + opts.map(([v, l]) => `<option value="${v}" ${v === cur ? "selected" : ""}>${l}</option>`).join("") + "</select>";
   const fmtTime = (t) => (t ? new Date(t).toLocaleString("zh-CN", { hour12: false }) : "-");
+  // 框架先行：三张卡片先渲染占位，数据到位后逐卡填充（避免整页白屏等待）
   content.innerHTML = `
-  <div class="card">
+  <div class="card" id="basicPathCard"><h3>路径</h3><div class="loading-box"><span class="spinner"></span>正在加载路径设置…</div></div>
+  <div class="card" id="basicClusterCard"><h3>存档列表</h3><div class="loading-box"><span class="spinner"></span>正在加载存档列表…</div></div>
+  <div class="card" id="basicCfgCard"><h3>当前存档设置</h3><div class="loading-box"><span class="spinner"></span>正在加载当前存档设置…</div></div>`;
+  // 路径设置卡（数据就绪后填充）
+  $("#basicPathCard").innerHTML = `<div class="card">
     <h3>路径</h3>
     <div class="row"><label>存档根目录</label><input type="text" id="clusterRootInput" value="${esc(d.clusterRoot)}" style="flex:1;min-width:280px">
       ${(d.clusterRoots || []).length ? `<select id="clusterRootHist" title="切换到历史使用过的存档位置"><option value="">历史位置…</option>${d.clusterRoots.map((r) => `<option value="${esc(r)}" ${r === d.clusterRoot ? "selected" : ""}>${esc(r)}</option>`).join("")}</select>` : ""}
@@ -403,8 +408,9 @@ async function pageBasic() {
     ${d.serverAuto?.dir && !d.serverDir ? `<div class="row"><label></label><span class="hint" style="font-family:monospace;line-height:1.7">检测到专用服务器: ${esc(d.serverAuto.dir)}<br>可点「自动检测」填入后保存</span></div>` : ""}
     <div class="row"><label>Steam搜索代理</label><input type="text" id="steamProxy" value="${esc(d.steamProxy || "")}" style="flex:1;min-width:280px" placeholder="留空=直连"> <span class="hint">模组按名称搜索走代理。国内直连steamcommunity超时时可填，两种填法都支持</span></div>
     <div class="row"><label></label><span class="hint" style="line-height:1.6">① 本机通用 HTTP 代理（Clash/V2Ray 等）：填 <code>http://127.0.0.1:7897</code>（Clash Verge 默认混合端口），自动识别并走代理抓取 Steam；<br>② 另一台面板实例：填 <code>http://IP:端口</code>，需能访问到对方面板的端口（代理接口仅监听本机，不对外公开）。留空 = 直连。</span></div>
-  </div>
-  <div class="card">
+  </div>`;
+  // 存档列表卡
+  $("#basicClusterCard").innerHTML = `<div class="card">
     <h3>存档列表 <span class="hint">点击「选择」切换到对应存档进行控制，所有操作在当前界面完成</span></h3>
     <div class="row"><label>新建存档</label><input type="text" id="newClusterName" size="24" maxlength="64" placeholder="英文/数字/下划线，最长64字符"> <button class="btn primary" id="createCluster">新建存档</button></div>
     <div class="cluster-table"><table class="grid" id="clusterTable">
@@ -422,8 +428,9 @@ async function pageBasic() {
       </tr>`).join("")}
       </tbody>
     </table></div>
-  </div>
-  <div class="card">
+  </div>`;
+  // 当前存档设置卡
+  $("#basicCfgCard").innerHTML = `<div class="card">
     <h3>当前存档设置：${esc(d.cluster)}</h3>
     <div class="row"><label>游戏风格</label>${sel("intention", [["cooperative","合作模式"],["social","社交"],["competitive","竞争"],["madness","疯狂"]], ini.intention)}</div>
     <div class="row"><label>语言</label>${sel("lang", [["simplified","简体中文"],["traditional","繁體中文"],["auto","跟随Steam客户端语言"]], d.lang || "simplified")} <span class="hint">中文语言包的语言（重启服务器生效）</span></div>
@@ -437,7 +444,7 @@ async function pageBasic() {
     <div class="row"><label>开启投票</label><input type="checkbox" id="vote_kick_enabled" ${ini.vote_kick_enabled === "true" ? "checked" : ""}></div>
     <div class="row"><label>无人自动暂停</label><input type="checkbox" id="pause_when_empty" ${ini.pause_when_empty === "true" ? "checked" : ""}> <span class="hint">没有玩家在线时暂停世界时间流逝（省资源，但作物/生物也停止）</span></div>
     <div class="row"><label>是否为内测</label><input type="checkbox" id="beta" ${d.beta ? "checked" : ""}> <label>内测分支</label><input type="text" id="betaBranch" value="${esc(d.betaBranch || "")}" size="16" maxlength="64" placeholder="留空=默认分支"> <span class="hint">开启后 update_dst.sh 将用 -beta 分支更新服务端</span></div>
-    <div class="btn-row"><button class="btn primary" id="save">保存</button></div>
+    <div class="btn-row save-float" style="display:flex;justify-content:center"><button class="btn primary" id="save">保存</button></div>
   </div>`;
   // 存档位置：历史记录下拉 + 科雷默认位置 + 客户端自动检测
   const histSel = $("#clusterRootHist");
@@ -499,6 +506,8 @@ async function pageBasic() {
     if (tk) body.cluster_token = tk;
     const r = await api("basic", { method: "POST", body });
     toast(r.msg);
+    // 保存成功立刻刷新页面，显示修改后的最新值
+    if (r.ok) route();
   };
   // 清除房间密码 / 令牌
   $("#clearRoomPwd").onclick = async () => {
@@ -615,8 +624,14 @@ async function pageWorld() {
         <h3>世界列表</h3>
         <div class="listbox" id="wlist"></div>
         <div class="btn-row">
-          <button class="btn" id="addForest">添加地上世界</button>
-          <button class="btn" id="addCave">添加地下世界</button>
+          <select id="layerTypeSelect" title="选择要添加的层级类型">
+            <option value="forest">原版地表</option>
+            <option value="cave">洞穴</option>
+            <option value="shipwrecked">海难（IA）</option>
+            <option value="volcanoworld">火山（IA）</option>
+            <option value="porkland">猪镇</option>
+          </select>
+          <button class="btn" id="addLayer">添加层级</button>
           <button class="btn danger" id="delWorld">删除所选世界</button>
         </div>
         <div class="btn-row" style="margin-top:6px">
@@ -708,8 +723,17 @@ async function pageWorld() {
   $("#optFilter").oninput = (e) => { worldState.filterText = e.target.value; loadWorldOverrides(); };
   $("#optGroup").onchange = (e) => { worldState.filterGroup = e.target.value; loadWorldOverrides(); };
 
-  $("#addForest").onclick = async () => { const r = await api("worlds/add", { method: "POST", body: { type: "forest" } }); toast(r.msg); pageWorld(); };
-  $("#addCave").onclick = async () => { const r = await api("worlds/add", { method: "POST", body: { type: "cave" } }); toast(r.msg); pageWorld(); };
+  $("#addLayer").onclick = async () => {
+    const type = $("#layerTypeSelect").value;
+    const r = await api("worlds/add", { method: "POST", body: { type } });
+    toast(r.msg, !r.ok); if (r.ok) pageWorld();
+  };
+  // 动态世界类型列表（原版 + 已启用模组提供的世界类型，如海难/火山/猪镇等）
+  apiQuiet("worlds/layer-types").then((j) => {
+    const sel = $("#layerTypeSelect");
+    if (!sel || !j?.data?.types?.length) return;
+    sel.innerHTML = j.data.types.map((t) => `<option value="${esc(t.type)}">${esc(t.label)}${t.modTitle ? `（${esc(t.modTitle)}）` : ""}</option>`).join("");
+  });
   $("#delWorld").onclick = async () => {
     if (!worldState.shard) return toast("请先选择世界", true);
     if (!(await dlgConfirm(`确定删除世界 ${worldState.shard}？该操作会删除整个分片目录（含存档），不可恢复！`, { danger: true }))) return;
@@ -720,6 +744,8 @@ async function pageWorld() {
     if (!worldState.shard) return toast("请先选择世界", true);
     const r = await api("world/overrides", { method: "POST", body: { shard: worldState.shard, overrides: worldState.overrides } });
     toast(r.msg);
+    // 保存成功立刻重新加载世界设置，显示最新值
+    if (r.ok) loadWorldOverridesKeepSel();
   };
 
   // 存档管理
@@ -779,6 +805,11 @@ function renderVanillaWorldCard(hide) {
 }
 
 async function loadWorldOverrides() {
+  // 加载反馈：设置项表格与模组世界设置卡先显示加载占位
+  const tb0 = $("#optTable tbody");
+  if (tb0) tb0.innerHTML = '<tr class="disabled"><td colspan="3"><span class="spinner" style="vertical-align:-3px"></span> 正在加载设置项…</td></tr>';
+  const box0 = $("#modWorldBox");
+  if (box0) box0.innerHTML = '<div class="loading-box"><span class="spinner"></span>正在加载模组世界设置…</div>';
   const j = await api("world/overrides?shard=" + encodeURIComponent(worldState.shard));
   worldState.overrides = j.data.overrides;
   worldState.options = j.data.options;
@@ -792,6 +823,7 @@ async function loadWorldOverrides() {
   // 兼容型模组（三合一等在原版基础上扩展）保留原版设置 + 额外显示模组设置
   const hasReplaceWorldgenMod = !!j.data.hasReplaceWorldgenMod;
   const isModWorld = (!!preset && !["SURVIVAL_TOGETHER", "DST_CAVE", "LAVAARENA", "QUAGMIRE", ""].includes(preset)) || hasReplaceWorldgenMod;
+  worldState.isModWorld = isModWorld;
   // 原版世界显示「世界类型与模式」卡片；模组世界/附加层隐藏
   renderVanillaWorldCard(isModWorld || isExtraShard);
   const filterRow = $("#optFilter")?.closest(".row");
@@ -809,7 +841,7 @@ async function loadWorldOverrides() {
   }
   if (hint) {
     hint.style.display = isModWorld ? "" : "none";
-    hint.textContent = "⚠ 当前为模组世界，原版设置项不适用已隐藏，请使用下方「模组世界设置」。";
+    hint.textContent = "⚠ 模组世界：原版世界选项已合并到下方「原版世界选项」卡片，可在其中修改并保存。";
   }
   if (isModWorld) { loadModWorldgen(); return; }
   // 分组下拉（保留当前选择）
@@ -831,7 +863,7 @@ async function loadWorldOverrides() {
     const tr = document.createElement("tr");
     tr.dataset.key = o.key;
     const labelOf = (v) => (o.values.find((x) => x.v === v) || {}).label || v;
-    const ico = optIcon([...(o.icon ? [`icons/${o.icon.atlas}/${o.icon.img}.png`] : []), `icons/worldsettings_customization/${o.key}.png`, `icons/worldgen_customization/${o.key}.png`]);
+    const ico = optIcon([...(o.icon ? [`icons/${o.icon.atlas}/${o.icon.img}.png`] : []), `icons/worldsettings_customization/${o.key}.png`, `icons/worldgen_customization/${o.key}.png`], o.label);
     tr.innerHTML = `<td>${ico}${esc(o.label)}</td><td>${esc(labelOf(cur))} <span class="hint">(${esc(cur)})</span></td><td>${esc(o.group)}</td>`;
     if (worldState.selKey === o.key) tr.className = "sel";
     tr.onclick = () => {
@@ -855,7 +887,9 @@ async function loadModWorldgen() {
   if (!box) return;
   const j = await apiQuiet("world/modworldgen?shard=" + encodeURIComponent(worldState.shard));
   const mods = j?.data?.mods || [];
+  const vanilla = j?.data?.vanilla || [];
   worldState.mwMods = mods;
+  worldState.mwVanilla = vanilla;
   if (!mods.length) { box.innerHTML = ""; return; }
   box.innerHTML = mods.map((m, mi) => {
     // 世界类型：模组提供的预设（海难/火山/哈姆雷特等）；模式难度：生存/轻松/无尽等
@@ -878,13 +912,23 @@ async function loadModWorldgen() {
     }
     const curWg = worldState.presets?.worldgen || "";
     const curSt = worldState.presets?.settings || "";
-    const wgOpts = [...locReps.values()].map((p) => `<option value="${p.id}" ${curWg === p.id || (!curWg && [...locReps.values()][0]?.id === p.id) ? "selected" : ""}>${locCn(p.location)}（${p.id}）</option>`);
+    // 世界类型下拉：原版类型（按地上/地下）+ 模组预设；默认选当前世界类型或首个模组预设
+    const firstPresetId = [...locReps.values()][0]?.id || "";
+    const wgOpts = [];
+    if (worldState.isMaster) wgOpts.push(`<option value="forest" ${curWg === "forest" ? "selected" : ""}>原版地表</option>`);
+    else wgOpts.push(`<option value="cave" ${curWg === "cave" ? "selected" : ""}>原版洞穴</option>`);
+    for (const p of locReps.values()) {
+      wgOpts.push(`<option value="${p.id}" ${curWg === p.id || (!curWg && p.id === firstPresetId) ? "selected" : ""}>${locCn(p.location)}（${p.id}）</option>`);
+    }
     const modePresets = m.presets.filter((p) => isModeId(p.id) && p.id !== curWg);
     return `
   <div class="card">
-    <h3>模组世界设置：${esc(m.name)} <span class="hint">${esc(m.id)}</span></h3>
+    <h3>模组世界设置：${esc(m.name)} <span class="hint">${esc(m.id)}</span>
+      <label class="mw-mod-toggle" style="margin-left:10px;font-weight:normal" title="关闭后该层级生成世界时不再加载此模组的 modworldgenmain.lua 影响（仅影响当前层级）">
+        <input type="checkbox" data-mwtoggle="${mi}" ${m.enabledOnShard ? "checked" : ""}> 世界生成
+      </label></h3>
     ${m.presets.length ? `
-    <div class="row"><label>世界类型</label><select id="mwWg_${mi}">${wgOpts.join("")}</select>
+    <div class="row"><label>世界类型</label><select id="mwWg_${mi}" data-wgsel="${mi}">${wgOpts.join("")}</select>
     <button class="btn primary" data-wg="${mi}">应用世界类型</button> <span class="hint">切换世界类型需重新生成世界生效</span></div>
     ${modePresets.length ? `<div class="row"><label>模式难度</label><select id="mwMode_${mi}">${modePresets.map((p) => `<option value="${p.id}" ${curSt === p.id ? "selected" : ""}>${esc(p.name)}（${p.id}）</option>`).join("")}</select>
     <button class="btn" data-mode="${mi}">应用模式</button> <span class="hint">游戏模式/难度（生存、轻松、无尽等）</span></div>` : ""}` : ""}
@@ -895,19 +939,23 @@ async function loadModWorldgen() {
       <select class="mwGroup" data-mi="${mi}"><option value="">全部分组</option>${[...new Set(m.options.map((o) => o.group))].map((g) => `<option value="${g}" ${g === worldState.mwGroup ? "selected" : ""}>${esc(g)}</option>`).join("")}</select>
     </div>
     <div style="max-height:520px;overflow-y:auto"><table class="grid"><thead><tr><th>设置项</th><th>设定值</th><th>分组</th></tr></thead><tbody id="mwTbody_${mi}"></tbody></table></div>
-    <div class="btn-row" style="margin-top:8px"><button class="btn primary" id="saveModOv">保存模组世界设置</button>
-    <span class="hint">点击设置项查看详情并修改</span></div>` : ""}
+    <div class="btn-row save-float" style="display:flex;flex-wrap:wrap;gap:10px;justify-content:center;margin-top:8px"><button class="btn primary" id="saveModOv">保存模组世界设置</button></div>
+    <div class="hint" style="text-align:center;margin:4px 0 2px">点击设置项查看详情并修改</div>` : ""}
   </div>`;
   }).join("");
-  // 模组设置项行渲染（支持搜索/分组过滤）
+  // 模组设置项行渲染（支持搜索/分组过滤；世界类型选「原版」时切换显示原版选项）
   const renderMwRows = (mi) => {
     const m = worldState.mwMods[mi];
     const tbody = $(`#mwTbody_${mi}`);
     if (!tbody || !m) return;
+    const wgSel = $(`#mwWg_${mi}`);
+    const wgType = wgSel ? wgSel.value : "";
+    const isVanillaType = wgType === "forest" || wgType === "cave";
+    const opts = isVanillaType ? (worldState.mwVanilla || []) : m.options;
     const ft = (worldState.mwFilter || "").trim().toLowerCase();
     const fg = worldState.mwGroup || "";
     tbody.innerHTML = "";
-    m.options.forEach((o) => {
+    opts.forEach((o) => {
       if (fg && o.group !== fg) return;
       if (ft && !o.label.toLowerCase().includes(ft) && !o.key.toLowerCase().includes(ft)) return;
       // modConfig 选项从 modoverrides.lua 读取当前值，worldgen 选项从 worldgenoverride.lua 读取
@@ -916,7 +964,11 @@ async function loadModWorldgen() {
       const tr = document.createElement("tr");
       tr.dataset.key = o.key;
       tr.dataset.mi = mi;
-      const ico = o.img && o.atlas ? optIcon([`icons/${o.atlas}/${o.img.replace(/\.tex$/, ".png")}`]) : "";
+      const ico = o.img && o.atlas
+        ? optIcon([`icons/${o.atlas}/${o.img.replace(/\.tex$/, ".png")}`], o.label)
+        : (o.icon && o.icon.atlas
+          ? optIcon([`icons/${o.icon.atlas}/${o.icon.img.replace(/\.tex$/, ".png")}`, `icons/worldsettings_customization/${o.key}.png`, `icons/worldgen_customization/${o.key}.png`], o.label)
+          : optIcon([`icons/worldsettings_customization/${o.key}.png`, `icons/worldgen_customization/${o.key}.png`], o.label));
       tr.innerHTML = `<td>${ico}${esc(o.label)}</td><td>${esc(labelOf(cur))} <span class="hint">(${esc(cur)})</span></td><td>${esc(o.group)}${o.world ? ` <span class="hint">${esc(o.world)}</span>` : ""}</td>`;
       tbody.appendChild(tr);
     });
@@ -924,6 +976,14 @@ async function loadModWorldgen() {
   };
   mods.forEach((m, mi) => {
     renderMwRows(mi);
+    // 层级级「世界生成」开关：关闭后该层级不再受此模组 modworldgenmain.lua 影响
+    const tg = box.querySelector(`[data-mwtoggle="${mi}"]`);
+    if (tg) tg.onchange = async () => {
+      const on = tg.checked;
+      const r = await api("world/mod-enabled", { method: "POST", body: { shard: worldState.shard, modId: m.id, on } });
+      toast(r.msg, !r.ok);
+      loadModWorldgen();
+    };
     const fi = box.querySelector(`.mwFilter[data-mi="${mi}"]`);
     if (fi) fi.oninput = () => { worldState.mwFilter = fi.value; renderMwRows(mi); };
     const fgs = box.querySelector(`.mwGroup[data-mi="${mi}"]`);
@@ -935,10 +995,15 @@ async function loadModWorldgen() {
       if (!tr) return;
       $$("tr", tbody).forEach((r) => r.classList.remove("sel"));
       tr.classList.add("sel");
-      const o = worldState.mwMods[mi].options.find((x) => x.key === tr.dataset.key);
+      const wgSel = $(`#mwWg_${mi}`);
+      const wgType = wgSel ? wgSel.value : "";
+      const isVanillaType = wgType === "forest" || wgType === "cave";
+      // 原版类型 → 从原版选项找；模组类型 → 从模组选项找
+      const pool = isVanillaType ? (worldState.mwVanilla || []) : worldState.mwMods[mi].options;
+      const o = pool.find((x) => x.key === tr.dataset.key);
       if (!o) return;
-      const curVal = o.modConfig ? (o.current || o.default || "default") : (worldState.overrides[o.key] || o.default || "default");
-      const iconSrcs = o.img && o.atlas ? [`icons/${o.atlas}/${o.img.replace(/\.tex$/, ".png")}`] : [];
+      const curVal = isVanillaType ? (worldState.overrides[o.key] || "default") : (o.modConfig ? (o.current || o.default || "default") : (worldState.overrides[o.key] || o.default || "default"));
+      const iconSrcs = o.img && o.atlas ? [`icons/${o.atlas}/${o.img.replace(/\.tex$/, ".png")}`] : (o.icon && o.icon.atlas ? [`icons/${o.icon.atlas}/${o.icon.img.replace(/\.tex$/, ".png")}`] : []);
       showWorldOptionPopup(o, curVal, iconSrcs, (val) => {
         if (o.modConfig) {
           // modConfig 选项：直接保存到 modoverrides.lua
@@ -954,6 +1019,9 @@ async function loadModWorldgen() {
         }
       });
     };
+    // 世界类型切换 → 选项区联动切换显示（原版选项 ⇄ 模组选项）
+    const wgs = box.querySelector(`[data-wgsel="${mi}"]`);
+    if (wgs) wgs.onchange = () => { renderMwRows(mi); };
   });
   mods.forEach((m, mi) => {
     const svb = box.querySelector("#saveModOv");
@@ -961,12 +1029,17 @@ async function loadModWorldgen() {
       if (!worldState.shard) return toast("请先选择世界", true);
       const r = await api("world/overrides", { method: "POST", body: { shard: worldState.shard, overrides: worldState.overrides } });
       toast(r.msg);
+      // 保存成功立刻重新加载，显示最新值
+      if (r.ok) loadWorldOverridesKeepSel();
     };
     const wgb = box.querySelector(`[data-wg="${mi}"]`);
     if (wgb) wgb.onclick = async () => {
       const v = $(`#mwWg_${mi}`).value;
-      if (!(await dlgConfirm(`确定把 ${worldState.shard} 的世界类型设为「${v}」？需重新生成世界后生效。`))) return;
-      const r = await api("world/overrides", { method: "POST", body: { shard: worldState.shard, worldgen_preset: v, overrides: {} } });
+      const isVanillaType = v === "forest" || v === "cave";
+      const label = isVanillaType ? (v === "forest" ? "原版地表" : "原版洞穴") : v;
+      if (!(await dlgConfirm(`确定把 ${worldState.shard} 的世界类型设为「${label}」？需重新生成世界后生效。`))) return;
+      // 原版类型：清除模组世界类型 preset（该层按原版世界生成）；模组类型：写入对应 preset
+      const r = await api("world/overrides", { method: "POST", body: { shard: worldState.shard, worldgen_preset: isVanillaType ? "" : v, overrides: {} } });
       toast(r.msg);
       loadWorldOverrides();
     };
@@ -1005,15 +1078,11 @@ function stopPoll() { if (modsState.pollTimer) { clearInterval(modsState.pollTim
 
 async function renderModsLocal() {
   const body = $("#modsBody");
-  body.innerHTML = '<div class="loading">加载模组列表…</div>';
-  const j = await apiQuiet("mods");
-  if (!j) { body.innerHTML = `<div class="card" style="text-align:center;padding:30px"><h3>模组列表加载失败</h3><div class="hint" style="margin:10px 0 16px">接口无响应，可能是面板重启中或网络中断</div><button class="btn primary" onclick="renderModsLocal()">🔄 重试</button></div>`; return; }
-  modsState.mods = j.data.mods;
-  modsState.checked = new Set(modsState.mods.filter((m) => m.enabled).map((m) => m.id));
+  // 1. 立即渲染页面框架（模组表格 + 总数占位 + 进度条），数据异步加载
   body.innerHTML = `
-  <div id="localSteamBox"></div>
+  <div id="localSteamBox"><div class="loading-box"><span class="spinner"></span>正在扫描本地 Steam 模组库…</div></div>
   <div class="card">
-    <h3>本地Mod ${j.data.steamOk ? "" : '<span class="hint">（Steam API 不可用，仅显示本地信息）</span>'}</h3>
+    <h3>本地Mod <span id="modTotal" class="hint">加载中…</span></h3>
     <div class="btn-row">
       <button class="btn primary" id="saveSel">保存所选</button>
       <button class="btn" id="dlMissing">下载全部缺失</button>
@@ -1022,58 +1091,31 @@ async function renderModsLocal() {
       <input type="text" id="modSearch" placeholder="搜索本地模组（名称/ID）" style="width:220px" value="${esc(modsState.search || "")}">
       <span class="hint">★收藏置顶 ｜ 勾选=启用 ｜ 红色行=已启用未下载</span>
     </div>
+    <div id="modProgressWrap" class="mod-progress-wrap" style="display:none">
+      <div class="mod-progress"><div id="modProgressBar" class="mod-progress-bar"></div></div>
+      <span id="modProgressTxt" class="hint mod-progress-txt"></span>
+    </div>
     <div style="overflow-x:auto"><table class="grid" id="modTable">
       <thead><tr><th>★</th><th></th><th>ID</th><th>预览</th><th>名称</th><th>更新日期</th><th>标签</th><th>状态</th></tr></thead>
-      <tbody></tbody>
+      <tbody><tr class="disabled"><td colspan="8" style="text-align:center"><span class="spinner" style="vertical-align:-3px"></span> 正在加载模组列表…</td></tr></tbody>
     </table></div>
   </div>`;
-  const renderRows = () => {
-    const ft = (modsState.search || "").trim().toLowerCase();
-    const list = modsState.mods.filter((m) => !ft || (m.title || "").toLowerCase().includes(ft) || (m.name || "").toLowerCase().includes(ft) || m.id.includes(ft));
-    const tbody = $("#modTable tbody");
-    tbody.innerHTML = "";
-    if (!list.length) { tbody.innerHTML = '<tr class="disabled"><td colspan="8">（无匹配模组）</td></tr>'; return; }
-    for (const m of list) {
-      const tr = document.createElement("tr");
-      tr.className = [modsState.selId === m.id ? "sel" : "", m.enabled && !m.downloaded ? "need-dl" : ""].join(" ").trim();
-      const tags = [
-        m.clientOnly ? '<span class="tag warn">仅客户端</span>' : "",
-        m.allClientsRequire ? '<span class="tag on">全员需要</span>' : "",
-        m.error ? '<span class="tag err">异常</span>' : "",
-        m.updateAvailable ? '<span class="tag warn">可更新</span>' : "",
-      ].join("");
-      tr.innerHTML = `
-        <td><button class="fav-star${m.favorite ? " on" : ""}" data-fav="${m.id}" title="${m.favorite ? "取消收藏" : "收藏（置顶）"}">${m.favorite ? "★" : "☆"}</button></td>
-        <td><input type="checkbox" data-id="${m.id}" ${modsState.checked.has(m.id) ? "checked" : ""}></td>
-        <td>${esc(m.id)}</td>
-        <td>${m.preview_url ? `<img class="mod-img" loading="lazy" src="${proxyImg(m.preview_url)}" onerror="this.outerHTML='<div class=mod-img></div>'">` : '<div class="mod-img"></div>'}</td>
-        <td>${esc(m.title || m.name || "(未知)")}${m.name && m.title && m.name !== m.title ? `<div class="hint">${esc(m.name)}</div>` : ""}</td>
-        <td>${esc(m.update_date || m.version || "-")}</td>
-        <td>${tags}</td>
-        <td>${m.downloaded ? '<span class="tag on">已下载</span>' : '<span class="tag">未下载</span>'}${m.enabled ? ' <span class="tag on">已启用</span>' : ""}</td>`;
-      tr.onclick = (e) => {
-        if (e.target.type === "checkbox" || e.target.closest(".fav-star")) return;
-        modsState.selId = m.id;
-        $$("tr", tbody).forEach((r) => r.classList.remove("sel"));
-        tr.classList.add("sel");
-        loadModDetail(m.id);
-      };
-      tbody.appendChild(tr);
-    }
-    $$('input[type=checkbox]', tbody).forEach((cb) => (cb.onchange = () => {
-      cb.checked ? modsState.checked.add(cb.dataset.id) : modsState.checked.delete(cb.dataset.id);
-    }));
-    $$(".fav-star", tbody).forEach((b) => (b.onclick = async () => {
-      const nowFav = !b.classList.contains("on");
-      const r = await api("mods/favorite", { method: "POST", body: { id: b.dataset.fav, fav: nowFav } });
-      toast(r.msg);
-      const m = modsState.mods.find((x) => x.id === b.dataset.fav);
-      if (m) m.favorite = nowFav;
-      modsState.mods.sort((a, z) => Number(z.favorite) - Number(a.favorite) || a.id.localeCompare(z.id));
-      renderRows();
-    }));
-  };
+  // 2. 异步加载模组数据（后台接口返回全部模组）
+  const j = await apiQuiet("mods");
+  if (!j) {
+    const tb = document.querySelector("#modTable tbody");
+    if (tb) tb.innerHTML = '<tr class="disabled"><td colspan="8" style="text-align:center">模组列表加载失败（接口无响应）<button class="btn" onclick="renderModsLocal()" style="margin-left:8px">🔄 重试</button></td></tr>';
+    return;
+  }
+  modsState.mods = j.data.mods;
+  modsState.checked = new Set(modsState.mods.filter((m) => m.enabled).map((m) => m.id));
+  if (!j.data.steamOk) {
+    const h3 = body.querySelector("h3");
+    if (h3) h3.innerHTML = `本地Mod <span id="modTotal" class="hint">加载中…</span> <span class="hint">（Steam API 不可用，仅显示本地信息）</span>`;
+  }
+  // 3. 先显示模组总数，然后分批渲染
   renderRows();
+  // 按钮与搜索
   $("#modSearch").oninput = (e) => { modsState.search = e.target.value; renderRows(); };
   $("#saveSel").onclick = async () => {
     const r = await api("mods/save-enabled", { method: "POST", body: { ids: [...modsState.checked] } });
@@ -1109,6 +1151,95 @@ async function renderModsLocal() {
   };
   // 本地 Steam 模组库（一键复用本机客户端模组开房间）
   renderLocalSteamBox(j.data.modsDir || "");
+}
+
+// 模组列表渐进渲染：先显示总数 → 每批 5 个渲染 + 进度条
+function renderRows() {
+  const ft = (modsState.search || "").trim().toLowerCase();
+  // 兼容带空格/无空格搜索：CherryForest 也能匹配 "Cherry Forest"
+  const ft2 = ft.replace(/\s+/g, "");
+  const list = modsState.mods.filter((m) => {
+    if (!ft) return true;
+    const t = (m.title || "").toLowerCase(), n = (m.name || "").toLowerCase();
+    return t.includes(ft) || n.includes(ft) || m.id.includes(ft)
+      || t.replace(/\s+/g, "").includes(ft2) || n.replace(/\s+/g, "").includes(ft2);
+  });
+  const tbody = $("#modTable tbody");
+  tbody.innerHTML = "";
+  // 先显示模组总数
+  const totalEl = $("#modTotal");
+  if (totalEl) totalEl.textContent = `（共 ${list.length} 个模组）`;
+  if (!list.length) {
+    tbody.innerHTML = '<tr class="disabled"><td colspan="8">（无匹配模组）</td></tr>';
+    const pw = $("#modProgressWrap");
+    if (pw) pw.style.display = "none";
+    return;
+  }
+  // 显示进度条
+  const pw = $("#modProgressWrap"), bar = $("#modProgressBar"), ptxt = $("#modProgressTxt");
+  if (pw) pw.style.display = "flex";
+  const updateProgress = (done, total) => {
+    if (bar) bar.style.width = `${Math.round(done / total * 100)}%`;
+    if (ptxt) ptxt.textContent = `正在加载模组 ${Math.min(done + 1, total)}/${total}`;
+  };
+  const makeRow = (m) => {
+    const tr = document.createElement("tr");
+    tr.className = [modsState.selId === m.id ? "sel" : "", m.enabled && !m.downloaded ? "need-dl" : ""].join(" ").trim();
+    const tags = [
+      m.clientOnly ? '<span class="tag warn">仅客户端</span>' : "",
+      m.allClientsRequire ? '<span class="tag on">全员需要</span>' : "",
+      m.error ? '<span class="tag err">异常</span>' : "",
+      m.updateAvailable ? '<span class="tag warn">可更新</span>' : "",
+    ].join("");
+    tr.innerHTML = `
+      <td><button class="fav-star${m.favorite ? " on" : ""}" data-fav="${m.id}" title="${m.favorite ? "取消收藏" : "收藏（置顶）"}">${m.favorite ? "★" : "☆"}</button></td>
+      <td><input type="checkbox" data-id="${m.id}" ${modsState.checked.has(m.id) ? "checked" : ""}></td>
+      <td>${esc(m.id)}</td>
+      <td>${m.preview_url ? `<img class="mod-img" loading="lazy" src="${proxyImg(m.preview_url)}" onerror="this.outerHTML='<div class=mod-img></div>'">` : '<div class="mod-img"></div>'}</td>
+      <td>${esc(m.title || m.name || "(未知)")}${m.name && m.title && m.name !== m.title ? `<div class="hint">${esc(m.name)}</div>` : ""}</td>
+      <td>${esc(m.update_date || m.version || "-")}</td>
+      <td>${tags}</td>
+      <td>${m.downloaded ? '<span class="tag on">已下载</span>' : '<span class="tag">未下载</span>'}${m.enabled ? ' <span class="tag on">已启用</span>' : ""}</td>`;
+    tr.onclick = (e) => {
+      if (e.target.type === "checkbox" || e.target.closest(".fav-star")) return;
+      modsState.selId = m.id;
+      $$("tr", tbody).forEach((r) => r.classList.remove("sel"));
+      tr.classList.add("sel");
+      loadModDetail(m.id);
+    };
+    return tr;
+  };
+  // 每批 5 个渐进渲染，保持界面响应
+  const BATCH = 5;
+  let idx = 0;
+  const step = () => {
+    const end = Math.min(idx + BATCH, list.length);
+    for (; idx < end; idx++) tbody.appendChild(makeRow(list[idx]));
+    updateProgress(idx, list.length);
+    if (idx < list.length) {
+      setTimeout(step, 0);
+    } else {
+      if (pw) pw.style.display = "none";
+      bindRowEvents(tbody);
+    }
+  };
+  setTimeout(step, 0);
+}
+
+// 渲染完成后统一绑定行内交互（收藏/勾选）
+function bindRowEvents(tbody) {
+  $$('input[type=checkbox]', tbody).forEach((cb) => (cb.onchange = () => {
+    cb.checked ? modsState.checked.add(cb.dataset.id) : modsState.checked.delete(cb.dataset.id);
+  }));
+  $$(".fav-star", tbody).forEach((b) => (b.onclick = async () => {
+    const nowFav = !b.classList.contains("on");
+    const r = await api("mods/favorite", { method: "POST", body: { id: b.dataset.fav, fav: nowFav } });
+    toast(r.msg);
+    const m = modsState.mods.find((x) => x.id === b.dataset.fav);
+    if (m) m.favorite = nowFav;
+    modsState.mods.sort((a, z) => Number(z.favorite) - Number(a.favorite) || a.id.localeCompare(z.id));
+    renderRows();
+  }));
 }
 // 本地模组库卡片：扫描本机 Steam 已下载模组，显示来源地址，一键复用/链接加载到面板模组目录
 async function renderLocalSteamBox(modsDir) {
@@ -1682,10 +1813,52 @@ async function showPortEditor(shardName, refresh, running) {
 
 // ============ 4. 服务器管理 ============
 async function pageServer() {
+  // 顶部加载进度条（各区域完成推进，全部完成渐隐）
+  let pgEl = document.getElementById("pageProgress");
+  if (!pgEl) {
+    pgEl = document.createElement("div");
+    pgEl.id = "pageProgress"; pgEl.className = "page-progress";
+    pgEl.innerHTML = '<div class="page-progress-bar"></div>';
+    document.body.appendChild(pgEl);
+  }
+  const pgBar = pgEl.querySelector(".page-progress-bar");
+  pgBar.style.width = "0%";
+  pgEl.style.display = "block";
+  let pgDone = 0; const pgTotal = 4;
+  const pgTick = () => { pgDone++; pgBar.style.width = Math.round(pgDone / pgTotal * 100) + "%"; if (pgDone >= pgTotal) setTimeout(() => { pgEl.style.display = "none"; }, 350); };
+  // 立即渲染页面框架，各区域独立异步加载（未加载完成处显示加载动画）
+  content.innerHTML = `
+  <div class="card"><h3>服务器控制</h3><div id="ctrlBox"><div class="loading-box"><span class="spinner"></span>正在加载服务器状态…</div></div></div>
+  <div class="card"><h3>端口设置 <span class="hint">多开时每个存档的端口必须互不相同，修改后重启服务器生效</span></h3><div id="portBox"><div class="loading-box"><span class="spinner"></span>正在加载端口信息…</div></div></div>
+  <div class="card"><h3>服务器连接模式</h3><div id="modeBox"><div class="loading-box"><span class="spinner"></span>正在加载…</div></div></div>
+  <div class="cols">
+    <div class="right card"><h3>管理员列表（adminlist.txt）</h3><div id="adminBox"><div class="loading-box"><span class="spinner"></span>正在加载…</div></div></div>
+    <div class="right card"><h3>黑名单（blocklist.txt）</h3><div id="blockBox"><div class="loading-box"><span class="spinner"></span>正在加载…</div></div></div>
+  </div>
+  <div class="card"><h3>服务器日志 <span class="hint" id="logHint">（实时刷新）</span></h3>
+    <div class="btn-row"><button class="btn" id="logToggle">暂停刷新</button><span class="hint" id="logCount"></span></div>
+    <div class="logbox" id="serverLog"><div class="loading-box"><span class="spinner"></span>正在加载日志…</div></div>
+  </div>`;
+  // 页面切换时先清理旧定时器
+  if (window._serverLogTimer) { clearInterval(window._serverLogTimer); window._serverLogTimer = null; }
+  if (window._statusTimer) { clearInterval(window._statusTimer); window._statusTimer = null; }
+  // 各区域独立异步加载（每个区域完成后推进进度条）
+  loadServerStatus().then(pgTick).catch(pgTick);
+  loadPorts().then(pgTick).catch(pgTick);
+  loadIdLists().then(pgTick).catch(pgTick);
+  startLogPolling().then(pgTick).catch(pgTick);
+}
+
+// ---- 服务器控制 + 连接模式（同一接口 server/status，独立加载） ----
+async function loadServerStatus() {
+  const ctrl = $("#ctrlBox"), modeBox = $("#modeBox");
   const j = await apiQuiet("server/status");
-  if (!j) return renderLoadFail("服务器状态接口无响应");
+  if (!j) {
+    if (ctrl) ctrl.innerHTML = '<div class="loading-box" style="color:var(--red)">服务器状态加载失败 <button class="btn" onclick="pageServer()">重试</button></div>';
+    if (modeBox) modeBox.innerHTML = '<div class="loading-box" style="color:var(--red)">加载失败</div>';
+    return;
+  }
   const d = j.data;
-  // 多开状态：其他存档在跑且当前存档未运行 → 控制置灰；满足条件（内存≥4G 且端口无冲突）可手动解锁多开
   const multi = (d.otherRunning && d.otherRunning.length) ? d.otherRunning : null;
   const conflicts = d.portConflicts || [];
   const blocked = !!multi && !d.currentRunning;
@@ -1693,9 +1866,7 @@ async function pageServer() {
   const shardRows = d.shards.map((s) =>
     `<tr><td><span class="status-dot ${s.running ? "on" : "off"}"></span>${esc(s.name)}（${s.isMaster ? "地上·主世界" : "地下"}）</td>
      <td>${s.running ? "运行中" : "未运行"}</td><td><span class="port-edit${s.running ? " disabled" : ""}" data-shard="${esc(s.name)}" data-port="${esc(s.port || "")}" title="${s.running ? "运行中不可修改" : "点击查看冲突详情 / 修改端口"}">${esc(s.port || "默认")}</span></td></tr>`).join("");
-  content.innerHTML = `
-  <div class="card">
-    <h3>服务器控制</h3>
+  ctrl.innerHTML = `
     ${multi ? `<div class="multi-open-box">
       <b>⚠ 检测到其他存档的服务器正在运行：</b>${multi.map((m) => `「${esc(m.cluster)}」（${m.shards.map((x) => esc(x)).join("、")}）`).join("，")}
       ${blocked ? `<div class="hint" style="margin-top:4px">当前切换的是另一个存档，服务器控制已置灰。多开需同时满足：空余内存 ≥ 4G、端口互不冲突。</div>` : ""}
@@ -1726,37 +1897,12 @@ async function pageServer() {
     <div class="row"><label>汉化检测</label>
       <label class="switch" title="启动服务器时检测是否启用中文汉化模组"><input type="checkbox" id="langCheckSwitch" ${d.langCheck ? "checked" : ""}><span class="slider"></span></label>
       <span class="hint">启动时检测汉化模组（1301033176/1418746242），未启用则弹窗提示自动配置为简体中文</span></div>
-    <div class="row"><label>世界暂停</label><span id="pauseState" class="hint">查询中…</span> <span class="hint">暂停 = 冻结世界时间（昼夜/作物/生物停止），玩家不被踢出</span></div>
-  </div>
-  <div class="card">
-    <h3>端口设置 <span class="hint">多开时每个存档的端口必须互不相同，修改后重启服务器生效</span></h3>
-    <div id="portBox" class="hint">加载中…</div>
-  </div>
-  <div class="card">
-    <h3>服务器连接模式</h3>
-    <div class="row">
+    <div class="row"><label>世界暂停</label><span id="pauseState" class="hint">查询中…</span> <span class="hint">暂停 = 冻结世界时间（昼夜/作物/生物停止），玩家不被踢出</span></div>`;
+  modeBox.innerHTML = `<div class="row">
       <label><input type="radio" name="mode" value="online" ${d.mode === "online" ? "checked" : ""}> 在线模式</label>
       <label><input type="radio" name="mode" value="offline" ${d.mode === "offline" ? "checked" : ""}> 离线模式</label>
       <span class="hint">切换后需重启服务器生效</span>
-    </div>
-  </div>
-  <div class="cols">
-    <div class="right card"><h3>管理员列表（adminlist.txt）</h3>
-      <div class="row"><input type="text" id="adminNew" placeholder="KU_ id" style="flex:1;min-width:120px"> <input type="text" id="adminNewNote" placeholder="备注（可选）" style="flex:1;min-width:100px"> <button class="btn primary" id="adminAdd">添加</button></div>
-      <div class="adm-table"><table class="grid"><thead><tr><th style="width:30px"></th><th>KU id</th><th>名称</th><th>备注</th></tr></thead><tbody id="adminTbody"></tbody></table></div>
-      <div class="btn-row"><button class="btn danger" id="adminDel">删除所选</button> <button class="btn" id="adminSaveNotes">保存备注</button></div>
-    </div>
-    <div class="right card"><h3>黑名单（blocklist.txt）</h3>
-      <div class="row"><input type="text" id="blockNew" placeholder="KU_ id" style="flex:1;min-width:120px"> <input type="text" id="blockNewNote" placeholder="备注（可选）" style="flex:1;min-width:100px"> <button class="btn primary" id="blockAdd">添加</button></div>
-      <div class="adm-table"><table class="grid"><thead><tr><th style="width:30px"></th><th>KU id</th><th>名称</th><th>备注</th></tr></thead><tbody id="blockTbody"></tbody></table></div>
-      <div class="btn-row"><button class="btn danger" id="blockDel">删除所选</button> <button class="btn" id="blockSaveNotes">保存备注</button></div>
-    </div>
-  </div>
-  <div class="card">
-    <h3>服务器日志 <span class="hint" id="logHint">（实时刷新）</span></h3>
-    <div class="btn-row"><button class="btn" id="logToggle">暂停刷新</button><span class="hint" id="logCount"></span></div>
-    <div class="logbox" id="serverLog" style="min-height:200px;max-height:480px;overflow-y:auto"></div>
-  </div>`;
+    </div>`;
   const act = async (path, body = {}) => { const r = await api(path, { method: "POST", body }); toast(r.msg); setTimeout(pageServer, 1500); };
   // 多开解锁：用户确认内存/端口条件满足后，解除控制置灰
   const unlockBtn = $("#multiOpenAllow");
@@ -1765,68 +1911,16 @@ async function pageServer() {
     unlockBtn.remove();
     toast("已解锁多开控制，请注意内存占用");
   };
-  // 端口设置卡：查看 / 手动修改 / 一键自动分配（运行中只读）
-  const loadPorts = async () => {
-    const box = $("#portBox");
-    if (!box) return;
-    const pj = await apiQuiet("server/ports");
-    if (!pj) { box.textContent = "端口信息加载失败，请刷新"; return; }
-    const p = pj.data;
-    const otherPorts = new Map();
-    (p.others || []).forEach((o) => o.ports.forEach((pt) => { if (!otherPorts.has(pt)) otherPorts.set(pt, o); }));
-    const row = (label, key, val, isDefault) => {
-      const clash = otherPorts.get(Number(val));
-      // 跨存档端口相同只黄色警告：不同时启动就没关系，用户可自行决定保留
-      const clashHtml = clash
-        ? `<span style="color:var(--amber);font-size:12px">⚠ 与${clash.running ? "正在运行的" : ""}「${esc(clash.cluster)}」相同（可保留，两个服务器同时启动才会冲突）</span>`
-        : "";
-      return `<div class="row port-row"><label style="min-width:230px">${label}${isDefault ? ' <span class="hint">(默认值，未显式配置)</span>' : ""}</label>
-        <input type="number" class="port-input" data-portkey="${esc(key)}" value="${val ?? ""}" min="1024" max="65535" ${p.running ? "disabled" : ""}>
-        ${clashHtml}</div>`;
-    };
-    let html = "";
-    if (p.running) html += `<div class="multi-err">服务器运行中，端口只读。请先关闭服务器再修改。</div>`;
-    html += row("主世界通信端口 master_port", "master_port", p.masterPort, !p.masterPortSet);
-    // 分片端口不在此显示/修改：统一由上方分片表的端口号弹窗编辑（带冲突详情）
-    html += `<div class="hint" style="margin:8px 0 2px">分片端口（${p.shards.map((s) => `${esc(s.name)} ${s.serverPort}`).join(" / ")}）请点击上方「服务器控制」分片表中的端口号查看冲突详情并修改</div>`;
-    html += `<div class="btn-row" style="margin-top:10px">
-      <button class="btn" id="portAuto" ${p.running ? "disabled" : ""}>⚡ 自动分配空闲端口</button>
-      <button class="btn primary" id="portSave" ${p.running ? "disabled" : ""}>💾 保存端口</button>
-      <button class="btn" id="portReset2" ${p.running ? "disabled" : ""}>↺ 恢复默认（11000/11001）</button>
-      <span class="hint">改端口不影响存档数据；多开请给每个存档各点一次「自动分配」</span></div>`;
-    if ((p.others || []).length) html += `<div class="hint" style="margin-top:6px">其他存档占用端口：${p.others.map((o) => `「${esc(o.cluster)}」${o.ports.join("/")}${o.running ? "（运行中）" : ""}`).join("，")}</div>`;
-    box.innerHTML = html;
-    const autoBtn = $("#portAuto");
-    const resetBtn2 = $("#portReset2");
-    // 保存后整页刷新：分片表端口与本卡同步显示最新值
-    if (resetBtn2) resetBtn2.onclick = async () => { if (await resetPortsDefault()) pageServer(); };
-    if (autoBtn) autoBtn.onclick = async () => {
-      if (!(await dlgConfirm("将自动避开其他存档占用的端口，重写当前存档的全部端口配置，继续？"))) return;
-      const r = await api("server/ports/auto", { method: "POST", body: {} });
-      toast(r.msg, !r.ok);
-      pageServer();
-    };
-    const saveBtn = $("#portSave");
-    if (saveBtn) saveBtn.onclick = async () => {
-      const body = { masterPort: null, shards: {} };
-      $$(".port-input", box).forEach((el) => {
-        const v = el.value === "" ? null : Number(el.value);
-        if (el.dataset.portkey === "master_port") body.masterPort = v;
-      });
-      const r = await api("server/ports", { method: "POST", body });
-      toast(r.msg, !r.ok);
-      pageServer();
-    };
-  };
-  loadPorts();
   // 分片表端口内联修改（运行中只读）
-  $("#portReset").onclick = async () => { if (await resetPortsDefault()) pageServer(); };
+  const pr = $("#portReset");
+  if (pr) pr.onclick = async () => { if (await resetPortsDefault()) pageServer(); };
   $$(".port-edit[data-shard]").forEach((el) => {
     if (el.classList.contains("disabled")) return;
     el.onclick = () => showPortEditor(el.dataset.shard, pageServer, false);
   });
-  $("#start").onclick = async () => {
-    // 汉化检测
+  // 启动（含汉化检测）
+  const startBtn = $("#start");
+  if (startBtn) startBtn.onclick = async () => {
     if ($("#langCheckSwitch")?.checked) {
       const lc = await apiQuiet("server/lang-check");
       if (lc?.data?.needSetup) {
@@ -1845,12 +1939,15 @@ async function pageServer() {
     }
     act("server/start");
   };
-  $("#stop").onclick = async () => { if (await dlgConfirm("确定关闭服务器？在线玩家将被踢出。", { danger: true })) act("server/stop"); };
-  $("#restart").onclick = async () => { if (await dlgConfirm("确定重启服务器？")) act("server/restart"); };
+  const stopBtn = $("#stop");
+  if (stopBtn) stopBtn.onclick = async () => { if (await dlgConfirm("确定关闭服务器？在线玩家将被踢出。", { danger: true })) act("server/stop"); };
+  const restartBtn = $("#restart");
+  if (restartBtn) restartBtn.onclick = async () => { if (await dlgConfirm("确定重启服务器？")) act("server/restart"); };
   // 暂停/继续合一按钮：按当前状态切换文案与行为
   let worldPaused = false;
   const pauseBtn = $("#pauseBtn");
   const refreshPauseBtn = () => {
+    if (!pauseBtn) return;
     pauseBtn.textContent = worldPaused ? "▶ 继续服务器" : "⏸ 暂停服务器";
     pauseBtn.onclick = async () => {
       if (worldPaused) return act("server/pause", { pause: false });
@@ -1858,7 +1955,8 @@ async function pageServer() {
     };
   };
   refreshPauseBtn();
-  $("#reStatus").onclick = pageServer;
+  const reBtn = $("#reStatus");
+  if (reBtn) reBtn.onclick = pageServer;
   // 暂停状态（best-effort 查询，查不到就显示未知）
   apiQuiet("server/pausestate").then((ps) => {
     const el = $("#pauseState");
@@ -1870,19 +1968,115 @@ async function pageServer() {
       refreshPauseBtn();
     }
   });
-  // 自动重启滑动开关
-  $("#arSwitch").onchange = async (e) => {
-    const on = e.target.checked;
-    const r = await api("server/autorestart", { method: "POST", body: { on } });
-    toast(r.msg);
-  };
-  // 汉化检测开关
-  $("#langCheckSwitch").onchange = async (e) => {
-    const r = await api("server/lang-check-toggle", { method: "POST", body: {} });
-    toast(r.msg);
-  };
+  // 自动重启 / 汉化检测开关
+  const ar = $("#arSwitch");
+  if (ar) ar.onchange = async (e) => { const on = e.target.checked; toast((await api("server/autorestart", { method: "POST", body: { on } })).msg); };
+  const lc = $("#langCheckSwitch");
+  if (lc) lc.onchange = async () => { toast((await api("server/lang-check-toggle", { method: "POST", body: {} })).msg); };
+  // 模式切换
   $$('input[name=mode]').forEach((r) => (r.onchange = () => act("server/mode", { mode: r.value })));
-  // 管理员/黑名单：表格展示（ID + 名称 + 备注），勾选删除，按 KU_id 新增
+  // 分片状态自动刷新（每 10 秒，更新分片状态和系统资源）
+  let statusPolling = true;
+  const refreshStatus = async () => {
+    const sj = await apiQuiet("server/status");
+    if (!sj) return;
+    const sd = sj.data;
+    const tbody = document.querySelector("#content table.grid tbody");
+    if (tbody) {
+      tbody.innerHTML = "";
+      sd.shards.forEach((s) => {
+        const tr = document.createElement("tr");
+        tr.innerHTML = `<td><span class="status-dot ${s.running ? "on" : "off"}"></span>${esc(s.name)}（${s.isMaster ? "地上" : "地下"}）</td>
+          <td>${s.running ? "运行中" : "未运行"}</td><td>${esc(s.port)}</td>`;
+        tbody.appendChild(tr);
+      });
+    }
+    const res = $("#sysRes");
+    if (res && sd.sys) {
+      const cpuColor = sd.sys.cpu > 80 ? 'color:var(--red)' : sd.sys.cpu > 50 ? 'color:var(--amber)' : '';
+      const memUsed = sd.sys.total - sd.sys.avail;
+      const memPct = sd.sys.total ? Math.round(memUsed / sd.sys.total * 100) : 0;
+      res.innerHTML = `CPU <span style="${cpuColor}">${sd.sys.cpu}%</span> ｜ 内存 ${memUsed}MB / ${sd.sys.total}MB (${memPct}%)${sd.sys.dstMem > 0 ? ` ｜ DST <span class="tag">${sd.sys.dstMem}MB</span>` : ''}`;
+    }
+    const hint = $("#memHint");
+    if (hint && sd.sys) {
+      const availColor = sd.sys.avail < 1024 ? 'var(--red)' : sd.sys.avail < 2048 ? 'var(--amber)' : 'var(--green)';
+      hint.innerHTML = `💡 可用 <span style="color:${availColor}">${sd.sys.avail}MB</span>，低于 <span style="color:var(--red)">512MB</span> 时自动终止服务器`;
+    }
+  };
+  window._statusTimer = setInterval(() => { if (statusPolling) refreshStatus(); }, 10_000);
+  const stSwitch = $("#autoStatusSwitch");
+  if (stSwitch) stSwitch.onchange = (e) => { statusPolling = e.target.checked; };
+  // 初始显示系统资源
+  if (d.sys) {
+    const cpuColor = d.sys.cpu > 80 ? 'color:var(--red)' : d.sys.cpu > 50 ? 'color:var(--amber)' : '';
+    const memUsed = d.sys.total - d.sys.avail;
+    const memPct = d.sys.total ? Math.round(memUsed / d.sys.total * 100) : 0;
+    const sr = $("#sysRes");
+    if (sr) sr.innerHTML = `CPU <span style="${cpuColor}">${d.sys.cpu}%</span> ｜ 内存 ${memUsed}MB / ${d.sys.total}MB (${memPct}%)${d.sys.dstMem > 0 ? ` ｜ DST <span class="tag">${d.sys.dstMem}MB</span>` : ''}`;
+    const mh = $("#memHint");
+    if (mh) {
+      const availColor = d.sys.avail < 1024 ? 'var(--red)' : d.sys.avail < 2048 ? 'var(--amber)' : 'var(--green)';
+      mh.innerHTML = `💡 可用 <span style="color:${availColor}">${d.sys.avail}MB</span>，低于 <span style="color:var(--red)">512MB</span> 时自动终止服务器`;
+    }
+  }
+}
+
+// ---- 端口设置（独立加载） ----
+async function loadPorts() {
+  const box = $("#portBox");
+  if (!box) return;
+  const pj = await apiQuiet("server/ports");
+  if (!pj) { box.innerHTML = '<div class="loading-box" style="color:var(--red)">端口信息加载失败 <button class="btn" onclick="pageServer()">重试</button></div>'; return; }
+  const p = pj.data;
+  const otherPorts = new Map();
+  (p.others || []).forEach((o) => o.ports.forEach((pt) => { if (!otherPorts.has(pt)) otherPorts.set(pt, o); }));
+  const row = (label, key, val, isDefault) => {
+    const clash = otherPorts.get(Number(val));
+    const clashHtml = clash
+      ? `<span style="color:var(--amber);font-size:12px">⚠ 与${clash.running ? "正在运行的" : ""}「${esc(clash.cluster)}」相同（可保留，两个服务器同时启动才会冲突）</span>`
+      : "";
+    return `<div class="row port-row"><label style="min-width:230px">${label}${isDefault ? ' <span class="hint">(默认值，未显式配置)</span>' : ""}</label>
+      <input type="number" class="port-input" data-portkey="${esc(key)}" value="${val ?? ""}" min="1024" max="65535" ${p.running ? "disabled" : ""}>
+      ${clashHtml}</div>`;
+  };
+  let html = "";
+  if (p.running) html += `<div class="multi-err">服务器运行中，端口只读。请先关闭服务器再修改。</div>`;
+  html += row("主世界通信端口 master_port", "master_port", p.masterPort, !p.masterPortSet);
+  html += `<div class="hint" style="margin:8px 0 2px">分片端口（${p.shards.map((s) => `${esc(s.name)} ${s.serverPort}`).join(" / ")}）请点击上方「服务器控制」分片表中的端口号查看冲突详情并修改</div>`;
+  html += `<div class="btn-row" style="margin-top:10px">
+    <button class="btn" id="portAuto" ${p.running ? "disabled" : ""}>⚡ 自动分配空闲端口</button>
+    <button class="btn primary" id="portSave" ${p.running ? "disabled" : ""}>💾 保存端口</button>
+    <button class="btn" id="portReset2" ${p.running ? "disabled" : ""}>↺ 恢复默认（11000/11001）</button>
+    <span class="hint">改端口不影响存档数据；多开请给每个存档各点一次「自动分配」</span></div>`;
+  if ((p.others || []).length) html += `<div class="hint" style="margin-top:6px">其他存档占用端口：${p.others.map((o) => `「${esc(o.cluster)}」${o.ports.join("/")}${o.running ? "（运行中）" : ""}`).join("，")}</div>`;
+  box.innerHTML = html;
+  const autoBtn = $("#portAuto");
+  const resetBtn2 = $("#portReset2");
+  if (resetBtn2) resetBtn2.onclick = async () => { if (await resetPortsDefault()) pageServer(); };
+  if (autoBtn) autoBtn.onclick = async () => {
+    if (!(await dlgConfirm("将自动避开其他存档占用的端口，重写当前存档的全部端口配置，继续？"))) return;
+    const r = await api("server/ports/auto", { method: "POST", body: {} });
+    toast(r.msg, !r.ok);
+    pageServer();
+  };
+  const saveBtn = $("#portSave");
+  if (saveBtn) saveBtn.onclick = async () => {
+    const body = { masterPort: null, shards: {} };
+    $$(".port-input", box).forEach((el) => {
+      const v = el.value === "" ? null : Number(el.value);
+      if (el.dataset.portkey === "master_port") body.masterPort = v;
+    });
+    const r = await api("server/ports", { method: "POST", body });
+    toast(r.msg, !r.ok);
+    pageServer();
+  };
+}
+
+// ---- 管理员 / 黑名单（独立加载） ----
+async function loadIdLists() {
+  const adminBox = $("#adminBox"), blockBox = $("#blockBox");
+  if (!adminBox || !blockBox) return;
   const [al, bl] = await Promise.all([api("server/adminlist"), api("server/blocklist")]);
   const renderIdTable = (tbody, entries) => {
     if (!entries.length) { tbody.innerHTML = '<tr class="disabled"><td colspan="4" style="text-align:center">（空）</td></tr>'; return; }
@@ -1893,6 +2087,12 @@ async function pageServer() {
       <td><input type="text" class="id-note" data-id="${esc(e.id)}" value="${esc(e.note || "")}" placeholder="无" style="width:100%;font-size:13px"></td>
     </tr>`).join("");
   };
+  adminBox.innerHTML = `<div class="row"><input type="text" id="adminNew" placeholder="KU_ id" style="flex:1;min-width:120px"> <input type="text" id="adminNewNote" placeholder="备注（可选）" style="flex:1;min-width:100px"> <button class="btn primary" id="adminAdd">添加</button></div>
+    <div class="adm-table"><table class="grid"><thead><tr><th style="width:30px"></th><th>KU id</th><th>名称</th><th>备注</th></tr></thead><tbody id="adminTbody"></tbody></table></div>
+    <div class="btn-row"><button class="btn danger" id="adminDel">删除所选</button> <button class="btn" id="adminSaveNotes">保存备注</button></div>`;
+  blockBox.innerHTML = `<div class="row"><input type="text" id="blockNew" placeholder="KU_ id" style="flex:1;min-width:120px"> <input type="text" id="blockNewNote" placeholder="备注（可选）" style="flex:1;min-width:100px"> <button class="btn primary" id="blockAdd">添加</button></div>
+    <div class="adm-table"><table class="grid"><thead><tr><th style="width:30px"></th><th>KU id</th><th>名称</th><th>备注</th></tr></thead><tbody id="blockTbody"></tbody></table></div>
+    <div class="btn-row"><button class="btn danger" id="blockDel">删除所选</button> <button class="btn" id="blockSaveNotes">保存备注</button></div>`;
   renderIdTable($("#adminTbody"), al.data.entries || []);
   renderIdTable($("#blockTbody"), bl.data.entries || []);
   const collectEntries = (tbodyId) =>
@@ -1921,82 +2121,52 @@ async function pageServer() {
     const entries = collectEntries(tbodyId);
     toast((await api(path, { method: "POST", body: { entries } })).msg);
   };
-  $("#adminAdd").onclick = () => addId("#adminNew", "#adminNewNote", "server/adminlist");
-  $("#blockAdd").onclick = () => addId("#blockNew", "#blockNewNote", "server/blocklist");
-  $("#adminDel").onclick = () => delIds("#adminTbody", "server/adminlist");
-  $("#blockDel").onclick = () => delIds("#blockTbody", "server/blocklist");
-  $("#adminSaveNotes").onclick = () => saveNotes("#adminTbody", "server/adminlist");
-  $("#blockSaveNotes").onclick = () => saveNotes("#blockTbody", "server/blocklist");
-  // 日志实时刷新
-  let logPolling = true;
-  let logTimer = null;
-  const fetchLog = async () => {
-    const j = await apiQuiet("serverlog");
-    if (!j) return;
-    const el = $("#serverLog");
-    const wasAtBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
-    renderLogLines(el, j.data.lines.join("\n") || "（暂无日志，启动服务器后显示）");
-    const lc = $("#logCount");
-    if (lc) lc.textContent = `${j.data.count} 行`;
-    if (wasAtBottom) el.scrollTop = el.scrollHeight;
-  };
-  fetchLog();
-  logTimer = setInterval(() => { if (logPolling) fetchLog(); }, 2000);
-  $("#logToggle").onclick = () => {
-    logPolling = !logPolling;
-    $("#logToggle").textContent = logPolling ? "暂停刷新" : "恢复刷新";
-    $("#logHint").textContent = logPolling ? "（实时刷新）" : "（已暂停）";
-    if (logPolling) fetchLog();
-  };
-  // 页面切换时清除定时器
-  if (window._serverLogTimer) clearInterval(window._serverLogTimer);
-  window._serverLogTimer = logTimer;
+  const aAdd = $("#adminAdd"), bAdd = $("#blockAdd");
+  if (aAdd) aAdd.onclick = () => addId("#adminNew", "#adminNewNote", "server/adminlist");
+  if (bAdd) bAdd.onclick = () => addId("#blockNew", "#blockNewNote", "server/blocklist");
+  const aDel = $("#adminDel"), bDel = $("#blockDel");
+  if (aDel) aDel.onclick = () => delIds("#adminTbody", "server/adminlist");
+  if (bDel) bDel.onclick = () => delIds("#blockTbody", "server/blocklist");
+  const aNote = $("#adminSaveNotes"), bNote = $("#blockSaveNotes");
+  if (aNote) aNote.onclick = () => saveNotes("#adminTbody", "server/adminlist");
+  if (bNote) bNote.onclick = () => saveNotes("#blockTbody", "server/blocklist");
+}
 
-  // 分片状态自动刷新（每 10 秒，更新分片状态和系统资源）
-  let statusPolling = true;
-  if (window._statusTimer) clearInterval(window._statusTimer);
-  const refreshStatus = async () => {
-    const j = await apiQuiet("server/status");
-    if (!j) return;
-    const d = j.data;
-    // 更新分片表格
-    const tbody = document.querySelector("#content table.grid tbody");
-    if (tbody) {
-      tbody.innerHTML = "";
-      d.shards.forEach((s, i) => {
-        const tr = document.createElement("tr");
-        tr.innerHTML = `<td><span class="status-dot ${s.running ? "on" : "off"}"></span>${esc(s.name)}（${s.isMaster ? "地上" : "地下"}）</td>
-          <td>${s.running ? "运行中" : "未运行"}</td><td>${esc(s.port)}</td>`;
-        tbody.appendChild(tr);
-      });
-    }
-    // 更新系统资源
-    const res = $("#sysRes");
-    if (res && d.sys) {
-      const cpuColor = d.sys.cpu > 80 ? 'color:var(--red)' : d.sys.cpu > 50 ? 'color:var(--amber)' : '';
-      const memUsed = d.sys.total - d.sys.avail;
-      const memPct = d.sys.total ? Math.round(memUsed / d.sys.total * 100) : 0;
-      res.innerHTML = `CPU <span style="${cpuColor}">${d.sys.cpu}%</span> ｜ 内存 ${memUsed}MB / ${d.sys.total}MB (${memPct}%)${d.sys.dstMem > 0 ? ` ｜ DST <span class="tag">${d.sys.dstMem}MB</span>` : ''}`;
-    }
-    // 更新内存保护提示
-    const hint = $("#memHint");
-    if (hint && d.sys) {
-      const availColor = d.sys.avail < 1024 ? 'var(--red)' : d.sys.avail < 2048 ? 'var(--amber)' : 'var(--green)';
-      hint.innerHTML = `💡 可用 <span style="color:${availColor}">${d.sys.avail}MB</span>，低于 <span style="color:var(--red)">512MB</span> 时自动终止服务器`;
-    }
-  };
-  window._statusTimer = setInterval(() => { if (statusPolling) refreshStatus(); }, 10_000);
-  $("#autoStatusSwitch").onchange = (e) => { statusPolling = e.target.checked; };
-
-  // 初始显示系统资源
-  if (d.sys) {
-    const cpuColor = d.sys.cpu > 80 ? 'color:var(--red)' : d.sys.cpu > 50 ? 'color:var(--amber)' : '';
-    const memUsed = d.sys.total - d.sys.avail;
-    const memPct = d.sys.total ? Math.round(memUsed / d.sys.total * 100) : 0;
-    $("#sysRes").innerHTML = `CPU <span style="${cpuColor}">${d.sys.cpu}%</span> ｜ 内存 ${memUsed}MB / ${d.sys.total}MB (${memPct}%)${d.sys.dstMem > 0 ? ` ｜ DST <span class="tag">${d.sys.dstMem}MB</span>` : ''}`;
-    const availColor = d.sys.avail < 1024 ? 'var(--red)' : d.sys.avail < 2048 ? 'var(--amber)' : 'var(--green)';
-    $("#memHint").innerHTML = `💡 可用 <span style="color:${availColor}">${d.sys.avail}MB</span>，低于 <span style="color:var(--red)">512MB</span> 时自动终止服务器`;
-  }
+// ---- 日志实时刷新（独立加载，带加载动画） ----
+function startLogPolling() {
+  // 返回 Promise：首次日志加载完成（无论成败）时 resolve，用于页面顶部进度条推进
+  return new Promise((resolve) => {
+    let logPolling = true;
+    let logLoaded = false;
+    let firstDone = false;
+    const fetchLog = async () => {
+      const j = await apiQuiet("serverlog");
+      const el = $("#serverLog");
+      if (!el) { if (!firstDone) { firstDone = true; resolve(); } return; }
+      if (!j) {
+        if (!logLoaded) el.innerHTML = '<div class="loading-box" style="color:var(--red)">日志加载失败 <button class="btn" onclick="startLogPolling()">重试</button></div>';
+        if (!firstDone) { firstDone = true; resolve(); }
+        return;
+      }
+      logLoaded = true;
+      const wasAtBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 30;
+      renderLogLines(el, j.data.lines.join("\n") || "（暂无日志，启动服务器后显示）");
+      const lc = $("#logCount");
+      if (lc) lc.textContent = `${j.data.count} 行`;
+      if (wasAtBottom) el.scrollTop = el.scrollHeight;
+      if (!firstDone) { firstDone = true; resolve(); }
+    };
+    fetchLog();
+    const logTimer = setInterval(() => { if (logPolling) fetchLog(); }, 2000);
+    window._serverLogTimer = logTimer;
+    const toggle = $("#logToggle");
+    if (toggle) toggle.onclick = () => {
+      logPolling = !logPolling;
+      $("#logToggle").textContent = logPolling ? "暂停刷新" : "恢复刷新";
+      $("#logHint").textContent = logPolling ? "（实时刷新）" : "（已暂停）";
+      if (logPolling) fetchLog();
+    };
+  });
 }
 
 // ============ 5. 控制台 ============

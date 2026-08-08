@@ -243,20 +243,29 @@ function steamLibs(): string[] {
 }
 // 检测 DST 客户端安装位置（用于直接读取客户端模组文件夹）。
 // 返回：客户端根目录 / bin / 客户端mods / 创意工坊缓存（322330）；用户手动设置的优先
+// detectDstClient 30 秒缓存（避免 basic 等接口每次请求都扫 Steam 库）
+let clientDetectCache: { dir: string; binDir: string; modsDir: string; workshopDir: string } | null = null;
+let clientDetectAt = 0;
 function detectDstClient(): { dir: string; binDir: string; modsDir: string; workshopDir: string } | null {
+  if (clientDetectCache && Date.now() - clientDetectAt < 30000) return clientDetectCache;
+  let r: { dir: string; binDir: string; modsDir: string; workshopDir: string } | null = null;
   if (panelConfig.clientDir && existsSync(panelConfig.clientDir)) {
     const dir = panelConfig.clientDir;
     // 客户端根目录上两级即 steamapps（.../steamapps/common/Don't Starve Together）
     const steamapps = dirname2(dirname2(dir));
-    return { dir, binDir: join(dir, "bin"), modsDir: join(dir, "mods"), workshopDir: join(steamapps, "workshop", "content", "322330") };
-  }
-  for (const lib of steamLibs()) {
-    const dir = join(lib, "steamapps", "common", "Don't Starve Together");
-    if (existsSync(dir)) {
-      return { dir, binDir: join(dir, "bin"), modsDir: join(dir, "mods"), workshopDir: join(lib, "steamapps", "workshop", "content", "322330") };
+    r = { dir, binDir: join(dir, "bin"), modsDir: join(dir, "mods"), workshopDir: join(steamapps, "workshop", "content", "322330") };
+  } else {
+    for (const lib of steamLibs()) {
+      const dir = join(lib, "steamapps", "common", "Don't Starve Together");
+      if (existsSync(dir)) {
+        r = { dir, binDir: join(dir, "bin"), modsDir: join(dir, "mods"), workshopDir: join(lib, "steamapps", "workshop", "content", "322330") };
+        break;
+      }
     }
   }
-  return null;
+  clientDetectCache = r;
+  clientDetectAt = Date.now();
+  return r;
 }
 // 扫描本机 Steam 库中的 DST 模组（创意工坊缓存 + 游戏/专用服务器的 mods 目录），可直接复用开房间
 function scanLocalSteamMods(): { id: string; source: string; path: string; hasInfo: boolean }[] {
@@ -280,6 +289,20 @@ function scanLocalSteamMods(): { id: string; source: string; path: string; hasIn
   }
   out.sort((a, b) => a.id.localeCompare(b.id));
   return out;
+}
+// 直接构造候选路径查找本地模组目录（不遍历全部 Steam 库，图标/详情等单点查询用）
+function findLocalModPath(id: string): string | null {
+  const shared = ugcSharedDir();
+  if (existsSync(join(shared, id))) return join(shared, id);
+  for (const lib of steamLibs()) {
+    const ws = join(lib, "steamapps", "workshop", "content", "322330", id);
+    if (existsSync(ws)) return ws;
+    for (const game of ["Don't Starve Together", "Don't Starve Together Dedicated Server"]) {
+      const md = join(lib, "steamapps", "common", game, "mods", `workshop-${id}`);
+      if (existsSync(md)) return md;
+    }
+  }
+  return null;
 }
 // Windows 版启动时：在模组存放目录写说明文件（标明地址，方便用户维护与程序调用）
 function writeModsDirReadme(): void {
@@ -503,6 +526,44 @@ function unquoteLua(s: string): string {
   return s.replace(/\\(.)/g, "$1");
 }
 
+// Lua 顶层参数分割（按顶层逗号切分，忽略字符串/表/括号内的逗号）
+function splitTopLevelArgs(expr: string): string[] {
+  const out: string[] = [];
+  let depth = 0, i = 0, start = 0;
+  while (i < expr.length) {
+    const c = expr[i];
+    if (c === '"' || c === "'") {
+      const q = c; i++;
+      while (i < expr.length && expr[i] !== q) { if (expr[i] === "\\") i++; i++; }
+    } else if (c === "{" || c === "(" || c === "[") depth++;
+    else if (c === "}" || c === ")" || c === "]") depth--;
+    else if (c === "," && depth === 0) { out.push(expr.slice(start, i).trim()); start = i + 1; }
+    i++;
+  }
+  out.push(expr.slice(start).trim());
+  return out.filter((s) => s.length > 0);
+}
+
+// 匹配成对圆括号（openIdx 指向 "("），返回匹配的 ")" 下标
+function matchParen(src: string, openIdx: number): number {
+  let depth = 0, inStr = false, strCh = "";
+  for (let i = openIdx; i < src.length; i++) {
+    const c = src[i];
+    if (inStr) {
+      if (c === "\\") i++;
+      else if (c === strCh) inStr = false;
+      continue;
+    }
+    if (c === '"' || c === "'") { inStr = true; strCh = c; continue; }
+    if (c === "(") depth++;
+    else if (c === ")") {
+      depth--;
+      if (depth === 0) return i;
+    }
+  }
+  return -1;
+}
+
 // 解析 lua 值（从 src[i] 开始），返回 [值, 结束下标]。table 解析为对象（数组项忽略）。
 function parseLuaValue(src: string, i: number): [any, number] {
   while (i < src.length && /[\s,]/.test(src[i])) i++;
@@ -719,7 +780,9 @@ function clearModCaches() {
   modLuaFilesCache.clear();
   modTransCache.clear();
   modWorldgenDataCache.clear();
+  modWgDirCache.clear();
   modIconPngCache.clear();
+  iconIndexCache = null;
   itemsApiCache = { key: "", data: [] };
   // 模组图标磁盘缓存一并清除（模组更新后图标可能变化）
   try { rmSync(join(PUBLIC_DIR, "modicons"), { recursive: true, force: true }); } catch {}
@@ -1177,6 +1240,184 @@ function modInfoPath(id: string): string | null {
   const p = join(MODS_DIR, `workshop-${id}`, "modinfo.lua");
   return existsSync(p) ? p : null;
 }
+// 解析模组 configs = { key = "Label" } 表（多语言块并存时中文值优先），
+// 用于 CherryForest 等「label = configs.xxx 变量引用」模组的配置项 label 补全
+function parseModConfigsLabels(text: string): Map<string, string> {
+  const map = new Map<string, string>();
+  const re = /(?:local\s+)?configs\s*=\s*\{/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(text))) {
+    const open = m.index + m[0].length - 1;
+    const end = braceMatch(text, open);
+    if (end === -1) continue;
+    const body = text.slice(open + 1, end);
+    const fRe = /([A-Za-z_][A-Za-z0-9_]*)\s*=\s*"((?:[^"\\]|\\.)*)"/g;
+    let fm: RegExpExecArray | null;
+    while ((fm = fRe.exec(body))) {
+      const key = fm[1], val = unquoteLua(fm[2]);
+      const isZh = /[\u4e00-\u9fff]/.test(val);
+      const cur = map.get(key);
+      if (!cur || (isZh && !/[\u4e00-\u9fff]/.test(cur))) map.set(key, val);
+    }
+  }
+  return map;
+}
+// Re-Gorge-itated 等模组用 local function 构造 configuration_options：
+//   local function Config(name, label, hover, options, default) return { name=name, label=label, ... } end
+//   local opt_def = { Option("Enabled", true), ... }
+//   configuration_options = { Title("Vote"), Config("kick", "...", "...", opt_def, true), ... }
+// 轻量求值：收集 local function 定义（参数名 + return 表字段映射）与 local 变量定义，
+// 对配置体顶层条目按「函数调用 / 变量引用」重建为 {name,label,hover,options,default} 结构。
+function parseFunctionBuiltConfigs(text: string, body: string, info: ModInfo): void {
+  // 1) local function FN(params) ... return { field = param | field = param or X } end
+  const fnBuilders = new Map<string, { params: string[]; fields: [string, string][] }>();
+  const fnRe = /local\s+function\s+([A-Za-z_]\w*)\s*\(([^)]*)\)/g;
+  let fnM: RegExpExecArray | null;
+  while ((fnM = fnRe.exec(text))) {
+    const fname = fnM[1];
+    if (fnBuilders.has(fname)) continue;
+    const params = fnM[2].split(",").map((s) => s.trim()).filter(Boolean);
+    const retIdx = text.indexOf("return", fnM.index + fnM[0].length);
+    if (retIdx === -1) continue;
+    const braceIdx = text.indexOf("{", retIdx);
+    if (braceIdx === -1) continue;
+    const retEnd = braceMatch(text, braceIdx);
+    if (retEnd === -1) continue;
+    const fields: [string, string][] = [];
+    const fRe = /([A-Za-z_]\w*)\s*=\s*([A-Za-z_]\w*)(?:\s+or\s+[^,}]+)?/g;
+    let fm: RegExpExecArray | null;
+    while ((fm = fRe.exec(text.slice(braceIdx + 1, retEnd)))) if (params.includes(fm[2])) fields.push([fm[1], fm[2]]);
+    if (fields.length) fnBuilders.set(fname, { params, fields });
+  }
+  if (!fnBuilders.size) return;
+  // 2) local VAR = 值（可能是表/调用，供 opt_def 等引用）
+  const varDefs = new Map<string, string>();
+  const lvRe = /local\s+([A-Za-z_]\w*)\s*=/g;
+  let lvM: RegExpExecArray | null;
+  while ((lvM = lvRe.exec(text))) {
+    if (varDefs.has(lvM[1])) continue;
+    let k = lvRe.lastIndex;
+    while (k < text.length && /\s/.test(text[k])) k++;
+    let expr: string;
+    if (text[k] === "{") {
+      const e2 = braceMatch(text, k);
+      expr = e2 !== -1 ? text.slice(k, e2 + 1) : text.slice(k).split("\n")[0];
+    } else {
+      const nl = text.indexOf("\n", k);
+      expr = text.slice(k, nl === -1 ? text.length : nl).trim();
+    }
+    if (expr) varDefs.set(lvM[1], expr);
+  }
+  // 3) 实参求值：字符串/数字/布尔/表/函数调用/变量引用
+  const evalArg = (raw: string): any => {
+    const t = raw.trim();
+    if (!t) return null;
+    const c0 = t[0];
+    if (c0 === '"' || c0 === "'") {
+      const m = new RegExp(`^${c0}((?:[^\\\\${c0}]|\\\\.)*)${c0}$`).exec(t);
+      if (m) return unquoteLua(m[1]);
+      return null; // 含 .. 拼接等复杂表达式，跳过
+    }
+    if (c0 === "{") return { __table: t };
+    if (/^[A-Za-z_]\w*\(/.test(t)) {
+      const fm2 = /^([A-Za-z_]\w*)\(/.exec(t)!;
+      const b = fnBuilders.get(fm2[1]);
+      if (b) {
+        const close = matchParen(t, t.indexOf("("));
+        if (close !== -1) return bindBuilder(b, splitTopLevelArgs(t.slice(t.indexOf("(") + 1, close)));
+      }
+      return null;
+    }
+    if (/^true$/.test(t)) return true;
+    if (/^false$/.test(t)) return false;
+    if (/^-?\d+\.?\d*$/.test(t)) return Number(t);
+    if (/^nil$/.test(t)) return null;
+    const vd = varDefs.get(t);
+    if (vd !== undefined) return evalArg(vd);
+    return null;
+  };
+  const bindBuilder = (b: { params: string[]; fields: [string, string][] }, args: string[]): Record<string, any> => {
+    const r: Record<string, any> = {};
+    for (const [field, param] of b.fields) {
+      const idx = b.params.indexOf(param);
+      if (idx === -1 || idx >= args.length) continue;
+      r[field] = evalArg(args[idx]);
+    }
+    return r;
+  };
+  // 4) 选项表求值：{ Option("Enabled", true), {description=.., data=..}, "裸值", ... }
+  const evalOpts = (expr: string): { description: string; data: any }[] => {
+    let e = expr.trim();
+    if (!/^\{/.test(e)) {
+      const vd = varDefs.get(e);
+      if (vd !== undefined) e = vd; else return [];
+    }
+    const end = braceMatch(e, 0);
+    if (end === -1) return [];
+    const out: { description: string; data: any }[] = [];
+    for (const it of splitTopLevelArgs(e.slice(1, end))) {
+      const t = it.trim();
+      if (!t) continue;
+      if (/^\{/.test(t)) {
+        const e2 = braceMatch(t, 0);
+        if (e2 === -1) continue;
+        const b2 = t.slice(1, e2);
+        const description = luaLabelField(b2, "description");
+        const dkm = /data\s*=\s*/.exec(b2);
+        let data: any = description;
+        if (dkm) { const [v] = parseLuaValue(b2, dkm.index + dkm[0].length); data = v; }
+        out.push({ description, data });
+      } else {
+        const v = evalArg(t);
+        if (v && typeof v === "object" && (v as any).__table) { out.push(...evalOpts((v as any).__table)); continue; }
+        if (v && typeof v === "object") {
+          const r = v as Record<string, any>;
+          const description = String(r.description ?? r.data ?? "");
+          out.push({ description, data: r.data ?? description });
+          continue;
+        }
+        out.push({ description: String(v ?? ""), data: v ?? "" });
+      }
+    }
+    return out;
+  };
+  // 5) 配置条目求值 → ModConfigOption | null（Title/SEPARATOR 等分组标题跳过）
+  const evalEntry = (expr: string): ModConfigOption | null => {
+    const t = expr.trim();
+    if (!t || /^\{/.test(t)) return null; // 字面量表由标准解析器处理
+    if (/^[A-Za-z_]\w*\(/.test(t)) {
+      const fm2 = /^([A-Za-z_]\w*)\(/.exec(t)!;
+      const b = fnBuilders.get(fm2[1]);
+      if (!b) return null;
+      const close = matchParen(t, t.indexOf("("));
+      if (close === -1) return null;
+      const r = bindBuilder(b, splitTopLevelArgs(t.slice(t.indexOf("(") + 1, close)));
+      if (!r.label && !r.options && r.default === undefined) return null; // 分组标题
+      const opt: ModConfigOption = {
+        name: String(r.name ?? ""),
+        label: String(r.label ?? r.name ?? ""),
+        hover: String(r.hover ?? ""),
+        default: r.default ?? null,
+        options: [],
+      };
+      if (!opt.name) return null;
+      const ov = r.options;
+      if (ov && typeof ov === "object" && (ov as any).__table) opt.options = evalOpts((ov as any).__table);
+      if (!opt.options.length) opt.options.push({ description: String(opt.default ?? ""), data: opt.default ?? "" });
+      return opt;
+    }
+    const vd = varDefs.get(t);
+    if (vd !== undefined) return evalEntry(vd);
+    return null;
+  };
+  // 6) 逐条解析配置体
+  for (const entry of splitTopLevelArgs(body)) {
+    if (!entry.trim()) continue;
+    const opt = evalEntry(entry);
+    if (opt && !info.configOptions.some((x) => x.name === opt.name)) info.configOptions.push(opt);
+  }
+}
+
 function parseModInfo(id: string, fileOverride?: string): ModInfo | null {
   const file = fileOverride || modInfoPath(id);
   if (!file) return null;
@@ -1230,6 +1471,8 @@ function parseModInfo(id: string, fileOverride?: string): ModInfo | null {
   }
   if (configBody) {
     const body = configBody;
+    // CherryForest 等模组 label/hover 用 configs/descs 表变量引用（label = configs.music）→ 预收集表
+    const cfgLabels = parseModConfigsLabels(text);
     // 逐项（顶层 {...} 块）解析
     let i = 0;
     while (i < body.length) {
@@ -1238,9 +1481,15 @@ function parseModInfo(id: string, fileOverride?: string): ModInfo | null {
         const oe = braceMatch(body, ob);
         if (oe === -1) break;
         const item = body.slice(ob + 1, oe);
+        let optLabel = luaLabelField(item, "label") || luaStrField(item, "label") || luaStrField(item, "name");
+        if (!optLabel) {
+          // label = configs.xxx 变量引用 → 查 configs 表（多语言块取中文优先）
+          const ref = /label\s*=\s*([A-Za-z_]\w*)\s*\.\s*([A-Za-z_]\w*)/.exec(item);
+          if (ref) { const lv = cfgLabels.get(ref[2]); if (lv) optLabel = lv; }
+        }
         const opt: ModConfigOption = {
           name: luaStrField(item, "name"),
-          label: luaLabelField(item, "label") || luaStrField(item, "name"),
+          label: optLabel,
           hover: luaLabelField(item, "hover"),
           default: null,
           options: [],
@@ -1271,6 +1520,66 @@ function parseModInfo(id: string, fileOverride?: string): ModInfo | null {
         }
         if (opt.name) info.configOptions.push(opt);
       i = oe + 1;
+    }
+    // Re-Gorge-itated 等模组用 local function 构造配置条目（Config(...)/Title(...) 调用形式）
+    parseFunctionBuiltConfigs(text, body, info);
+    // ReForged 等模组用 AddCustomConfig API 定义配置（非标准 {name=..} 结构）：
+    // AddCustomConfig("KEY", "Label", "Hover", 选项数据, 默认值)
+    const addCustomRe = /AddCustomConfig\s*\(/g;
+    let ac: RegExpExecArray | null;
+    while ((ac = addCustomRe.exec(body))) {
+      const close = matchParen(body, addCustomRe.lastIndex - 1);
+      if (close === -1) { addCustomRe.lastIndex = body.length; break; }
+      const callBody = body.slice(addCustomRe.lastIndex, close);
+      addCustomRe.lastIndex = close + 1;
+      const parts = splitTopLevelArgs(callBody);
+      if (parts.length < 2) continue;
+      const nm = /^"((?:[^"\\]|\\.)*)"/.exec(parts[0].trim());
+      if (!nm) continue;
+      const opt: ModConfigOption = { name: unquoteLua(nm[1]), label: unquoteLua(nm[1]), hover: "", default: null, options: [] };
+      const lbm = /^"((?:[^"\\]|\\.)*)"/.exec((parts[1] || "").trim());
+      if (lbm) opt.label = unquoteLua(lbm[1]);
+      const hm = /^"((?:[^"\\]|\\.)*)"/.exec((parts[2] || "").trim());
+      if (hm) opt.hover = unquoteLua(hm[1]);
+      // 默认值：最后一个参数（去除 default= 前缀）
+      const defPart = (parts[parts.length - 1] || "").trim();
+      try {
+        const eq = defPart.indexOf("=");
+        const valExpr = eq >= 0 ? defPart.slice(eq + 1).trim() : defPart;
+        const [v] = parseLuaValue(valExpr, 0);
+        opt.default = v;
+      } catch {}
+      // 选项表：倒数第二个参数，若是 {...} 表则解析
+      const optPart = (parts[parts.length - 2] || "").trim();
+      if (optPart.startsWith("{")) {
+        const inner = optPart.slice(1, -1);
+        let j = 0;
+        while (j < inner.length) {
+          const p = inner.indexOf("{", j);
+          if (p === -1) break;
+          const q = braceMatch(inner, p);
+          if (q === -1) break;
+          const ob2 = inner.slice(p + 1, q);
+          const description = luaLabelField(ob2, "description");
+          const dkm = /data\s*=\s*/.exec(ob2);
+          let data: any = description;
+          if (dkm) { const [v] = parseLuaValue(ob2, dkm.index + dkm[0].length); data = v; }
+          opt.options.push({ description, data });
+          j = q + 1;
+        }
+      }
+      // 布尔/数字等函数式选项：至少保留默认值条目
+      if (!opt.options.length) opt.options.push({ description: String(opt.default ?? ""), data: opt.default ?? "" });
+      if (!info.configOptions.some((x) => x.name === opt.name)) info.configOptions.push(opt);
+    }
+  }
+  // CherryForest 等模组 label 是 configs 表变量引用（label = configs.music）→ 从 configs 表补全空 label
+  if (info.configOptions.length) {
+    const cfgLabels = parseModConfigsLabels(text);
+    if (cfgLabels.size) {
+      for (const opt of info.configOptions) {
+        if (!opt.label) { const l = cfgLabels.get(opt.name); if (l) opt.label = l; }
+      }
     }
   }
   return info;
@@ -1828,10 +2137,341 @@ function modTrans(id: string): { po: Map<string, string>; strings: Map<string, s
       if (!strings.has(m[1])) strings.set(m[1], m[2].replace(/\\"/g, '"').replace(/\\\\/g, "\\"));
     }
   }
+  // 加载模组 translations/ 目录的中文翻译文件（STRINGS.X.Y 覆盖，如 scripts/translations/zh.lua）
+  // 俄语等其他语言的翻译文件不加载（避免把非中文文本带进翻译链）
+  for (const trDir of [join(dir, id, "scripts", "translations"), join(dir, id, "translations")]) {
+    try {
+      if (!existsSync(trDir)) continue;
+      for (const f of readdirSync(trDir)) {
+        if (!f.endsWith(".lua") || !/zh|chs|schinese|simplified/i.test(f)) continue;
+        const text = readText(join(trDir, f));
+        if (!text) continue;
+        const re2 = /([A-Z][A-Z0-9_]+(?:\.[A-Z][A-Z0-9_]*)*)\s*=\s*"((?:[^"\\]|\\.)*)"/g;
+        let m2: RegExpExecArray | null;
+        while ((m2 = re2.exec(text))) {
+          const full = m2[1];
+          const last = full.split(".").pop()!;
+          const val = m2[2].replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+          if (!strings.has(last)) strings.set(last, val);
+          if (!strings.has(full)) strings.set(full, val);
+        }
+      }
+    } catch {}
+  }
   const result = { po, strings };
   modTransCache.set(id, result);
   return result;
 }
+// 通用配置词汇英→中词典（模组世界选项 label / 取值描述查不到翻译时的兜底翻译）
+const WG_TERM_CN: Record<string, string> = {
+  enable: "启用", enabled: "启用", enable_: "启用", disable: "禁用", disabled: "禁用", on: "开启", off: "关闭",
+  true: "开启", false: "关闭", yes: "是", no: "否", none: "无", default: "默认", random: "随机",
+  always: "总是", never: "从不", small: "小", medium: "中", large: "大", normal: "普通", big: "大",
+  high: "高", low: "低", moderate: "中等", max: "最大", min: "最小", new: "新", old: "旧",
+  top: "顶部", bottom: "底部", left: "左", right: "右", center: "中央", mini: "迷你", full: "完整",
+  game: "游戏", mode: "模式", gamemode: "游戏模式", vote: "投票", votes: "投票", kick: "踢人",
+  player: "玩家", players: "玩家", lobby: "大厅", character: "角色", characters: "角色", ability: "能力",
+  changeable: "可变", change: "更改", fixed: "固定", server: "服务器", team: "队伍", teams: "队伍",
+  show: "显示", hide: "隐藏", display: "显示", toggle: "切换", force: "强制", finish: "结束",
+  start: "开始", delay: "延迟", command: "命令", sign: "标牌", info: "信息", music: "音乐",
+  special: "特殊", event: "活动", events: "活动", winter: "冬季", feast: "盛宴", halloween: "万圣节",
+  nights: "夜晚", night: "夜晚", soil: "土壤", edge: "边缘", texture: "纹理", avatar: "头像",
+  icon: "图标", icons: "图标", indicator: "指示器", indicators: "指示器", badge: "徽章",
+  message: "消息", messages: "消息", chat: "聊天", transparency: "透明度", target: "目标", targets: "目标",
+  achievement: "成就", achievements: "成就", level: "等级", gear: "装备", lobby_gear: "大厅装备",
+  debuff: "减益", debuffs: "减益", spectator: "观战", death: "死亡", gift: "礼物", location: "位置",
+  world: "世界", map: "地图", biome: "生态群系", biomes: "生态群系", island: "岛屿", islands: "岛屿",
+  ocean: "海洋", forest: "森林", terrain: "地形", generation: "生成", season: "季节", seasons: "季节",
+  weather: "天气", density: "密度", difficulty: "难度", preset: "预设", size: "大小", type: "类型",
+  count: "数量", number: "数量", amount: "数量", frequency: "频率", rate: "速度", speed: "速度",
+  regrowth: "再生", spawn: "出生", chest: "宝箱", task: "任务", dungeon: "地牢",
+  hunger: "饥饿", sanity: "理智", health: "生命", damage: "伤害", temperature: "温度",
+  colour: "颜色", color: "颜色", cube: "方块", ball: "球", crop: "作物", crops: "作物",
+  food: "食物", meat: "肉", fish: "鱼", monster: "怪物", monsters: "怪物", boss: "首领",
+  structure: "建筑", structures: "建筑", item: "物品", items: "物品", resource: "资源", resources: "资源",
+  tree: "树", trees: "树", grass: "草", berry: "浆果", berries: "浆果", flower: "花", flowers: "花",
+  mushroom: "蘑菇", mushroom_: "蘑菇", rock: "岩石", rocks: "岩石", gold: "金", gem: "宝石",
+  friendly: "友好", aggressive: "攻击性", passive: "被动", active: "主动", auto: "自动", manual: "手动",
+  daily: "每日", weekly: "每周", monthly: "每月", permanent: "永久", temporary: "临时",
+  single: "单个", multi: "多个", all: "全部", any: "任意", some: "部分", extra: "额外", additional: "额外",
+  choose: "选择", tab: "标签", ping: "标记", match: "比赛", size: "大小", forestsize: "森林大小",
+  wormhole: "虫洞", starter: "初始", starting: "初始", animal: "动物", animals: "动物",
+  deforestation: "砍伐", autumn: "秋季", spring: "春季", summer: "夏季", desert: "沙漠",
+  swamp: "沼泽", savanna: "稀树草原", rocky: "岩石", moon: "月亮", ruins: "遗迹", cave: "洞穴",
+  // ReForged/Forge 竞技场及战斗类模组常用词
+  effectiveness: "效果", efficiency: "效率", command: "命令", spam: "刷屏", ban: "封禁",
+  time: "时间", nonzero: "非零", stat: "统计", stats: "统计", attack: "攻击", fx: "特效",
+  environment: "环境", enemy: "敌人", enemies: "敌人", sleep: "睡觉", joinable: "可加入",
+  midmatch: "中途", mob: "怪物", multiplier: "倍率", duplicator: "复制器", duplicate: "复制",
+  custom: "自定义", rotation: "旋转", spectators: "观战者", reserve: "预留", slot: "槽位",
+  slots: "槽位", shield: "护盾", shields: "护盾", broken: "破坏", break: "破坏",
+  total: "总", wave: "波次", set: "设置", gametype: "游戏类型", battle: "战斗",
+  standard: "标准", battlestandard: "战斗标准", mvp: "MVP", badge: "徽章",
+  only: "仅", cant: "不可", cannot: "不可", dont: "不", doesnt: "不", wont: "不会", not: "不",
+  without: "无", other: "其他", others: "其他", option: "选项", options: "选项", setting: "设置",
+  group: "分组", main: "主", secondary: "次要", primary: "主要", bonus: "加成", chance: "几率",
+  join: "加入", join_team: "加入队伍", rate: "速率", fx: "特效",
+  audio: "音频", cherry: "樱花", cherrymusic: "樱花音乐", mute: "静音", mutelevel: "静音音量",
+  sound: "声音", reduction: "降低", level_setting: "等级", comp: "组件", compat: "兼容",
+  forge: "熔炉", gorge: "熔炉", skin: "皮肤", skins: "皮肤", uncomp: "不妥协", uncompromising: "不妥协",
+  misc: "杂项", bloomprint: "樱花蓝图", fancy: "华丽", name: "名称", half: "一半", quiter: "更安静",
+  language: "语言", events: "活动", worldgen: "世界生成", retrofit: "改造", characters: "角色",
+  spawnpoint: "出生点", wirlywings: "樱桃子", ost: "背景音乐", main_difficulty: "主要难度",
+  minigame: "小游戏", minigames: "小游戏", mods: "模组", difficulties: "难度",
+  // 世界/生态
+  tropical: "热带", humidity: "湿度", archipelago: "群岛", sea: "海洋", beach: "海滩", coast: "海岸",
+  river: "河流", mountain: "山", hill: "丘陵", plateau: "高原", meadow: "草甸", jungle: "丛林",
+  marsh: "沼泽", savanna_biome: "稀树草原", arctic: "极地", tundra: "苔原", wasteland: "废土",
+  ruins_biome: "遗迹", lunar: "月亮", moon_island: "月岛", mainland: "大陆", grove: "树丛",
+  shard: "分片", shards: "分片", world_size: "世界大小", land: "陆地", landmass: "陆地",
+  // 季节/天气
+  spring: "春季", summer: "夏季", autumn: "秋季", winter_season: "冬季", rainy: "雨季", dry: "旱季",
+  monsoon: "季风", storm: "风暴", hurricane: "飓风", flood: "洪水", drought: "干旱", frost: "霜冻",
+  fog: "雾", rain: "雨", snow: "雪", wind: "风", thunder: "雷", lightning: "闪电", length: "长度",
+  duration: "持续时间", cycle: "周期", interval: "间隔", start_season: "起始季节",
+  "rainy season": "雨季", "dry season": "旱季", "monsoon season": "季风季", "wet season": "雨季",
+  "summer season": "夏季", "winter season": "冬季", "spring season": "春季", "autumn season": "秋季",
+  "hurricane season": "飓风季", "spawn rate": "出生率", "drop rate": "掉落率",
+  // 生物
+  wolf: "狼", spider: "蜘蛛", bee: "蜜蜂", butterfly: "蝴蝶", bird: "鸟", turkey: "火鸡",
+  pig: "猪", bunny: "兔", frog: "青蛙", mole: "鼹鼠", worm: "蠕虫", crab: "螃蟹", lobster: "龙虾",
+  shark: "鲨鱼", whale: "鲸", octopus: "章鱼", jellyfish: "水母", penguin: "企鹅", turtle: "海龟",
+  bear: "熊", deer: "鹿", rabbit: "兔子", rat: "老鼠", bat: "蝙蝠", snake: "蛇", dragonfly: "蜻蜓",
+  mosquito: "蚊子", ant: "蚂蚁", locust: "蝗虫", critter: "小动物", critters: "小动物", mobs: "怪物",
+  herd: "兽群", flock: "鸟群", population: "种群", spawn_rate: "出生率",
+  // 资源/物品
+  wood: "木材", stone: "石头", flint: "燧石", crystal: "水晶", bone: "骨头", feather: "羽毛",
+  silk: "蛛丝", leather: "皮革", fur: "毛皮", vegetable: "蔬菜", fruit: "水果", seed: "种子",
+  nut: "坚果", herb: "草药", ore: "矿石", iron: "铁", copper: "铜", silver: "银", coal: "煤",
+  charcoal: "木炭", ash: "灰", clay: "黏土", sand: "沙", salt: "盐", rope: "绳", cloth: "布",
+  paper: "纸", lantern: "灯笼", torch: "火把", weapon: "武器", armor: "护甲", helmet: "头盔",
+  sword: "剑", axe: "斧", pickaxe: "镐", hammer: "锤", spear: "矛", bow: "弓", arrow: "箭",
+  knife: "刀", tool: "工具", pot: "锅", bottle: "瓶", barrel: "桶", sack: "麻袋", basket: "篮子",
+  trap: "陷阱", crate_box: "板条箱", ingredient: "食材", ingredients: "食材", recipe: "配方",
+  // 游戏机制
+  exp: "经验", experience: "经验", skill: "技能", talent: "天赋", perk: "特长", buff: "增益",
+  heal: "治疗", revive: "复活", respawn: "重生", defense: "防御", agility: "敏捷", strength: "力量",
+  intelligence: "智力", luck: "幸运", crit: "暴击", cooldown: "冷却", mana: "法力", stamina: "体力",
+  thirst: "口渴", resistance: "抗性", immunity: "免疫", poison: "中毒", bleed: "流血", burn: "燃烧",
+  freeze: "冰冻", stun: "眩晕", knockback: "击退", loot: "掉落物", drop: "掉落", limit: "上限",
+  range: "范围", radius: "半径", distance: "距离", timer: "计时器", countdown: "倒计时",
+  quality: "品质", rarity: "稀有度", tier: "阶级", rank: "等级", bonus: "加成", modifier: "修正",
+  penalty: "惩罚", reward: "奖励", price: "价格", cost: "花费", weight: "重量", value: "价值",
+  regen: "回复", health_regen: "生命回复", mana_regen: "法力回复", respawn_time: "重生时间",
+  sometimes: "有时", often: "经常", rare: "稀有", common: "常见", epic: "史诗", legendary: "传说",
+  mythic: "神话", hard: "困难", easy: "简单", insane: "疯狂", brutal: "残酷", starter: "初始",
+  effect: "效果", effects: "效果",
+  // 常见停用词（翻译时忽略）
+  in: "", on: "", of: "", for: "", the: "", a: "", an: "", to: "", your: "", and: "", or: "",
+  with: "", at: "", by: "", from: "", into: "", about: "", be: "", is: "", are: "", was: "",
+  were: "", will: "", can: "", could: "", should: "", would: "", has: "", have: "", had: "",
+};
+const WG_TERM_STOP = new Set(["in", "on", "of", "for", "the", "a", "an", "to", "your", "and", "or", "with", "at", "by", "from", "into", "about", "be", "is", "are", "was", "were", "will", "can", "could", "should", "would", "has", "have", "had", "do", "does", "did"]);
+// 俄语→中文小词典（俄语模组配置/游戏常见词，含常见词形变化；用于西里尔文本的兜底翻译）
+const RU_TERM_CN: Record<string, string> = {
+  выгнать: "驱逐", выгнать_игрока: "驱逐玩家", выгнан: "已驱逐", выгнано: "已驱逐",
+  кикнуть: "踢出", кик: "踢出", включить: "启用", включено: "已启用", включён: "启用",
+  отключить: "禁用", отключено: "已禁用", отключён: "禁用", вкл: "开", выкл: "关",
+  игрок: "玩家", игрока: "玩家", игроки: "玩家", игроков: "玩家", игра: "游戏",
+  режим: "模式", голосование: "投票", голосовать: "投票", сервер: "服务器", мир: "世界",
+  карта: "地图", остров: "岛屿", острова: "岛屿", островов: "岛屿", лес: "森林", леса: "森林",
+  сезон: "季节", погода: "天气", сложность: "难度", размер: "大小", тип: "类型",
+  количество: "数量", скорость: "速度", частота: "频率", плотность: "密度", возрождение: "再生",
+  здоровье: "生命", голод: "饥饿", рассудок: "理智", урон: "伤害", температура: "温度",
+  спавн: "出生", появление: "生成", генерация: "生成", сложный: "困难", лёгкий: "简单",
+  легкий: "简单", средний: "中等", обычный: "普通", новый: "新", большой: "大", маленький: "小",
+  все: "全部", весь: "全部", случайный: "随机", да: "是", нет: "否", ничего: "无",
+  настройки: "设置", параметр: "参数", значение: "值", функция: "功能", функция_включена: "功能已启用",
+  изменить: "更改", показать: "显示", скрыть: "隐藏", убить: "击杀", убийца: "杀手",
+  невинный: "无辜者", жертва: "受害者", предмет: "物品", ресурс: "资源", ресурсы: "资源",
+  дерево: "树", деревья: "树", трава: "草", цветок: "花", цветы: "花", гриб: "蘑菇",
+  камень: "岩石", камни: "岩石", золото: "金", еда: "食物", мясо: "肉", рыба: "鱼",
+  босс: "首领", монстр: "怪物", монстры: "怪物", зима: "冬季", лето: "夏季", весна: "春季",
+  осень: "秋季", ночь: "夜晚", день: "白天", волк: "狼", паук: "蜘蛛", пчела: "蜜蜂",
+  краб: "螃蟹", акула: "鲨鱼", кит: "鲸", остров_вулкан: "火山岛", вулкан: "火山",
+  дождь: "雨", молния: "闪电", туман: "雾", ветер: "风", землетрясение: "地震",
+};
+// 官方 po 单词兜底：从原版饥荒中文翻译（chinese_s.po，8.7 万条）查该单词的官方翻译
+function poWord(w: string): string {
+  if (!w || w.length < 2) return "";
+  const po = chinesePo();
+  return po.get(w) || po.get(w.charAt(0).toUpperCase() + w.slice(1)) || po.get(w.toUpperCase()) || "";
+}
+// 英文词组/驼峰 key → 中文（词典逐词翻译，未知词过多则放弃；"X in Y" 位置词前置更符合中文语序）
+function zhPhrase(s: string): string {
+  const q = (s || "").trim();
+  if (!q) return "";
+  const low = q.toLowerCase().replace(/\s+/g, " ").trim();
+  if (WG_TERM_CN[low] !== undefined) return WG_TERM_CN[low];
+  // 俄语（西里尔字母）文本：查俄语词典，整句直查 + 逐词查
+  if (/[\u0400-\u04FF]/.test(low)) {
+    if (RU_TERM_CN[low] !== undefined) return RU_TERM_CN[low];
+    const parts = low.split(/[\s_\-]+/).map((w) => RU_TERM_CN[w]).filter(Boolean);
+    if (parts.length) return parts.join("");
+    return "";
+  }
+  const words = q.split(/[\s_\-\/]+/).flatMap((w) => w.split(/(?<=[a-z0-9])(?=[A-Z])/)).map((w) => w.toLowerCase().replace(/[^a-z0-9]/g, "")).filter((w) => w.length > 0);
+  if (!words.length) return "";
+  const plural = (w: string) => (w.length > 3 && w.endsWith("s") ? w.slice(0, -1) : w);
+  const trans = (ws: string[]): string => {
+    const parts: string[] = [];
+    let unknown = 0;
+    let hasOnly = false;
+    let i = 0;
+    while (i < ws.length) {
+      const w = ws[i];
+      if (WG_TERM_STOP.has(w)) { i++; continue; }
+      if (w === "only") { hasOnly = true; i++; continue; }
+      // 相邻两词组合查词典（"rainy season" → 雨季）
+      if (i < ws.length - 1 && !WG_TERM_STOP.has(ws[i + 1])) {
+        const pair = w + " " + ws[i + 1];
+        if (WG_TERM_CN[pair] !== undefined) { parts.push(WG_TERM_CN[pair]); i += 2; continue; }
+      }
+      if (WG_TERM_CN[w] === "") { i++; continue; } // 词典空值停用词（in/on/of 等）
+      // 原词 → 复数还原 → 词干还原（ing/ed/er/est）→ 官方 po 兜底（原版饥荒翻译）
+      const stem = (x: string) => (x.endsWith("ing") && x.length > 5 ? x.slice(0, -3) : x.endsWith("ed") && x.length > 4 ? x.slice(0, -2) : x.endsWith("er") && x.length > 4 ? x.slice(0, -2) : x.endsWith("est") && x.length > 5 ? x.slice(0, -3) : x);
+      const t = WG_TERM_CN[w] ?? WG_TERM_CN[plural(w)] ?? WG_TERM_CN[stem(w)] ?? WG_TERM_CN[plural(stem(w))] ?? poWord(w) ?? poWord(plural(w)) ?? poWord(stem(w));
+      if (t) parts.push(t);
+      else { unknown++; parts.push(w); } // 未知词保留原文，不整条放弃
+      i++;
+    }
+    if (!parts.length || unknown >= Math.max(2, ws.length)) return "";
+    // 仅完全包含去重（「战斗标准」含「标准」）
+    const merged: string[] = [];
+    for (const p of parts) {
+      const last = merged[merged.length - 1];
+      if (last && last !== p && (last.includes(p) || p.includes(last))) {
+        merged[merged.length - 1] = p.length > last.length ? p : last;
+      } else merged.push(p);
+    }
+    return (hasOnly ? "仅" : "") + merged.join("");
+  };
+  // "X in Y" / "X on Y" 位置短语：Y 前置（更符合中文习惯）
+  const locIdx = words.findIndex((w) => ["in", "on", "at"].includes(w));
+  if (locIdx > 0 && locIdx < words.length - 1) {
+    const tA = trans(words.slice(locIdx + 1));
+    const tB = trans(words.slice(0, locIdx));
+    if (tA && tB) return tA + tB;
+  }
+  return trans(words);
+}
+// 模组世界选项中文翻译补充表（海难 Shipwrecked Together 等无自带中文语言包的模组）
+// zhNameForKey 查不到时使用；覆盖模组专属词条（原版已有的由 FOREST_OPTIONS/CAVE_OPTIONS/原版字符串表翻译）
+function worldConfigLabel(modId: string, opt: ModConfigOption): string {
+  const key = opt.name.trim();
+  const direct = MOD_WG_CN[key] || MOD_WG_CN[key.toLowerCase()] || MOD_WG_CN[opt.label.trim()];
+  if (direct) return direct;
+  const byKey = zhNameForKey(key, modId);
+  if (byKey && byKey !== key) return byKey;
+  const byMod = modStringLookup(modId, key.toUpperCase(), "NAMES");
+  if (byMod) return zhText(byMod, modId);
+  const orig = opt.label || key;
+  const t = zhText(orig, modId);
+  if (t !== orig) return t;
+  const p = zhPhrase(orig);
+  return p || t;
+}
+
+// 轻量启用模组（追加启用，不触发 applyEnabledMods 的冲突检测/预设应用/分片删除等副作用）
+// 用于「添加层级」时自动启用对应的世界模组（如 IA 海难/火山层 → IA Shipwrecked + IA Core）
+function enableLayerMods(ids: string[]): void {
+  const master = listShards().find((s) => s.isMaster) || listShards()[0];
+  const map = master ? readModOverrides(master.name) : new Map<string, ModOverrideEntry>();
+  for (const id of ids) {
+    const key = `workshop-${id}`;
+    if (!map.has(key)) map.set(key, { enabled: true, options: {} });
+  }
+  ensureServerModSymlinks();
+  const setupIds = new Set(readSetupIds());
+  ids.forEach((id) => setupIds.add(id));
+  writeSetupIds([...setupIds]);
+  writeModOverridesBoth(map);
+}
+
+// 图标索引缓存：进程级一次性构建（key 归一化 → 相对路径），避免每个配置项都全量扫盘
+let iconIndexCache: Map<string, { atlas: string; img: string; base: string }> | null = null;
+function worldConfigIcon(key: string): { atlas: string; img: string } {
+  if (!iconIndexCache) {
+    iconIndexCache = new Map();
+    const norm = (s: string) => s.toLowerCase().replace(/\.(tex|png)$/i, "").replace(/[^a-z0-9]/g, "");
+    const root = join(PUBLIC_DIR, "icons");
+    const walk = (dir: string, atlas: string, depth: number): void => {
+      if (depth > 3) return;
+      let files: string[] = [];
+      try { files = readdirSync(dir); } catch { return; }
+      for (const f of files) {
+        const p = join(dir, f);
+        let st; try { st = statSync(p); } catch { continue; }
+        if (st.isDirectory()) walk(p, atlas || f, depth + 1);
+        else if (/\.png$/i.test(f)) {
+          const base = norm(f);
+          if (!iconIndexCache.has(base)) iconIndexCache.set(base, { atlas, img: f.replace(/\.png$/i, ""), base });
+        }
+      }
+    };
+    walk(root, "", 0);
+  }
+  const target = (key || "").toLowerCase().replace(/\.(tex|png)$/i, "").replace(/[^a-z0-9]/g, "");
+  if (!target) return { atlas: "", img: "" };
+  const exact = iconIndexCache.get(target);
+  if (exact) return { atlas: exact.atlas, img: exact.img };
+  // 近似：包含匹配，取归一化名最短者（最可能是图标名本身）
+  let best: { atlas: string; img: string; base: string } | null = null;
+  for (const v of iconIndexCache.values()) {
+    if (v.base.includes(target) || target.includes(v.base)) {
+      if (!best || v.base.length < best.base.length) best = v;
+    }
+  }
+  return best ? { atlas: best.atlas, img: best.img } : { atlas: "", img: "" };
+}
+
+function configValueLabel(modId: string, value: { description: string; data: any }): string {
+  const orig = value.description || String(value.data);
+  const t = zhText(orig, modId);
+  if (t !== orig) return t;
+  const p = zhPhrase(orig);
+  return p || t;
+}
+
+const MOD_WG_CN: Record<string, string> = {
+  angrybees: "怒蜂", ballphin: "球鼻海豚", ballphin_setting: "球鼻海豚", bamboo: "竹子",
+  bioluminescence: "生物发光", bush_vine: "灌木藤", coral: "珊瑚", coral_brain_rock: "脑珊瑚岩",
+  crabhole: "蟹洞", crate: "板条箱", crocodog: "鳄鱼狗", doydoy: "多多鸟", dragoonegg: "火鸡蛋",
+  dropeverythingondespawn: "退出时掉落物品", erupt: "火山喷发", extrastartingitems: "额外初始物品",
+  fishinhole: "渔洞", floods: "洪水", flup: "荧光水母", ghostenabled: "幽灵",
+  ghostsanitydrain: "幽灵理智流失", jellyfish: "水母", jungletree_regrowth: "丛林树再生",
+  kraken: "海怪", lessdamagetaken: "减少所受伤害", limpets: "帽贝", lobster: "龙虾",
+  magmarock: "岩浆岩", mangrovetree_regrowth: "红树林再生", mermfisher: "鱼人渔夫",
+  mosquitos: "蚊子", primeape: "猿猴", primeape_setting: "猿猴", sandhill: "沙丘", seagull: "海鸥",
+  seashell: "贝壳", seaweed: "海藻", seasonalstartingitems: "季节初始物品", solofish: "独居鱼",
+  spider_warriors: "蜘蛛战士", stungray: "黄貂鱼", sweet_potato: "红薯", swordfish: "剑鱼",
+  tallbirds: "高脚鸟", temperaturedamage: "温度伤害", tidalpool: "潮汐池", tides: "潮汐",
+  tigershark: "虎鲨", twister: "龙卷风", wasps: "黄蜂", whalehunt: "捕鲸",
+  wildbores: "野猪", wildbores_setting: "野猪", spawnmode: "出生模式", spawnprotection: "出生保护",
+  survivors: "幸存者", basicresource_regrowth: "基础资源再生", flowers_regrowth: "花朵再生",
+  sweet_potato_regrowth: "红薯再生", fishinhole_regrowth: "渔洞再生", coral_regrowth: "珊瑚再生",
+  monsoon: "季风季节", dryseason: "旱季", wetseason: "雨季", ocean: "海洋",
+  volcanolevel: "火山", volcano: "火山", dragoon: "火鸡猎手", poison: "中毒",
+  // 三合一/Tropical Experience 常见选项（modConfig 型）
+  kindofworld: "世界类型", howmanyislands: "岛屿数量", islandsize: "岛屿大小",
+  islandshape: "岛屿形状", numberofmainislands: "主岛数量", extraislands: "额外岛屿",
+  islandspacing: "岛屿间距", islandposition: "岛屿位置", hasocean: "存在海洋",
+  worldsize: "世界大小", continentsize: "大陆大小", fillingtheocean: "海洋填充",
+  // Island Adventures - Shipwrecked 实测补充
+  shipwrecked_season_start: "海难起始季节", volcanoisland: "火山岛", magma_rocks: "岩浆岩",
+  shipwrecked_trees: "海难树木", shipwreck: "沉船", hurricane: "飓风季",
+  alternatewhalehunt: "替代捕鲸", yellowcrocodog: "旱季鳄狗", fishermerm: "鱼人渔夫",
+  bluecrocodog: "蓝鳄狗", waterencounters: "海上遭遇", chessnavy_setting: "海军棋",
+  coral_brain_rock_regrowth: "脑珊瑚岩再生", seashell_regrowth: "贝壳再生",
+  sandhill_regrowth: "沙堆再生", rock_obsidian_regrowth: "黑曜岩再生",
+  rock_charcoal_regrowth: "木炭岩再生", volcano_shrub_regrowth: "灰烬树再生",
+  magmarock_regrowth: "岩浆岩再生", bioluminescence_regrowth: "荧光生物再生",
+  // Shipwrecked Together（1965741394）补充
+  ballphin_setting: "球鼻海豚", crabbits_setting: "蟹兔", dry: "旱季", green: "绿季",
+  mild: "温和季", mussel_farm: "贻贝", obsidian: "黑曜石", oceanwaves: "海浪",
+  ox: "水牛", palmtree_regrowth: "棕榈树再生", poisonhole: "毒穴",
+  portalresurection: "传送门复活", reeds_regrowth: "芦苇再生", resettime: "重置时间",
+};
 function zhNameForKey(key: string, modId?: string): string {
   const noSet = key.replace(/_setting$/, "");
   // 原版世界设置项（start_location/world_size/touchstone/boons/season_start 等）
@@ -2075,7 +2715,7 @@ function parseModCustomizeFile(text: string, modId = ""): ModWorldgenOption[] {
         const rawAtlas = (/\batlas\s*=\s*(?:([A-Z_][A-Za-z0-9_]*)|"([^"]+)")/.exec(iblk) || []);
         const atlasRef = rawAtlas[1] || rawAtlas[2] || "";
         const values = descMaps[itemDesc] || descMaps["frequency_descriptions"];
-        let label = zhNameForKey(key, modId);
+        let label = zhNameForKey(key, modId) || MOD_WG_CN[key] || MOD_WG_CN[key.replace(/_setting$/, "")] || "";
         if (!label && modId) {
           const en = modStringLookup(modId, key.toUpperCase(), "NAMES") || modStringLookup(modId, key.replace(/_setting$/, "").toUpperCase(), "NAMES");
           if (en) label = chinesePo().get(en) || en;
@@ -2114,13 +2754,57 @@ function parseModCustomizeFile(text: string, modId = ""): ModWorldgenOption[] {
     const itemDesc = (/\bdesc\s*=\s*([A-Za-z_]\w*)/.exec(block) || [])[1] || "frequency_descriptions";
     const img = (/\bimage\s*=\s*"([^"]+)"/.exec(block) || [])[1] || key + ".tex";
     const values = descMaps[itemDesc] || descMaps["frequency_descriptions"];
-    let label = zhNameForKey(key, modId);
+    let label = zhNameForKey(key, modId) || MOD_WG_CN[key] || MOD_WG_CN[key.replace(/_setting$/, "")] || "";
     if (!label && modId) {
       const en = modStringLookup(modId, key.toUpperCase(), "NAMES") || modStringLookup(modId, key.replace(/_setting$/, "").toUpperCase(), "NAMES");
       if (en) label = chinesePo().get(en) || en;
     }
     options.push({ key, label: label || key, group: groupLabel, world, default: def, values, img, atlas });
   };
+  // --- 通用补丁式解析：兼容任意模组的 modworldgenmain.lua 定义方式 ---
+  // 收集表变量别名：local wg = DebugUtil.GetValue(Customize.GetWorldGenOptions, "WORLDGEN_GROUP")
+  //               local wg = WORLDGEN_GROUP（或 local wg = WORLDGEN_GROUP or {}）
+  const tableAlias: Record<string, string> = {};
+  for (const m of text.matchAll(/local\s+([A-Za-z_]\w*)\s*=\s*DebugUtil\.GetValue\([^,]+,\s*"(WORLDGEN_GROUP|WORLDSETTINGS_GROUP)"\)/g)) tableAlias[m[1]] = m[2];
+  for (const m of text.matchAll(/local\s+([A-Za-z_]\w*)\s*=\s*(WORLDGEN_GROUP|WORLDSETTINGS_GROUP)(?:\s+or\s+\{)?/g)) tableAlias[m[1]] = m[2];
+  const escRe = (n: string) => n.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+  // 解析一个分组块（含 items 子层则取其 items，否则整块即条目容器）并 push 选项
+  const parseGroupBlock = (gblk: string, fallbackGroup: string): void => {
+    const groupDesc = (/\bdesc\s*=\s*([A-Za-z_]\w*)/.exec(gblk) || [])[1] || "";
+    const groupTextExpr = (/\btext\s*=\s*([^,\n]+)/.exec(gblk) || [])[1] || "";
+    const groupLabel = resolveStringsRef(groupTextExpr, modId) || fallbackGroup;
+    const gaM = /\batlas\s*=\s*(?:([A-Z_][A-Za-z0-9_]*)|"([^"]+)")/.exec(gblk);
+    const groupAtlas = normalizeAtlas((gaM && (gaM[1] || gaM[2])) || "");
+    const im = /items\s*=\s*\{/.exec(gblk);
+    const iBody = im ? (() => { const ie = braceMatch(gblk, im.index + im[0].length - 1); return ie === -1 ? gblk : gblk.slice(im.index + im[0].length, ie); })() : gblk;
+    for (const it of extractItemsFromGroup(iBody)) {
+      const itemAtlasM = /\batlas\s*=\s*(?:([A-Z_][A-Za-z0-9_]*)|"([^"]+)")/.exec(it.block);
+      pushItem(it.key, it.block, groupLabel, "", (itemAtlasM && normalizeAtlas(itemAtlasM[1] || itemAtlasM[2])) || groupAtlas);
+    }
+  };
+  for (const gname of ["WORLDGEN_GROUP", "WORLDSETTINGS_GROUP"]) {
+    const names = [...new Set([gname, ...Object.keys(tableAlias).filter((k) => tableAlias[k] === gname)])].map(escRe);
+    // 组级补丁：alias["组"] = { ... } / alias["组"] = alias["组"] or { ... }
+    const grpPatchRe = new RegExp(`(?:${names.join("|")})\\s*\\[\\s*"([^"]+)"\\s*\\]\\s*=\\s*(?:(?:${names.join("|")})\\s*\\[\\s*"[^"]+"\\s*\\]\\s*or\\s*)?\\{`, "g");
+    let pm: RegExpExecArray | null;
+    while ((pm = grpPatchRe.exec(text))) {
+      const ge = braceMatch(text, grpPatchRe.lastIndex - 1);
+      if (ge === -1) continue;
+      const gblk = text.slice(grpPatchRe.lastIndex, ge);
+      grpPatchRe.lastIndex = ge;
+      parseGroupBlock(gblk, pm[1]);
+    }
+    // 条目级补丁：alias["组"].items["条目"] = { ... }
+    const itemPatchRe = new RegExp(`(?:${names.join("|")})\\s*\\[\\s*"([^"]+)"\\s*\\]\\s*\\.items\\s*\\[\\s*"([^"]+)"\\s*\\]\\s*=\\s*\\{`, "g");
+    let im2: RegExpExecArray | null;
+    while ((im2 = itemPatchRe.exec(text))) {
+      const ie = braceMatch(text, itemPatchRe.lastIndex - 1);
+      if (ie === -1) continue;
+      const iblk = text.slice(itemPatchRe.lastIndex, ie);
+      itemPatchRe.lastIndex = ie;
+      pushItem(im2[2], iblk, im2[1], "", "");
+    }
+  }
   // pl_customize_table：每个顶层 key = 分组，含 category/text/items
   const plRe = /\bpl_customize_table\s*=\s*\{/g;
   let plM: RegExpExecArray | null;
@@ -2298,11 +2982,41 @@ function modWorldgenDataRaw(id: string): { name: string; options: ModWorldgenOpt
   return modWorldgenDataFromDir(id, join(ugcSharedDir(), id));
 }
 // 按目录分析模组的世界生成内容（本地模组库直接传客户端路径，无需先入库）
+// 配置驱动型世界选项补充：把模组 configuration_options（configOptions）转为世界选项
+function buildModConfigWorldOptions(id: string, mi: ModInfo | null, existing: ModWorldgenOption[]): ModWorldgenOption[] {
+  const out = [...existing];
+  for (const opt of mi?.configOptions || []) {
+    if (out.some((o) => o.key === opt.name)) continue;
+    const icon = worldConfigIcon(opt.name);
+    out.push({
+      key: opt.name,
+      label: worldConfigLabel(id, opt),
+      group: "世界设置",
+      world: "",
+      default: String(opt.default ?? ""),
+      values: opt.options.length ? opt.options.map((op) => ({ v: String(op.data), label: configValueLabel(id, op) })) : [{ v: String(opt.default ?? "default"), label: configValueLabel(id, { description: opt.label, data: opt.default }) }],
+      img: icon.img,
+      atlas: icon.atlas,
+      modConfig: true,
+    });
+  }
+  return out;
+}
+// 目录级世界生成分析缓存（key: id|dir）——local-steam 列表对每个模组分析时避免重复解析
+const modWgDirCache = new Map<string, ReturnType<typeof modWorldgenDataFromDirRaw>>();
 function modWorldgenDataFromDir(id: string, dir: string): { name: string; options: ModWorldgenOption[]; presets: ModWorldgenPreset[]; worldgenFiles: string[] } | null {
+  const k = `${id}|${dir}`;
+  if (modWgDirCache.has(k)) return modWgDirCache.get(k)!;
+  const r = modWorldgenDataFromDirRaw(id, dir);
+  modWgDirCache.set(k, r);
+  return r;
+}
+function modWorldgenDataFromDirRaw(id: string, dir: string): { name: string; options: ModWorldgenOption[]; presets: ModWorldgenPreset[]; worldgenFiles: string[] } | null {
   if (!existsSync(dir)) return null;
   const files: string[] = [];
   const mw = join(dir, "modworldgenmain.lua");
-  if (existsSync(mw)) files.push(mw);
+  const mwState = modFileState(id, dir);
+  if (mwState.worldgen) files.push(mw);
   const msc = join(dir, "modservercreationmain.lua");
   if (existsSync(msc)) files.push(msc);
   const cust = join(dir, "scripts", "map", "customize_patch.lua");
@@ -2311,6 +3025,20 @@ function modWorldgenDataFromDir(id: string, dir: string): { name: string; option
   if (existsSync(custItems)) files.push(custItems);
   const lvDir = join(dir, "scripts", "map", "levels");
   try { if (existsSync(lvDir)) for (const f of readdirSync(lvDir)) if (f.endsWith(".lua")) files.push(join(lvDir, f)); } catch {}
+  // 递归解析 modimport 引用的文件：世界选项/预设可能定义在 modimport 的其他 lua 里
+  const imported: string[] = [];
+  const queue = files.filter((f) => /mod(?:worldgen|servercreation)main\.lua$/.test(f));
+  while (queue.length) {
+    const cur = queue.shift()!;
+    let t = "";
+    try { t = readText(cur); } catch {}
+    for (const m of t.matchAll(/modimport\s+"([^"]+)"/g)) {
+      const rel = m[1].replace(/\.lua$/i, "") + ".lua";
+      const p = join(dir, rel);
+      if (existsSync(p) && !files.includes(p) && !imported.includes(p)) { imported.push(p); queue.push(p); }
+    }
+  }
+  files.push(...imported);
   if (!files.length) return null;
   let options: ModWorldgenOption[] = [], presets: ModWorldgenPreset[] = [];
   for (const f of files) {
@@ -2329,37 +3057,14 @@ function modWorldgenDataFromDir(id: string, dir: string): { name: string; option
   for (const m of mwText.matchAll(/modimport\s+"([^"]*(?:map|worldgen|level)[^"]*)"/g)) {
     if (!worldgenFiles.includes(m[1])) worldgenFiles.push(m[1]);
   }
-  if (!options.length && !presets.length) {
-    // 配置驱动型世界模组（如三合一 Tropical Experience / 欧皇模拟器）：
+  if (!options.length) {
+    // 配置驱动型世界模组（三合一 Tropical Experience、海难等普通带 modworldgenmain.lua 的模组）：
     // 没有标准的 WORLDGEN_GROUP/LEVELTYPE 定义，世界设置通过 configuration_options 控制
-    // 检测条件：有 modworldgenmain.lua + 有 AddLevelPreInitAny（修改世界生成）
-    if (existsSync(mw)) {
-      const mwText = readText(mw);
-      const modifiesWorldgen = /AddLevelPreInit|GetModConfigData.*world|AddRoom|AddTask|GROUND\./.test(mwText);
-      if (modifiesWorldgen) {
-        const mi = parseModInfo(id, join(dir, "modinfo.lua"));
-        if (mi?.configOptions?.length) {
-          // 筛选与世界/地图生成相关的配置项
-          // 精确匹配：名称包含明确的世界生成关键词
-          const worldKeywords = /^kindofworld|world|biome|island|continent|ocean|volcano|hamlet|shipwreck|tropical|frost_island|moon.*ship|coralbiome|greenworld|gorgeisland|monkeyisland|howmany|continentsize|fillingthe|terrain|islandsize|islandshape|numberofmain|extraisland|islandspac|islandposit|hasocean|worldsize/i;
-          for (const opt of mi.configOptions) {
-            const isWorldRelated = worldKeywords.test(opt.name) || worldKeywords.test(opt.label);
-            if (isWorldRelated) {
-              options.push({
-                key: opt.name,
-                label: opt.label || opt.name,
-                group: "世界类型",
-                world: "",
-                default: String(opt.default ?? ""),
-                values: opt.options.length ? opt.options.map((op) => ({ v: String(op.data), label: op.description || String(op.data) })) : [{ v: String(opt.default ?? "default"), label: String(opt.default ?? "default") }],
-                img: "",
-                atlas: "",
-                modConfig: true,
-              });
-            }
-          }
-        }
-      }
+    // 仅当存在 modworldgenmain.lua 时才补充 configOptions 为世界选项（无世界生成文件的
+    // 功能/角色/语言类模组不进入世界选项页）
+    if (mwState.worldgen) {
+      const mi = parseModInfo(id, join(dir, "modinfo.lua"));
+      options = buildModConfigWorldOptions(id, mi, options);
     }
   }
   if (!options.length && !presets.length) return null;
@@ -2425,7 +3130,44 @@ let modCache = loadModCache();
 function saveModCache() {
   try { writeFileSync(MOD_CACHE_FILE, JSON.stringify(modCache)); } catch {}
 }
-// 通过配置的 steamProxy 请求外网 Steam 服务：
+const MODS_STATE_FILE = join(PANEL_DIR, "mods_state.json");
+// ---------- 模组关键文件状态缓存（modinfo.lua / modmain.lua / modworldgenmain.lua 是否存在） ----------
+// 记录到 JSON 文件：读取优先走内存/JSON 缓存，避免每次请求都查磁盘；
+// 下载/导入/链接/删除后调用 refreshModFileState 刷新对应条目，保持新鲜。
+type ModsFileState = { info: boolean; main: boolean; worldgen: boolean; at: number };
+let modsStateCache: Record<string, ModsFileState> | null = null;
+function loadModsState(): Record<string, ModsFileState> {
+  if (modsStateCache) return modsStateCache;
+  try { modsStateCache = JSON.parse(readText(MODS_STATE_FILE)); } catch {}
+  modsStateCache = modsStateCache || {};
+  return modsStateCache;
+}
+function saveModsState() {
+  try { writeFileSync(MODS_STATE_FILE, JSON.stringify(modsStateCache || {})); } catch {}
+}
+// 读取模组关键文件状态：命中缓存（60 分钟内）直接返回，不碰磁盘；miss/过期才检查并回写
+function modFileState(id: string, dir?: string): { info: boolean; main: boolean; worldgen: boolean } {
+  const st = loadModsState();
+  const rec = st[id];
+  if (rec && Date.now() - rec.at < 60 * 60 * 1000) return rec;
+  const d = dir || join(ugcSharedDir(), id);
+  const r: ModsFileState = {
+    info: existsSync(join(d, "modinfo.lua")),
+    main: existsSync(join(d, "modmain.lua")),
+    worldgen: existsSync(join(d, "modworldgenmain.lua")),
+    at: Date.now(),
+  };
+  st[id] = r;
+  saveModsState();
+  return r;
+}
+// 强制刷新某模组文件状态（下载/导入/链接/删除后调用，避免读到过期状态）
+function refreshModFileState(id: string, dir?: string): void {
+  const st = loadModsState();
+  delete st[id];
+  if (dir) modFileState(id, dir);
+  else saveModsState();
+}
 // 把地址当作「通用 HTTP 代理」（Clash/V2Ray 等）使用；代理不通时回退直连。
 // 面板实例地址（http://IP:5323）本身不是 HTTP 代理，会走失败分支回退直连，不影响原逻辑。
 async function steamFetch(url: string, init: RequestInit, proxyTimeoutMs = 5000): Promise<Response> {
@@ -2588,20 +3330,56 @@ const slotBusy: boolean[] = new Array(MAX_PARALLEL).fill(false);
 const slotHome = (s: number) => join(TMP_DIR, `dst_dl_home_${s}`);
 
 // Windows steamcmd 首次运行需自更新（~30MB），提前跑一次 +quit 完成初始化
+// 若 steamcmd 不存在则自动下载（steamcmd.zip → 解压到面板 steamcmd 目录，可走面板代理）
 let steamcmdBootstrapped = false;
+// steamcmd.zip 多源（官方 CDN 国内经常不通，逐个尝试，配合代理）
+const STEAMCMD_SOURCES = [
+  "https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip",
+  "https://cdn.cloudflare.steamstatic.com/client/installer/steamcmd.zip",
+  "https://media.steampowered.com/client/installer/steamcmd.zip",
+];
+// 在常见位置查找已存在的 steamcmd.exe（面板目录 / DST 服务器目录 / 用户目录）
+function findExistingSteamcmd(): string | null {
+  const cands: string[] = [STEAMCMD];
+  if (panelConfig.serverDir) {
+    cands.push(join(panelConfig.serverDir, "steamcmd.exe"), join(panelConfig.serverDir, "bin", "steamcmd.exe"));
+  }
+  const up = process.env.USERPROFILE || "";
+  if (up) cands.push(join(up, "steamcmd", "steamcmd.exe"), join(up, "Downloads", "steamcmd", "steamcmd.exe"));
+  const lap = process.env.LOCALAPPDATA || "";
+  if (lap) cands.push(join(lap, "steamcmd", "steamcmd.exe"));
+  return cands.find((p) => existsSync(p)) || null;
+}
 async function ensureSteamcmdReady(): Promise<void> {
   if (steamcmdBootstrapped || !IS_WIN) return;
+  const found = findExistingSteamcmd();
+  if (found && found !== STEAMCMD) {
+    // 发现其他位置的 steamcmd，复制到面板目录统一管理
+    try {
+      mkdirSync(dirname(STEAMCMD), { recursive: true });
+      copyFileSync(found, STEAMCMD);
+    } catch {}
+  }
   if (!existsSync(STEAMCMD)) {
-    // 如果 exe 不存在，尝试自动下载
     const exeDir = dirname(STEAMCMD);
     try {
       mkdirSync(exeDir, { recursive: true });
-      const zip = join(exeDir, "steamcmd.zip");
-      const res = await fetch("https://steamcdn-a.akamaihd.net/client/installer/steamcmd.zip");
-      if (res.ok) writeFileSync(zip, Buffer.from(await res.arrayBuffer()));
-      const r = await run(["powershell", "-NoProfile", "-Command", `Expand-Archive -Force -LiteralPath '${zip.replace(/'/g, "''")}' -DestinationPath '${exeDir.replace(/'/g, "''")}'`], { timeoutMs: 60000 });
-      try { rmSync(zip, { force: true }); } catch {}
-      if (r.code !== 0 || !existsSync(STEAMCMD)) return;
+      let ok = false;
+      const sp = panelConfig.steamProxy;
+      for (const url of STEAMCMD_SOURCES) {
+        const zip = join(exeDir, "steamcmd.zip");
+        const curlArgs = ["curl", "-fSL", "--connect-timeout", "20", "--retry", "1", "-o", zip, url];
+        if (sp) curlArgs.splice(1, 0, "-x", sp);
+        const dl = await run(curlArgs, { timeoutMs: 180000 });
+        if (dl.code === 0 && existsSync(zip) && statSync(zip).size > 1000) {
+          const r = await run(["powershell", "-NoProfile", "-Command", `Expand-Archive -Force -LiteralPath '${zip.replace(/'/g, "''")}' -DestinationPath '${exeDir.replace(/'/g, "''")}'`], { timeoutMs: 60000 });
+          try { rmSync(zip, { force: true }); } catch {}
+          if (r.code === 0 && existsSync(STEAMCMD)) { ok = true; break; }
+        } else {
+          try { rmSync(zip, { force: true }); } catch {}
+        }
+      }
+      if (!ok) return; // 全部源下载失败，保持未安装状态
     } catch (e: any) { return; }
   }
   // 首次运行 bootstrap（自更新），超时 3 分钟
@@ -2610,11 +3388,13 @@ async function ensureSteamcmdReady(): Promise<void> {
 }
 
 async function downloadOneMod(id: string, task: Task, slot: number): Promise<boolean> {
+  // Windows 下若 steamcmd 不存在，先尝试自动下载（多源 steamcmd.zip + 代理 + 常见位置查找）
+  await ensureSteamcmdReady();
   if (!existsSync(STEAMCMD)) {
-    task.log += `[失败] steamcmd 未安装，请将 steamcmd.exe 放置到 ${STEAMCMD}\n`;
+    task.log += `[失败] steamcmd 未安装（已尝试从多个镜像自动下载仍失败，可能网络不通）。\n`;
+    task.log += `  请任选其一：\n  1) 手动下载 steamcmd.zip 解压后把 steamcmd.exe 放到 ${dirname(STEAMCMD)}\\ \n  2) 在「基本设置」配置 Steam搜索代理后再试\n`;
     return false;
   }
-  await ensureSteamcmdReady();
   const home = slotHome(slot);
   mkdirSync(home, { recursive: true });
   task.log += `\n===== steamcmd 下载模组 ${id}（并行槽位 ${slot + 1}）=====\n`;
@@ -2773,6 +3553,41 @@ async function fetchModInfoLua(id: string): Promise<boolean> {
   }
 }
 
+// 本地源复制：优先从客户端创意工坊缓存 / 服务器端 mods 复制模组（Windows 无需 steamcmd）
+async function downloadFromLocalSources(id: string, task: Task): Promise<boolean> {
+  const candidates: { path: string; desc: string }[] = [];
+  // 客户端创意工坊缓存：<客户端>\steamapps\workshop\content\322330\<id>（Steam 已下载的模组）
+  if (IS_WIN) {
+    const cli = detectDstClient();
+    if (cli) {
+      candidates.push({ path: join(cli.workshopDir, id), desc: "客户端创意工坊缓存" });
+      candidates.push({ path: join(cli.modsDir, `workshop-${id}`), desc: "客户端 mods 目录" });
+    }
+  }
+  // 服务器端：<服务器目录>\mods\workshop-<id>
+  if (panelConfig.serverDir) {
+    candidates.push({ path: join(panelConfig.serverDir, "mods", `workshop-${id}`), desc: "服务器端 mods" });
+  }
+  for (const c of candidates) {
+    if (!existsSync(c.path) || !existsSync(join(c.path, "modinfo.lua"))) continue;
+    task.log += `[本地源] 从${c.desc}复制: ${c.path}\n`;
+    ensureUgcLayout();
+    const dst = join(ugcSharedDir(), id);
+    try {
+      rmSync(dst, { recursive: true, force: true });
+      copyDirSync(c.path, dst);
+      if (modCache.items[id]) { modCache.items[id].downloadedAt = Date.now(); saveModCache(); }
+      task.log += `[完成] 已从${c.desc}安装到 ${dst}\n`;
+      clearModCaches();
+      return true;
+    } catch (e: any) {
+      task.log += `[失败] 复制失败: ${e?.message || e}\n`;
+    }
+  }
+  task.log += "[提示] 客户端/服务器端无此模组，转 steamcmd 下载\n";
+  return false;
+}
+
 async function runDownloadTask(task: Task, slot: number) {
   task.status = "running";
   task.log += `开始处理模组 ${task.modId}\n`;
@@ -2782,7 +3597,9 @@ async function runDownloadTask(task: Task, slot: number) {
     if (st?.title) task.label = st.title;
     if (st?.file_size) task.totalBytes = st.file_size;
     let good = await downloadViaCdn(task.modId, task);
+    if (!good) good = await downloadFromLocalSources(task.modId, task);
     if (!good) good = await downloadOneMod(task.modId, task, slot);
+    if (good) refreshModFileState(task.modId); // 下载成功：刷新关键文件状态缓存
     task.status = good ? "success" : "failed";
     task.log += good ? "\n任务成功。\n" : "\n任务失败，请检查日志。\n";
   } catch (e: any) {
@@ -3396,16 +4213,80 @@ async function api(req: Request, url: URL): Promise<Response> {
   }
 
   // ===== 编辑世界 =====
+  // 层级类型基础配置：类型 → 中文名 / 地上或地下 / 需要自动启用的模组
+  // IA(Island Adventures) 海难/火山层级由 IA 模组生成；猪镇需另行安装对应模组
+  const LAYER_TYPES: Record<string, { label: string; surface: boolean; mods: string[]; note?: string }> = {
+    forest: { label: "原版地表", surface: true, mods: [] },
+    cave: { label: "原版洞穴", surface: false, mods: [] },
+    shipwrecked: { label: "海难", surface: true, mods: ["1467214795", "3435352667"] },
+    volcanoworld: { label: "火山", surface: false, mods: ["1467214795", "3435352667"] },
+    porkland: { label: "猪镇", surface: true, mods: [], note: "猪镇世界需自行安装对应的猪镇/哈姆雷特模组" },
+  };
+  const LAYER_LOC_CN: Record<string, string> = {
+    shipwrecked: "海难", volcanoworld: "火山", porkland: "猪镇", hamlet: "哈姆雷特",
+    tropical: "热带", cave: "洞穴", under: "地下", volcano: "火山", forest: "地表",
+  };
+  // 可用「世界生成类型」：原版地表/洞穴 + 已启用模组提供的世界类型（海难/火山/猪镇/三合一等）
+  function availableLayerTypes(): { type: string; label: string; surface: boolean; mods: string[]; modTitle: string }[] {
+    const out: { type: string; label: string; surface: boolean; mods: string[]; modTitle: string }[] = [
+      { type: "forest", label: "原版地表", surface: true, mods: [], modTitle: "" },
+      { type: "cave", label: "原版洞穴", surface: false, mods: [], modTitle: "" },
+    ];
+    const seen = new Set<string>(["forest", "cave"]);
+    // IA 系列固定类型（已下载才列出）
+    for (const [t, base] of [["shipwrecked", "海难"], ["volcanoworld", "火山"], ["porkland", "猪镇"]] as const) {
+      if (seen.has(t)) continue;
+      const modIds = t === "porkland" ? [] : ["1467214795", "3435352667"];
+      if (modIds.length && !modIds.some((id) => localModDirs().includes(id))) continue;
+      seen.add(t);
+      out.push({ type: t, label: base, surface: t !== "volcanoworld", mods: modIds, modTitle: modIds.length ? modCache.items[modIds[0]]?.title || "Island Adventures" : "需自行安装猪镇模组" });
+    }
+    // 已启用模组提供的额外世界类型（三合一/其他地图模组）
+    const master = listShards().find((s) => s.isMaster) || listShards()[0];
+    if (master) {
+      for (const [key, e] of readModOverrides(master.name)) {
+        if (!e.enabled) continue;
+        const id = key.replace("workshop-", "");
+        const d = modWorldgenData(id);
+        if (!d || !d.presets.length) continue;
+        for (const p of d.presets) {
+          const loc = p.location;
+          if (!loc || seen.has(loc) || /SURVIVAL_TOGETHER|DST_CAVE/.test(p.id)) continue;
+          seen.add(loc);
+          const isUnder = /volcano|cave|under|ruins/i.test(loc);
+          out.push({ type: loc, label: LAYER_LOC_CN[loc] || loc, surface: !isUnder, mods: [id], modTitle: modCache.items[id]?.title || parseModInfo(id)?.name || id });
+        }
+      }
+    }
+    return out;
+  }
   if (path === "worlds" && method === "GET") {
     const shards = listShards();
     for (const s of shards) s.running = await shardRunning(s.name);
     return ok(shards);
   }
+  if (path === "worlds/layer-types" && method === "GET") {
+    return ok({ types: availableLayerTypes() });
+  }
   if (path === "worlds/add" && method === "POST") {
     const b = await bodyJson(req);
+    const layerType = String(b.type || "cave");
+    const lt = LAYER_TYPES[layerType] || availableLayerTypes().find((t) => t.type === layerType);
+    if (!lt) return fail(`不支持的层级类型: ${layerType}`);
     const shards = listShards();
-    const wantMaster = b.type === "forest";
-    // 检查是否有不兼容洞穴的地图模组已启用
+    // 首个「地上」层级成为主世界（海难/原版地表都可做主世界）
+    const wantMaster = lt.surface && !shards.some((s) => s.isMaster);
+    // 需要模组的层级：检查下载情况，已下载则自动启用（对应「模组设计」）
+    if (lt.mods.length) {
+      const localIds = new Set(localModDirs());
+      const needDownload = lt.mods.filter((id) => !localIds.has(id));
+      if (needDownload.length) {
+        const names = needDownload.map((id) => modCache.items[id]?.title || `workshop-${id}`).join("、");
+        return fail(`添加「${lt.label}」层级需要对应模组，请先在 mod设置 页下载: ${names}（ID: ${needDownload.join(", ")}）后重试。`);
+      }
+      enableLayerMods(lt.mods);
+    }
+    // 检查是否有不兼容洞穴的地图模组已启用（仅地下类层级需要）
     if (!wantMaster) {
       const master = shards.find((s) => s.isMaster);
       if (master) {
@@ -3418,37 +4299,39 @@ async function api(req: Request, url: URL): Promise<Response> {
           const hasOverworldPreset = d.presets.some((p) => !/volcano|cave|under/i.test(p.location || ""));
           if (hasOverworldPreset && !hasCavePreset) {
             const name = modCache.items[id]?.title || parseModInfo(id)?.name || id;
-            return fail(`已启用地图模组「${name}」不支持地下世界，无法添加洞穴分片。该模组的世界（如猪镇）不需要地下世界。`);
+            return fail(`已启用地图模组「${name}」不支持地下世界，无法添加该层级。`);
           }
         }
       }
     }
     // 优先识别既有世界文件夹（客户端存档只有文件夹没有 server.ini）：直接导入并补全配置
-    const firstChoice = wantMaster ? "Master" : "Caves";
-    const existingNoIni = shards.find((s) => s.name === firstChoice && !s.hasIni);
-    if (existingNoIni) {
-      ensureServerIni(firstChoice);
-      return ok(null, `已识别并导入既有世界文件夹 ${firstChoice}（客户端存档缺少 server.ini，已自动补全并分配端口），世界数据原样保留，可直接启动`);
+    if (layerType === "forest" || layerType === "cave") {
+      const firstChoice = wantMaster ? "Master" : "Caves";
+      const existingNoIni = shards.find((s) => s.name === firstChoice && !s.hasIni);
+      if (existingNoIni) {
+        ensureServerIni(firstChoice);
+        return ok(null, `已识别并导入既有世界文件夹 ${firstChoice}（客户端存档缺少 server.ini，已自动补全并分配端口），世界数据原样保留，可直接启动`);
+      }
     }
-    // 命名：第一个地上=Master、第一个地下=Caves，之后 Forest2/Caves2/Forest3…（支持多加世界）
-    let name = wantMaster ? "Master" : "Caves";
+    // 命名：按类型命名，首个该类型不加序号，之后 Forest2/Caves2/Shipwrecked2…
+    const baseNames: Record<string, string> = { forest: "Master", cave: "Caves", shipwrecked: "Shipwrecked", volcanoworld: "Volcano", porkland: "Porkland" };
+    let name = baseNames[layerType] || "Shard";
     if (shards.some((s) => s.name === name)) {
-      const prefix = wantMaster ? "Forest" : "Caves";
       let n = 2;
-      while (shards.some((s) => s.name === `${prefix}${n}`)) n++;
-      name = `${prefix}${n}`;
+      while (shards.some((s) => s.name === `${name}${n}`)) n++;
+      name = `${name}${n}`;
     }
     // 主世界标记：一个存档只有一个主世界（第一个地上世界），其余都是附加层
     const hasMaster = shards.some((s) => s.isMaster);
     const isMaster = wantMaster && !hasMaster;
     // 附加层 = 超出经典「地上+地下」组合的多开层，面板不维护其设置
     const isExtraLayer = !isMaster && (shards.length >= 2 || (wantMaster && hasMaster));
-    // 自动分配端口：默认拿经典端口（地上 11000 / 地下 11001）；
-    // 只在本存档内避让（同存档多世界必须不同端口），不看其他存档——跨存档冲突仅黄色警告
+    // 自动分配端口：地上类 11000 起 / 地下类 11001 起；同存档多世界必须不同端口
     const usedPorts = new Set<number>();
     try { for (const p of clusterPorts(panelConfig.cluster, true)) usedPorts.add(p.port); } catch {}
     const alloc = (start: number) => { let p = start; while (usedPorts.has(p)) p++; usedPorts.add(p); return p; };
-    const serverPort = alloc(wantMaster ? 11000 : 11001);
+    const isSurfaceLayer = lt.surface;
+    const serverPort = alloc(isSurfaceLayer ? 11000 : 11001);
     const steamPort = alloc(isMaster ? 27018 : 27019);
     const authPort = alloc(isMaster ? 8768 : 8769);
     const dir = shardDir(name);
@@ -3456,9 +4339,19 @@ async function api(req: Request, url: URL): Promise<Response> {
     mkdirSync(dir, { recursive: true });
     const ini = `[NETWORK]\nserver_port = ${serverPort}\n\n[SHARD]\nis_master = ${isMaster}\n${isMaster ? "" : `name = ${name}\n`}\n[STEAM]\nmaster_server_port = ${steamPort}\nauthentication_port = ${authPort}\n\n[ACCOUNT]\nencode_user_path = true\n`;
     writeFileSync(join(dir, "server.ini"), ini);
+    // 新分片继承当前启用模组配置（modoverrides 与主世界一致），保证层级对应的模组（如 IA）在该分片生效
+    try {
+      const masterShard = listShards().find((s) => s.isMaster) || listShards()[0];
+      if (masterShard && existsSync(shardDir(masterShard.name))) {
+        const ovText = serializeModOverrides(readModOverrides(masterShard.name));
+        if (ovText) writeFileSync(join(dir, "modoverrides.lua"), ovText);
+      }
+    } catch {}
     clearShardListCache();
     return ok({ name, isMaster, ports: { server: serverPort, steam: steamPort, auth: authPort } },
-      `已创建${wantMaster ? "地上" : "地下"}世界 ${name}${isMaster ? "（主世界）" : ""}，端口 ${serverPort}/${steamPort}/${authPort} 已自动分配，请记得保存世界设置`
+      `已创建${lt.label}世界 ${name}${isMaster ? "（主世界）" : ""}，端口 ${serverPort}/${steamPort}/${authPort} 已自动分配，请记得保存世界设置`
+      + (lt.mods.length ? `（已自动启用对应模组: ${lt.mods.map((id) => modCache.items[id]?.title || id).join("、")}）` : "")
+      + (lt.note ? `。${lt.note}` : "")
       + (isExtraLayer ? `。注意：一个存档只有一个主世界（已标记），${name} 属于附加层，面板不维护附加层的世界设置` : ""));
   }
   if (path === "worlds/delete" && method === "POST") {
@@ -3502,7 +4395,9 @@ async function api(req: Request, url: URL): Promise<Response> {
     })();
     const hasWorldgenMod = !!worldgenModInfo;
     const hasReplaceWorldgenMod = worldgenModInfo?.replace === true;
-    return ok({ shard, isMaster: target.isMaster, overrides, presets, options: worldOptionTable(target.isMaster), hasWorldgenMod, hasReplaceWorldgenMod });
+    // 原版选项按层级类型：地表类（Master/Forest*/Shipwrecked*/Porkland*）用地表选项，地下类（Caves*/Volcano*）用洞穴选项
+    const isSurfaceShard = target.isMaster || /^(Master|Forest|Shipwrecked|Porkland)/i.test(shard);
+    return ok({ shard, isMaster: target.isMaster, overrides, presets, options: worldOptionTable(isSurfaceShard), hasWorldgenMod, hasReplaceWorldgenMod });
   }
   if (path === "world/modworldgen" && method === "GET") {
     const shard = url.searchParams.get("shard") || "";
@@ -3522,9 +4417,33 @@ async function api(req: Request, url: URL): Promise<Response> {
         }
         return o;
       });
-      mods.push({ id, ...d, options: enriched });
+      mods.push({ id, ...d, options: enriched, enabledOnShard: e.enabled !== false });
     }
-    return ok({ mods });
+    // 原版世界选项（模组世界时原版 optTable 被隐藏，这里附带原版选项供前端合并显示）
+    const isSurfaceShard = target.isMaster || /^(Master|Forest|Shipwrecked|Porkland)/i.test(shard);
+    return ok({ mods, vanilla: worldOptionTable(isSurfaceShard) });
+  }
+  // 切换某层级「模组世界生成」开关：修改该分片 modoverrides.lua 的 enabled，
+  // 关闭后该层级生成世界时不再加载该模组的 modworldgenmain.lua 影响（仅影响当前层级）
+  if (path === "world/mod-enabled" && method === "POST") {
+    const b = await bodyJson(req);
+    const shard = String(b.shard || "");
+    const modId = String(b.modId || "");
+    const on = b.on !== false;
+    if (!validId(modId)) return fail("非法模组 ID");
+    const target = listShards().find((s) => s.name === shard);
+    if (!target) return fail("世界不存在");
+    const map = readModOverrides(shard);
+    const key = `workshop-${modId}`;
+    const title = modCache.items[modId]?.title || parseModInfo(modId)?.name || modId;
+    if (!map.has(key)) {
+      if (!on) return ok(null, `层级 ${shard} 未启用模组「${title}」，无需关闭`);
+      map.set(key, { enabled: true, options: {} });
+    }
+    map.get(key)!.enabled = on;
+    writeFileSync(join(shardDir(shard), "modoverrides.lua"), serializeModOverrides(map));
+    clearModCaches();
+    return ok(null, on ? `已在层级 ${shard} 启用「${title}」的世界生成（重新生成世界生效）` : `已在层级 ${shard} 停用「${title}」的世界生成（该层级不再受其 modworldgenmain.lua 影响，重新生成世界生效）`);
   }
   if (path === "world/overrides" && method === "POST") {
     const b = await bodyJson(req);
@@ -3753,14 +4672,17 @@ async function api(req: Request, url: URL): Promise<Response> {
     // 当前值（以 Master modoverrides 为准）
     const master = listShards().find((s) => s.isMaster) || listShards()[0];
     const ov = master ? readModOverrides(master.name).get(`workshop-${id}`) : undefined;
-    const options = (mi?.configOptions || []).map((o) => ({
-      ...o,
-      // 配置项前端中文翻译（中文语言包/官方 po 查不到时保留英文）
-      label_zh: zhText(o.label),
-      hover_zh: zhText(o.hover),
-      options: o.options.map((op) => ({ ...op, description_zh: zhText(typeof op.description === "string" ? op.description : String(op.description)) })),
-      current: ov && o.name in ov.options ? ov.options[o.name] : o.default,
-    }));
+    const options = (mi?.configOptions || []).map((o) => {
+      // 中文翻译：真实翻译链（语言包/po）查不到时，用通用词汇词典词组翻译兜底
+      const zhOf = (s: string) => { const t = zhText(s, id); return t !== s ? t : (zhPhrase(s) || t); };
+      return {
+        ...o,
+        label_zh: zhOf(o.label),
+        hover_zh: zhOf(o.hover),
+        options: o.options.map((op) => ({ ...op, description_zh: zhOf(typeof op.description === "string" ? op.description : String(op.description)) })),
+        current: ov && o.name in ov.options ? ov.options[o.name] : o.default,
+      };
+    });
     const changelogs = await fetchChangeLogs(id);
     // ---------- 安装详情 ----------
     const localIds = new Set(localModDirs());
@@ -3768,14 +4690,9 @@ async function api(req: Request, url: URL): Promise<Response> {
     const localVersion = mi?.version || "";
     const dlAt = modDownloadedAt(id);
     const updateAvail = !!st && st.time_updated > 0 && dlAt > 0 && st.time_updated * 1000 > dlAt;
-    // 检测本地关键文件
-    const localFiles: Record<string, boolean> = {};
-    const modDir = join(ugcSharedDir(), id);
-    if (existsSync(modDir) && statSync(modDir).isDirectory()) {
-      for (const f of ["modinfo.lua", "modmain.lua", "modworldgenmain.lua"]) {
-        localFiles[f] = existsSync(join(modDir, f));
-      }
-    }
+    // 检测本地关键文件（读 JSON 状态缓存，不实时查磁盘）
+    const lf = modFileState(id);
+    const localFiles: Record<string, boolean> = { "modinfo.lua": lf.info, "modmain.lua": lf.main, "modworldgenmain.lua": lf.worldgen };
     // 异常检测
     const anomalies: string[] = [];
     if (!isDownloaded) anomalies.push("模组未下载到本地");
@@ -3872,6 +4789,7 @@ async function api(req: Request, url: URL): Promise<Response> {
       const key = `workshop-${b.id}`;
       if (map.has(key)) { map.delete(key); writeFileSync(join(shardDir(shard.name), "modoverrides.lua"), serializeModOverrides(map)); }
     }
+    refreshModFileState(String(b.id));
     return ok(null, `已取消订阅模组 ${b.id}（已删除本地文件并从配置中移除）`);
   }
   if (path === "mods/favorite" && method === "POST") {
@@ -4005,6 +4923,7 @@ async function api(req: Request, url: URL): Promise<Response> {
     }
     refreshLinkManifest();
     clearModCaches();
+    refreshModFileState(id);
     return ok(null, `已链接加载模组 ${id} → 直接读取 ${src}（不占用额外磁盘）`);
   }
   // 取消链接：只移除链接本身，不删客户端文件
@@ -4019,6 +4938,7 @@ async function api(req: Request, url: URL): Promise<Response> {
     try { removePathOrLink(dst); } catch (e: any) { return fail("移除链接失败: " + (e?.message || e)); }
     refreshLinkManifest();
     clearModCaches();
+    refreshModFileState(id);
     return ok(null, `已取消模组 ${id} 的链接（客户端文件未受影响）`);
   }
   if (path === "mods/import-local" && method === "POST") {
@@ -4036,6 +4956,7 @@ async function api(req: Request, url: URL): Promise<Response> {
     writeFileSync(join(dst, "SOURCE.txt"), `该模组从本地复用\r\n模组ID: ${id}\r\n来源: ${src}\r\n时间: ${new Date().toLocaleString("zh-CN")}\r\n`);
     if (modCache.items[id]) { modCache.items[id].downloadedAt = Date.now(); saveModCache(); }
     clearModCaches();
+    refreshModFileState(id);
     return ok(null, `已复用本地模组 ${id} → ${dst}`);
   }
   if (path === "util/open-folder" && method === "POST") {
@@ -4793,6 +5714,9 @@ function serveFile(path: string, req?: Request, opts?: { noNegotiate?: boolean }
   }
 }
 
+// 预热原版翻译（chinese_s.po 17.6MB 解析 + 中文语言包扫描），避免首次翻译查询卡顿
+setTimeout(() => { try { chinesePo(); } catch {} try { chsNames(); } catch {} }, 1500);
+
 const server = Bun.serve({
   hostname: "127.0.0.1",
   port: PORT,
@@ -4897,9 +5821,9 @@ const server = Bun.serve({
       const diskDir = join(PUBLIC_DIR, "modicons", modId);
       const diskFile = join(diskDir, "local.png");
       if (existsSync(diskFile)) return new Response(Bun.file(diskFile), { status: 200, headers: pngHeaders });
-      const m = scanLocalSteamMods().find((x) => x.id === modId);
-      const texPath = m ? join(m.path, "modicon.tex") : "";
-      if (!m || !existsSync(texPath)) return new Response("Not found", { status: 404 });
+      const mPath = findLocalModPath(modId);
+      const texPath = mPath ? join(mPath, "modicon.tex") : "";
+      if (!mPath || !existsSync(texPath)) return new Response("Not found", { status: 404 });
       try {
         const result = decodeKTEX(readFileSync(texPath));
         if (!result) return new Response("Decode failed", { status: 500 });
@@ -4972,6 +5896,7 @@ const server = Bun.serve({
 });
 
 console.log(`DST 管理面板已启动: http://127.0.0.1:${PORT}/  (当前存档: ${panelConfig.cluster})`);
+console.log(`面板登录密码文件: ${join(PANEL_DIR, ".panel_password")}（忘记密码可查看此文件；在「基本设置」页面可修改）`);
 writeModsDirReadme(); // Windows 版：模组存放目录写地址说明文件
 
 // ---------- 定时任务 ----------

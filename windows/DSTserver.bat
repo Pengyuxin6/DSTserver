@@ -52,6 +52,7 @@ if not exist panel\.panel_password (
     exit /b 1
   )
   > panel\.panel_password echo !PANELPW!
+  echo [DSTserver] 密码已保存到: %CD%\panel\.panel_password (忘记密码可查看此文件)
 )
 
 :menu
@@ -74,9 +75,20 @@ if "%choice%"=="0" exit /b 0
 goto menu
 
 :run
+REM 检测面板端口是否已被占用（如面板已在其他窗口运行则提示）
+netstat -ano | findstr ":5323" | findstr "LISTENING" >nul 2>nul
+if not errorlevel 1 (
+  echo [DSTserver] 检测到端口 5323 已被占用，面板可能已在运行！
+  echo [DSTserver] 请直接访问 http://localhost:5323/ ，无需重复启动。
+  echo [DSTserver] 如端口被其他程序占用，请关闭后重试。
+  pause
+  goto menu
+)
+
 echo [DSTserver] 启动管理面板: http://localhost:5323/  (关闭本窗口即停止面板)
 start "" "http://localhost:5323/"
 cd panel
+if exist panel\.panel_password echo [DSTserver] 面板密码文件: %CD%\panel\.panel_password
 bun run src/server.ts
 cd /d "%ROOT%"
 pause

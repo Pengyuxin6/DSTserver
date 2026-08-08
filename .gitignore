@@ -23,3 +23,4 @@ panel/.*.bun-build
 
 # 视频推广分镜（内部策略，不公开推送）
 docs/视频推广分镜.md
+panel/mods_state.json
