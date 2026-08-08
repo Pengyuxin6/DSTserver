@@ -452,7 +452,14 @@ async function pageBasic() {
   const rootDefBtn = $("#clusterRootDefault");
   if (rootDefBtn) rootDefBtn.onclick = () => { $("#clusterRootInput").value = d.defaultClusterRoot || ""; toast("已填入科雷默认存档位置，点「保存」生效"); };
   const cliAutoBtn = $("#clientDirAutoBtn");
-  if (cliAutoBtn) cliAutoBtn.onclick = () => { if (d.clientAuto) { $("#clientDirInput").value = d.clientAuto.dir; toast("已填入自动检测到的客户端位置，点「保存」生效"); } };
+  if (cliAutoBtn) cliAutoBtn.onclick = async () => {
+    if (!d.clientAuto) return;
+    // 检测前告知：自动检测只扫描本机 Steam 库对应文件夹（纯目录检查），不会启动/弹出任何程序，也不会修改任何文件
+    const ok = await dlgConfirm(`「自动检测」只会扫描本机 Steam 库中的对应文件夹（纯目录检查），确认信息如下：\n\n· 检查路径：Steam 库中 "steamapps/common/Don't Starve Together" 是否存在\n· 不会启动或弹出 Steam / DST 客户端窗口\n· 不会修改任何文件\n\n确定开始自动检测？`);
+    if (!ok) return;
+    $("#clientDirInput").value = d.clientAuto.dir;
+    toast("已填入自动检测到的客户端位置，点「保存」生效");
+  };
   const srvAutoBtn = $("#serverDirAutoBtn");
   if (srvAutoBtn) srvAutoBtn.onclick = () => { if (d.serverAuto?.dir) { $("#serverDir").value = d.serverAuto.dir; toast("已填入自动检测到的服务器目录，点「保存」生效"); } };
   $$("#clusterTable [data-sel]").forEach((b) => (b.onclick = async () => {
@@ -1915,6 +1922,9 @@ async function loadServerStatus() {
     <div class="row"><label>汉化检测</label>
       <label class="switch" title="启动服务器时检测是否启用中文汉化模组"><input type="checkbox" id="langCheckSwitch" ${d.langCheck ? "checked" : ""}><span class="slider"></span></label>
       <span class="hint">启动时检测汉化模组（1301033176/1418746242），未启用则弹窗提示自动配置为简体中文</span></div>
+    ${d.isWin ? `<div class="row"><label>显示进程窗口</label>
+      <label class="switch" title="启动 DST 分片时显示 dontstarve_dedicated_server_nullrenderer 的黑窗口控制台（默认隐藏，后台运行）"><input type="checkbox" id="showWinConSwitch" ${d.showWinConsole ? "checked" : ""}><span class="slider"></span></label>
+      <span class="hint">开启后每个分片启动时会弹出 dontstarve_dedicated_server_nullrenderer 进程窗口；关闭则后台运行（建议关闭）</span></div>` : ""}
     <div class="row"><label>世界暂停</label><span id="pauseState" class="hint">查询中…</span> <span class="hint">暂停 = 冻结世界时间（昼夜/作物/生物停止），玩家不被踢出</span></div>`;
   modeBox.innerHTML = `<div class="row">
       <label><input type="radio" name="mode" value="online" ${d.mode === "online" ? "checked" : ""}> 在线模式</label>
@@ -1991,6 +2001,12 @@ async function loadServerStatus() {
   if (ar) ar.onchange = async (e) => { const on = e.target.checked; toast((await api("server/autorestart", { method: "POST", body: { on } })).msg); };
   const lc = $("#langCheckSwitch");
   if (lc) lc.onchange = async () => { toast((await api("server/lang-check-toggle", { method: "POST", body: {} })).msg); };
+  // Windows：显示 dontstarve_dedicated_server_nullrenderer 进程窗口开关（保存到面板配置，下次启动生效）
+  const swc = $("#showWinConSwitch");
+  if (swc) swc.onchange = async (e) => {
+    const on = e.target.checked;
+    toast((await api("basic", { method: "POST", body: { showWinConsole: on } })).msg);
+  };
   // 模式切换
   $$('input[name=mode]').forEach((r) => (r.onchange = () => act("server/mode", { mode: r.value })));
   // 分片状态自动刷新（每 10 秒，更新分片状态和系统资源）

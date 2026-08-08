@@ -160,10 +160,11 @@ function getSystemMemory(): { total: number; avail: number; used: number } {
 // 正在运行的全部 DST 进程（所有存档）：[{cluster, shard}]
 async function runningDstAll(): Promise<{ cluster: string; shard: string }[]> {
   if (IS_WIN) {
-    // 只认本面板启动的进程（面板重启后无法追踪外部进程，符合 Windows 单机使用场景）
+    // 本面板启动的进程：真实子进程（exitCode===null）或 Start-Process 模式（wmic 确认存活）
     const out: { cluster: string; shard: string }[] = [];
     for (const [key, p] of winProcs) {
       if (p.exitCode === null) { const [cluster, shard] = key.split("::"); out.push({ cluster, shard }); }
+      else if (p.isStartProcess && p.pid && await startProcRunning(p.pid)) { const [cluster, shard] = key.split("::"); out.push({ cluster, shard }); }
     }
     return out;
   }
@@ -662,6 +663,7 @@ interface PanelConfig {
   clientDir: string; // Windows：DST 客户端安装目录（留空=自动检测），用于直接读取客户端模组
   langCheck: boolean;
   steamProxy: string; // Steam Community 代理（国内访问 steamcommunity 会被墙，可填另一台能直连的面板地址）
+  showWinConsole: boolean; // Windows：启动 DST 分片时显示 dontstarve_dedicated_server_nullrenderer 进程窗口
 }
 function loadPanelConfig(): PanelConfig {
   try {
@@ -688,9 +690,10 @@ function loadPanelConfig(): PanelConfig {
       clientDir: typeof c.clientDir === "string" ? c.clientDir : "",
       langCheck: c.langCheck !== false,
       steamProxy: typeof c.steamProxy === "string" && /^https?:\/\/[^\s]+$/.test(c.steamProxy) ? c.steamProxy : "",
+      showWinConsole: c.showWinConsole === true,
     };
   } catch {
-    return { cluster: "MyDediServer", beta: false, betaBranch: "", mode: "online", autorestart: false, announcements: [], announceAuto: { enabled: false, intervalSec: 300, idx: 0, lastSent: 0 }, itemHistory: [], favorites: [], serverDir: readServerDirFromConfig(), clusterRoot: DEFAULT_CLUSTER_ROOT, clusterRoots: [], modsDir: DEFAULT_MODS_DIR, clientDir: "", langCheck: true, steamProxy: "" };
+    return { cluster: "MyDediServer", beta: false, betaBranch: "", mode: "online", autorestart: false, announcements: [], announceAuto: { enabled: false, intervalSec: 300, idx: 0, lastSent: 0 }, itemHistory: [], favorites: [], serverDir: readServerDirFromConfig(), clusterRoot: DEFAULT_CLUSTER_ROOT, clusterRoots: [], modsDir: DEFAULT_MODS_DIR, clientDir: "", langCheck: true, steamProxy: "", showWinConsole: false };
   }
 }
 let panelConfig = loadPanelConfig();
@@ -815,7 +818,10 @@ function screenSessionCandidates(shard: string, otherRunning: boolean): string[]
 async function shardRunning(shard: string): Promise<boolean> {
   if (IS_WIN) {
     const p = winProcs.get(`${panelConfig.cluster}::${shard}`);
-    return !!p && p.exitCode === null;
+    if (!p) return false;
+    // 显示窗口模式（Start-Process）：wmic 实时查进程存活
+    if (p.isStartProcess && p.pid) return await startProcRunning(p.pid);
+    return p.exitCode === null;
   }
   // 优先检查 systemd transient service（cgroup 启动方式）
   const unit = `dst-${shard.toLowerCase()}`;
@@ -833,6 +839,34 @@ async function shardRunning(shard: string): Promise<boolean> {
   // 兼容旧格式（无 -cluster 参数顺序差异）
   const pg2 = await run(["pgrep", "-f", `dontstarve_dedicated_server_nullrenderer.*-shard ${shard}\\b`]);
   return pg2.code === 0 && pg2.out.trim().length > 0;
+}
+// 按命令行 -cluster/-shard 匹配 DST 进程 PID（Start-Process 模式用，供状态检测/停止/注入）
+async function findDstPid(shard: string): Promise<number> {
+  try {
+    // /format:list 输出键值对块（CommandLine=... \n ProcessId=xxx），按 CommandLine 过滤
+    const wm = await run(["wmic", "process", "where", `name='${basename(BIN)}'`, "get", "ProcessId,CommandLine", "/format:list"]);
+    const blocks = wm.out.split(/\r?\n\s*\r?\n/);
+    for (const block of blocks) {
+      if (!block.includes(`-shard ${shard}`) || !block.includes(`-cluster ${panelConfig.cluster}`)) continue;
+      const pm = /ProcessId\s*=\s*(\d+)/.exec(block);
+      if (pm) return Number(pm[1]);
+    }
+  } catch {}
+  // 回退：PowerShell CIM 查询
+  try {
+    const ps = `Get-CimInstance Win32_Process -Filter "Name='${basename(BIN)}'" | Where-Object { $_.CommandLine -match '-shard ${shard}' -and $_.CommandLine -match '-cluster ${panelConfig.cluster}' } | Select-Object -First 1 -ExpandProperty ProcessId`;
+    const r = await run(["powershell", "-NoProfile", "-Command", ps]);
+    const pid = parseInt((r.out.match(/\d+/) || [])[0] || "0", 10);
+    if (pid) return pid;
+  } catch {}
+  return 0;
+}
+// Start-Process 模式：进程是否存活（tasklist 按 PID 实时查）
+async function startProcRunning(pid: number): Promise<boolean> {
+  try {
+    const tl = await run(["tasklist", "/fi", `PID eq ${pid}`]);
+    return tl.out.includes(String(pid)) && !tl.out.includes("INFO: No tasks");
+  } catch { return false; }
 }
 async function startShard(shard: string): Promise<string> {
   // 既有世界文件夹（客户端存档）可能缺 server.ini，启动前自动补全
@@ -853,11 +887,31 @@ async function startShard(shard: string): Promise<string> {
   }
   if (panelConfig.mode === "offline") extraArgs.push("-offline");
   if (IS_WIN) {
-    // Windows：直接拉起进程，stdin 管道用于控制台命令注入
     const key = `${panelConfig.cluster}::${shard}`;
     const old = winProcs.get(key);
-    if (old && old.exitCode === null) return "ok";
+    if (old && (old.exitCode === null || old.isStartProcess)) return "ok";
     try {
+      if (panelConfig.showWinConsole) {
+        // 显示窗口模式：Start-Process 开独立控制台窗口（Bun.spawn 的 windowsHide 对 DST exe 无效，只有 Start-Process 可靠弹窗）
+        const psEsc = (s: string) => "'" + s.replace(/'/g, "''") + "'";
+        const psArgs = ["-cluster", panelConfig.cluster, "-shard", shard, ...extraArgs, "-console"].join(" ");
+        const ps = `Start-Process -FilePath ${psEsc(BIN)} -ArgumentList ${psEsc(psArgs)} -WorkingDirectory ${psEsc(BIN_DIR)}`;
+        await run(["powershell", "-NoProfile", "-Command", ps], { cwd: BIN_DIR });
+        // 按命令行 -cluster/-shard 匹配 DST 进程 PID（供状态检测 / 停止 / 注入）
+        const pid = await findDstPid(shard);
+        if (pid) {
+          const fake = {
+            exitCode: undefined as number | null | undefined, pid, isStartProcess: true,
+            kill: async () => { await run(["taskkill", "/f", "/pid", String(pid)]); },
+            stdin: { write: () => false, flush: () => {} },
+          };
+          (fake as any).exited = { finally: () => Promise.resolve() };
+          winProcs.set(key, fake);
+        }
+        await sleep(2000);
+        return (await shardRunning(shard)) ? "ok" : "启动失败（进程已退出，请检查端口冲突/令牌/模组）";
+      }
+      // 隐藏模式（默认）：Bun.spawn + stdin 管道（命令注入正常）+ 真实 exitCode（状态检测正常）
       const proc = Bun.spawn([BIN, "-cluster", panelConfig.cluster, "-shard", shard, ...extraArgs, "-console"], {
         cwd: BIN_DIR, stdin: "pipe", stdout: "pipe", stderr: "pipe",
       });
@@ -909,12 +963,17 @@ async function stopShard(shard: string): Promise<void> {
   if (IS_WIN) {
     const key = `${panelConfig.cluster}::${shard}`;
     const p = winProcs.get(key);
-    if (p && p.exitCode === null) {
-      try { p.stdin.write('c_shutdown()\n'); p.stdin.flush?.(); } catch {}
-      // 最多等 12 秒优雅退出，超时强杀
-      const deadline = Date.now() + 12000;
-      while (p.exitCode === null && Date.now() < deadline) await sleep(500);
-      if (p.exitCode === null) { try { p.kill(); } catch {} }
+    if (p && (p.exitCode === null || p.isStartProcess)) {
+      if (p.isStartProcess) {
+        // 显示窗口模式：直接 taskkill
+        if (p.pid) { try { await p.kill(); } catch {} }
+      } else {
+        try { p.stdin.write('c_shutdown()\n'); p.stdin.flush?.(); } catch {}
+        // 最多等 12 秒优雅退出，超时强杀
+        const deadline = Date.now() + 12000;
+        while (p.exitCode === null && Date.now() < deadline) await sleep(500);
+        if (p.exitCode === null) { try { await p.kill(); } catch {} }
+      }
     }
     winProcs.delete(key);
     return;
@@ -938,7 +997,21 @@ async function sendLua(shard: string, lua: string): Promise<boolean> {
   const clean = lua.replace(/\r/g, "").replace(/\n+/g, " ").slice(0, 4000);
   if (IS_WIN) {
     const p = winProcs.get(`${panelConfig.cluster}::${shard}`);
-    if (!p || p.exitCode !== null) return false;
+    if (!p) return false;
+    // 显示窗口模式（Start-Process）：SendKeys 模拟按键注入到 DST 控制台窗口（AppActivate 需桌面会话）
+    if (p.isStartProcess) {
+      try {
+        const sendPart = (t: string) => run(["powershell", "-NoProfile", "-Command",
+          `$ws = New-Object -ComObject WScript.Shell; if ($ws.AppActivate(${p.pid})) { Start-Sleep -m 150; $ws.SendKeys('${t.replace(/'/g, "''").replace(/([+^%~(){}[\]]|\{|\})/g, "{$1}")}') }`]);
+        // 分块发送避免命令过长被截断；命令尾部加回车
+        const chunk = 50;
+        for (let i = 0; i < clean.length; i += chunk) {
+          if (!(await sendPart(clean.slice(i, i + chunk))).ok) return false;
+        }
+        return (await sendPart("{ENTER}")).ok;
+      } catch { return false; }
+    }
+    if (p.exitCode !== null) return false;
     try { p.stdin.write(clean + "\n"); p.stdin.flush?.(); return true; } catch { return false; }
   }
   const others = (await runningDstAll()).filter((x) => x.cluster !== panelConfig.cluster);
@@ -4141,6 +4214,7 @@ async function api(req: Request, url: URL): Promise<Response> {
     if (b.clear_token === true) writeFileSync(join(clusterDir(), "cluster_token.txt"), "# 在此粘贴 Klei 服务器令牌\n");
     panelConfig.beta = !!b.beta;
     if (typeof b.betaBranch === "string" && /^[A-Za-z0-9_-]{0,64}$/.test(b.betaBranch)) panelConfig.betaBranch = b.betaBranch;
+    if (typeof b.showWinConsole === "boolean") panelConfig.showWinConsole = b.showWinConsole;
     // 语言设置：写入中文语言包在两个分片的 modoverrides（保持启用状态）。
     // 分片目录可能不存在（刚切换根目录/外部删除），单个失败不影响整体保存
     if (["simplified", "traditional", "auto"].includes(String(b.lang))) {
@@ -5091,6 +5165,7 @@ async function api(req: Request, url: URL): Promise<Response> {
       multiOpenMinMem: MULTI_OPEN_MIN_MEM,
       portConflicts,
       isWin: IS_WIN,
+      showWinConsole: panelConfig.showWinConsole,
     });
   }
   // ===== 端口设置（多开时每个存档端口必须唯一；支持查看 / 手动修改 / 一键自动分配） =====
