@@ -1096,23 +1096,28 @@ function presetOwnerKey(pid: string): string | null {
   return null;
 }
 function syncShardWorldMods(shard: string): void {
-  const global = enabledClusterModOverrides();
+  // 以 Master 的原始 modoverrides 为全局启用清单（保留 enabled 状态），
+  // 不使用 enabledClusterModOverrides（它会把所有条目强制 enabled=true，导致已取消的模组被重新启用）
+  const master = listShards().find((s) => s.isMaster) || listShards()[0];
+  const global = master ? readModOverrides(master.name) : new Map<string, ModOverrideEntry>();
   const cur = readModOverrides(shard);
   const activeOwner = (() => {
     const wg = readLevelOverrides(shard).presets.worldgen;
     return wg && !VANILLA_PRESETS.has(wg) ? presetOwnerKey(wg) : null;
   })();
   const keep = new Set<string>();
-  if (activeOwner) {
+  // 当前预设的 owner 及其依赖：仅在 owner 属于全局启用列表时强制启用，
+  // 避免把用户在 mod设置 主动取消的模组加回（取消勾选 → 刷新后仍在）
+  if (activeOwner && global.get(activeOwner)?.enabled) {
     keep.add(activeOwner);
     for (const dep of modDependencyIds(activeOwner.replace("workshop-", ""))) keep.add(`workshop-${dep}`);
   }
   const out = new Map<string, ModOverrideEntry>();
-  // 当前预设的 owner 及其依赖即使不在 Master 全局列表，也强制启用（已安装的世界模组）
   for (const k of keep) {
     if (!out.has(k)) out.set(k, { enabled: true, options: cur.get(k)?.options || {} });
   }
   for (const [key, e] of global) {
+    if (!e.enabled) continue; // 已取消的模组不写入任何分片
     const id = key.replace("workshop-", "");
     const worldgen = modHasWorldgen(id);
     const enabled = !worldgen || keep.has(key);
@@ -4005,6 +4010,18 @@ async function applyEnabledMods(ids: string[]): Promise<Response> {
     }
   }
   for (const shard of listShards()) syncShardWorldMods(shard.name);
+  // 取消世界模组时：把仍在用该模组预设的分片切回原版，避免模组缺失导致启动崩溃
+  if (omitted.length) {
+    for (const shard of listShards()) {
+      const wg = readLevelOverrides(shard.name).presets.worldgen;
+      if (!wg || VANILLA_PRESETS.has(wg)) continue;
+      const owner = presetOwnerKey(wg);
+      if (owner && !enabledSet.has(owner.replace("workshop-", ""))) {
+        writeLevelOverrides(shard.name, shard.isSurface, {}, shard.isSurface ? "SURVIVAL_TOGETHER" : "DST_CAVE");
+        syncShardWorldMods(shard.name);
+      }
+    }
+  }
   return ok(null, `已保存所选（启用 ${ids.length} 个模组）` + (omitted.length ? `；未勾选的 ${omitted.length} 个模组配置已省略` : "") + (autoApplied.length ? `；已自动应用大型模组预设: ${autoApplied.join("、")}` : ""));
 }
 

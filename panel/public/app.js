@@ -1848,7 +1848,13 @@ async function pageServer() {
     <div class="right card"><h3>黑名单（blocklist.txt）</h3><div id="blockBox"><div class="loading-box"><span class="spinner"></span>正在加载…</div></div></div>
   </div>
   <div class="card"><h3>服务器日志 <span class="hint" id="logHint">（实时刷新）</span></h3>
-    <div class="btn-row"><button class="btn" id="logToggle">暂停刷新</button><span class="hint" id="logCount"></span></div>
+    <div class="btn-row">
+      <button class="btn" id="logToggle">暂停刷新</button>
+      <span class="hint" id="logCount"></span>
+      <span style="flex:1"></span>
+      <button class="btn" id="logHistBtn">历史记录</button>
+      <select id="logHistSel" style="display:none;max-width:280px"></select>
+    </div>
     <div class="logbox" id="serverLog"><div class="loading-box"><span class="spinner"></span>正在加载日志…</div></div>
   </div>`;
   // 页面切换时先清理旧定时器
@@ -2177,6 +2183,36 @@ function startLogPolling() {
       $("#logToggle").textContent = logPolling ? "暂停刷新" : "恢复刷新";
       $("#logHint").textContent = logPolling ? "（实时刷新）" : "（已暂停）";
       if (logPolling) fetchLog();
+    };
+    // ---- 历史记录：选择历史日志查看（每次开服自动归档到 backup/ 下） ----
+    const histBtn = $("#logHistBtn");
+    const histSel = $("#logHistSel");
+    let histLoaded = false;
+    const showHistLog = async (shard, file) => {
+      histLoaded = true;
+      logPolling = false;
+      if (toggle) { toggle.textContent = "恢复刷新"; $("#logHint").textContent = "（已暂停·历史日志）"; }
+      const el = $("#serverLog");
+      if (!el) return;
+      el.innerHTML = '<div class="loading-box"><span class="spinner"></span>正在加载历史日志…</div>';
+      const hj = await apiQuiet(`logs/content?type=server&shard=${encodeURIComponent(shard)}&file=${encodeURIComponent(file)}`);
+      renderLogLines(el, hj?.data?.lines?.join("\n") || "（空）", false);
+      const lc = $("#logCount");
+      if (lc) lc.textContent = `${hj?.data?.lines?.length || 0} 行 · ${hj?.data?.file || file}`;
+    };
+    if (histBtn) histBtn.onclick = async () => {
+      if (histSel.style.display !== "none") { histSel.style.display = "none"; return; }
+      const hj = await apiQuiet("logs/list?type=server");
+      if (!hj?.data?.logs?.length) return toast("暂无历史记录（每次开服自动归档）", true);
+      histSel.innerHTML = '<option value="">选择历史日志…</option>' + hj.data.logs.map((l) => `<option value="${esc(l.shard)}|${esc(l.file)}">${esc(l.shard)} ｜ ${esc(l.label)}</option>`).join("");
+      histSel.style.display = "";
+    };
+    if (histSel) histSel.onchange = async () => {
+      const v = histSel.value;
+      if (!v) return;
+      const [shard, file] = v.split("|");
+      await showHistLog(shard, file);
+      toast(`已加载历史日志 ${file}，点「暂停刷新」旁按钮可恢复实时`);
     };
   });
 }
