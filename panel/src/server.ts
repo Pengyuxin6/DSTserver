@@ -114,6 +114,33 @@ function getCpuUsage(): number {
   } catch { return 0; }
 }
 
+// Linux 下只识别真正的 DST 可执行进程。
+// 不能使用 pgrep -f：systemd 启动外壳和 SCREEN 的命令行也包含完整的 DST 路径，
+// 游戏已经退出后的数秒内仍会造成“分片运行中”的假阳性。
+interface LinuxDstProcess { pid: number; cluster: string; shard: string; }
+function linuxDstProcesses(): LinuxDstProcess[] {
+  if (IS_WIN) return [];
+  const out: LinuxDstProcess[] = [];
+  let entries: string[] = [];
+  try { entries = readdirSync("/proc"); } catch { return out; }
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const argv = readFileSync(`/proc/${entry}/cmdline`)
+        .toString("utf-8").split("\0").filter(Boolean);
+      const exe = basename(argv[0] || "");
+      if (!/^dontstarve_dedicated_server_nullrenderer(?:_x64)?$/.test(exe)) continue;
+      const ci = argv.indexOf("-cluster"), si = argv.indexOf("-shard");
+      const cluster = ci >= 0 ? argv[ci + 1] || "" : "";
+      const shard = si >= 0 ? argv[si + 1] || "" : "";
+      if (cluster && shard) out.push({ pid: Number(entry), cluster, shard });
+    } catch {
+      // 进程可能恰好在扫描期间退出，忽略即可
+    }
+  }
+  return out;
+}
+
 // 获取 DST 服务进程的内存占用（RSS MB）
 function getDstProcessMemory(): number {
   if (IS_WIN) {
@@ -122,17 +149,23 @@ function getDstProcessMemory(): number {
       const pids = [...winProcs.values()].map((p) => p.pid).filter(Boolean);
       if (!pids.length) return 0;
       const r = Bun.spawnSync(["powershell", "-NoProfile", "-Command", `(Get-Process -Id ${pids.join(",")} -ErrorAction SilentlyContinue | Measure-Object WorkingSet64 -Sum).Sum`], { stdout: "pipe" });
-      const bytes = Number(new Response(r.stdout).text().trim()) || 0;
+      const bytes = Number(Buffer.from(r.stdout).toString("utf-8").trim()) || 0;
       return Math.round(bytes / 1048576);
     } catch { return 0; }
   }
   try {
-    const r = Bun.spawnSync(["pgrep", "-f", "dontstarve_dedicated_server_nullrenderer"], { stdout: "pipe" });
     let totalRSS = 0;
-    for (const pid of new Response(r.stdout).text().trim().split("\n").filter(Boolean)) {
-      const smaps = readText(`/proc/${pid}/smaps_rollup`);
-      const rss = /Rss:\s+(\d+)/.exec(smaps);
-      if (rss) totalRSS += Number(rss[1]);
+    for (const p of linuxDstProcesses()) {
+      // smaps_rollup 在部分 hidepid / ptrace 配置下不可读，回退到所有者可读的 status。
+      const smaps = readText(`/proc/${p.pid}/smaps_rollup`);
+      const smapsRss = /^Rss:\s+(\d+)\s+kB/im.exec(smaps);
+      if (smapsRss) {
+        totalRSS += Number(smapsRss[1]);
+        continue;
+      }
+      const status = readText(`/proc/${p.pid}/status`);
+      const statusRss = /^VmRSS:\s+(\d+)\s+kB/im.exec(status);
+      if (statusRss) totalRSS += Number(statusRss[1]);
     }
     return Math.round(totalRSS / 1024); // KB → MB
   } catch {
@@ -168,16 +201,15 @@ async function runningDstAll(): Promise<{ cluster: string; shard: string }[]> {
     }
     return out;
   }
-  try {
-    const r = await run(["pgrep", "-af", "dontstarve_dedicated_server_nullrenderer"]);
-    const out: { cluster: string; shard: string }[] = [];
-    for (const line of r.out.split("\n")) {
-      const c = /-cluster\s+(\S+)/.exec(line);
-      const s = /-shard\s+(\S+)/.exec(line);
-      if (c && s) out.push({ cluster: c[1], shard: s[1] });
-    }
-    return out;
-  } catch { return []; }
+  const seen = new Set<string>();
+  return linuxDstProcesses()
+    .filter(({ cluster, shard }) => {
+      const key = `${cluster}\0${shard}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .map(({ cluster, shard }) => ({ cluster, shard }));
 }
 
 // ---------- Windows 本地模组复用 ----------
@@ -757,6 +789,12 @@ function listShards(): ShardInfo[] {
       });
     }
   }
+  // 主世界必须优先：Linux 的 readdir 顺序不稳定，若按目录顺序启动，Caves 可能先于 Master。
+  // 其余分片按地表优先、名称稳定排序，确保页面展示/启动/自动拉起行为一致。
+  out.sort((a, b) =>
+    Number(b.isMaster) - Number(a.isMaster)
+    || Number(b.isSurface) - Number(a.isSurface)
+    || a.name.localeCompare(b.name, "zh-CN"));
   shardListCache = out;
   return out;
 }
@@ -802,11 +840,6 @@ function clearModCaches() {
 // ---------- 进程控制（Linux: screen/systemd；Windows: 直连进程） ----------
 // Windows 下由本面板直接启动的 DST 进程表："cluster::shard" -> Subprocess
 const winProcs = new Map<string, any>();
-async function screenList(): Promise<string> {
-  if (IS_WIN) return "";
-  const r = await run(["screen", "-ls"]);
-  return r.out;
-}
 // 分片的 screen 会话名：Master/Caves 沿用旧名（兼容历史），其余分片 dst_<名>；
 // 多开（其他存档在运行）时统一加存档前缀，避免会话冲突
 function screenSessionCandidates(shard: string, otherRunning: boolean): string[] {
@@ -823,22 +856,9 @@ async function shardRunning(shard: string): Promise<boolean> {
     if (p.isStartProcess && p.pid) return await startProcRunning(p.pid);
     return p.exitCode === null;
   }
-  // 优先检查 systemd transient service（cgroup 启动方式）
-  const unit = `dst-${shard.toLowerCase()}`;
-  const svc = await run(["systemctl", "is-active", "--quiet", unit]);
-  if (svc.code === 0) return true;
-  // 检查 screen 会话（兼容旧名与多开名）
-  const others = (await runningDstAll()).filter((x) => x.cluster !== panelConfig.cluster);
-  const ls = await screenList();
-  for (const sess of screenSessionCandidates(shard, others.length > 0)) {
-    if (new RegExp(`\\.${sess}\\b`).test(ls)) return true;
-  }
-  // pgrep 跨用户检测（带存档名，避免其他存档的同名分片误判）
-  const pg = await run(["pgrep", "-f", `dontstarve_dedicated_server_nullrenderer.*-cluster ${panelConfig.cluster}.*-shard ${shard}\\b`]);
-  if (pg.code === 0 && pg.out.trim().length > 0) return true;
-  // 兼容旧格式（无 -cluster 参数顺序差异）
-  const pg2 = await run(["pgrep", "-f", `dontstarve_dedicated_server_nullrenderer.*-shard ${shard}\\b`]);
-  return pg2.code === 0 && pg2.out.trim().length > 0;
+  // systemd/screen 只是启动外壳：游戏异常退出后它们可能还会短暂存活，不能代表分片健康。
+  // 直接匹配 /proc 中真实 DST 可执行进程，并同时限定存档与分片，避免多存档同名分片误判。
+  return linuxDstProcesses().some((p) => p.cluster === panelConfig.cluster && p.shard === shard);
 }
 // 按命令行 -cluster/-shard 匹配 DST 进程 PID（Start-Process 模式用，供状态检测/停止/注入）
 async function findDstPid(shard: string): Promise<number> {
@@ -869,6 +889,14 @@ async function startProcRunning(pid: number): Promise<boolean> {
   } catch { return false; }
 }
 async function startShard(shard: string): Promise<string> {
+  if (await shardRunning(shard)) return "ok";
+  // 清理由上次异常退出遗留的同名 transient unit；否则 systemd-run 会报 Unit already exists。
+  if (!IS_WIN) {
+    const unit = `dst-${shard.toLowerCase()}`;
+    const active = await run(["sudo", "-n", "systemctl", "is-active", "--quiet", unit]);
+    if (active.code === 0) await run(["sudo", "-n", "systemctl", "stop", unit]);
+    await run(["sudo", "-n", "systemctl", "reset-failed", unit]);
+  }
   // 既有世界文件夹（客户端存档）可能缺 server.ini，启动前自动补全
   ensureServerIni(shard);
   // 确保已启用模组在服务器 mods/ 目录中有符号链接（避免 Workshop 下载超时导致缺模组）
@@ -955,9 +983,35 @@ async function startShard(shard: string): Promise<string> {
     "sudo", "/usr/local/bin/dst-shard-launch.sh",
     shard, sess, BIN, BIN_DIR, panelConfig.cluster, ...extraArgs,
   ];
-  const r = await run(args, { cwd: BIN_DIR });
-  await sleep(2000);
-  return (await shardRunning(shard)) ? "ok" : (r.out || "启动失败");
+  const launchAt = Date.now();
+  const r = await run(args, { cwd: BIN_DIR, timeoutMs: 15000 });
+  const launcherOut = r.out.trim().replace(/\s+/g, " ").slice(-600);
+  if (r.code !== 0) return `启动器执行失败（退出码 ${r.code}）${launcherOut ? "：" + launcherOut : ""}`;
+
+  // 启动器/systemd/screen 成功并不等于游戏成功；等待真实 DST 进程出现。
+  // 连续存活 2 秒后才确认，过滤缺少动态库、端口冲突等“启动即退出”。
+  const deadline = Date.now() + 12000;
+  let firstSeenAt = 0;
+  while (Date.now() < deadline) {
+    if (await shardRunning(shard)) {
+      if (!firstSeenAt) firstSeenAt = Date.now();
+      if (Date.now() - firstSeenAt >= 2000) return "ok";
+    } else {
+      firstSeenAt = 0;
+    }
+    await sleep(500);
+  }
+
+  // 只读取本次启动后更新的日志，避免把历史错误误报成本次失败原因。
+  const logFile = join(shardDir(shard), "server_log.txt");
+  let log = "";
+  try { if (statSync(logFile).mtimeMs >= launchAt - 1000) log = readText(logFile); } catch {}
+  const errors = log.split(/\r?\n/)
+    .filter((line) => /(?:LUA ERROR|assertion failed|error loading mod|bind.*failed|address already in use|invalid.*token|token.*(?:invalid|failed)|segmentation fault)/i.test(line))
+    .slice(-3)
+    .map((line) => line.trim().slice(0, 240));
+  const detail = errors.length ? `；日志：${errors.join(" | ")}` : (launcherOut ? `；启动器：${launcherOut}` : "；请检查该分片 server_log.txt");
+  return `真实游戏进程未能稳定运行${detail}`;
 }
 async function stopShard(shard: string): Promise<void> {
   if (IS_WIN) {
@@ -978,17 +1032,19 @@ async function stopShard(shard: string): Promise<void> {
     winProcs.delete(key);
     return;
   }
-  // 先停 systemd transient service（清理 cgroup）；面板以 steam 运行，需 sudo 免密（/etc/sudoers.d/dst-panel）
+  // 先停 systemd transient service（会终止该单元的整个 cgroup）；面板以 steam 运行，需 sudo 免密。
   const unit = `dst-${shard.toLowerCase()}`;
   await run(["sudo", "-n", "systemctl", "stop", unit]);
   await run(["sudo", "-n", "systemctl", "reset-failed", unit]);
-  // 再清理 screen（两种命名都尝试）和残留进程（限定本存档）
+  // 再清理 screen（两种命名都尝试）。不使用宽泛 pkill，避免误杀其他存档的同名分片。
   const others = (await runningDstAll()).filter((x) => x.cluster !== panelConfig.cluster);
   for (const sess of screenSessionCandidates(shard, others.length > 0)) {
     await run(["screen", "-S", sess, "-X", "quit"]);
   }
-  await run(["pkill", "-f", `dontstarve_dedicated_server_nullrenderer.*-cluster ${panelConfig.cluster}.*-shard ${shard}\\b`]);
-  await run(["pkill", "-f", `dontstarve_dedicated_server_nullrenderer.*-shard ${shard}\\b`]);
+  // 兼容不是由当前 systemd 单元启动的历史进程：按 /proc 精确匹配 cluster + shard 后终止。
+  for (const p of linuxDstProcesses()) {
+    if (p.cluster === panelConfig.cluster && p.shard === shard) await run(["kill", "-TERM", String(p.pid)]);
+  }
 }
 async function sendLua(shard: string, lua: string): Promise<boolean> {
   if (!(await shardRunning(shard))) return false;
@@ -5339,19 +5395,29 @@ async function api(req: Request, url: URL): Promise<Response> {
     if (!res.ok) return fail(res.msg, 200);
     const msgs: string[] = [];
     let hasFailure = false;
+    let masterFailed = false;
     for (const s of shards) {
       if (await shardRunning(s.name)) { msgs.push(`${s.name}: 已在运行`); continue; }
+      // 副分片依赖主分片。主分片拉起失败时不再继续启动新的副分片，避免只剩“地下运行中”。
+      if (!s.isMaster && masterFailed) {
+        hasFailure = true;
+        msgs.push(`${s.name}: 未启动（主分片启动失败）`);
+        continue;
+      }
       const r = await startShard(s.name);
-      const ok = r === "ok";
-      if (!ok) hasFailure = true;
-      msgs.push(`${s.name}: ${ok ? "已启动" : "启动失败 " + r}`);
+      const started = r === "ok";
+      if (!started) {
+        hasFailure = true;
+        if (s.isMaster) masterFailed = true;
+      }
+      msgs.push(`${s.name}: ${started ? "已启动" : "启动失败 " + r}`);
     }
     let msg = msgs.join("；");
     if (hasFailure) {
-      msg += "。💡 如果反复启动失败，很可能是内存不足。可尝试：1) 关闭其他服务释放内存 2) 减少启用的模组数量 3) 检查 dst.slice 内存限制";
+      msg += "。至少一个分片未成功启动，请按上面的具体错误检查该分片日志、端口、令牌和模组";
     }
     if (startWarnings.length) msg += "。" + startWarnings.join("；");
-    return ok(null, msg);
+    return hasFailure ? fail(msg) : ok(null, msg);
   }
   if (path === "server/stop" && method === "POST") {
     for (const s of listShards()) await stopShard(s.name);
@@ -5364,11 +5430,24 @@ async function api(req: Request, url: URL): Promise<Response> {
     const res = checkResources();
     if (!res.ok) return fail(res.msg, 200);
     const msgs: string[] = [];
+    let hasFailure = false;
+    let masterFailed = false;
     for (const s of shards) {
+      if (!s.isMaster && masterFailed) {
+        hasFailure = true;
+        msgs.push(`${s.name}: 未启动（主分片启动失败）`);
+        continue;
+      }
       const r = await startShard(s.name);
-      msgs.push(`${s.name}: ${r === "ok" ? "已启动" : "启动失败 " + r}`);
+      const started = r === "ok";
+      if (!started) {
+        hasFailure = true;
+        if (s.isMaster) masterFailed = true;
+      }
+      msgs.push(`${s.name}: ${started ? "已启动" : "启动失败 " + r}`);
     }
-    return ok(null, "重启完成：" + msgs.join("；"));
+    const msg = (hasFailure ? "重启未完整成功：" : "重启完成：") + msgs.join("；");
+    return hasFailure ? fail(msg) : ok(null, msg);
   }
   if (path === "server/autorestart" && method === "POST") {
     const b = await bodyJson(req);
@@ -6059,10 +6138,18 @@ setInterval(async () => {
     }
     // 掉线自动拉起（仅在开启自动重启时）
     if (!panelConfig.autorestart) return;
+    let masterFailed = false;
     for (const s of listShards()) {
-      if (!(await shardRunning(s.name))) {
-        console.log(`[自动重启] 分片 ${s.name} 未运行，正在启动...`);
-        await startShard(s.name);
+      if (await shardRunning(s.name)) continue;
+      if (!s.isMaster && masterFailed) {
+        console.error(`[自动重启] 跳过分片 ${s.name}：主分片启动失败`);
+        continue;
+      }
+      console.log(`[自动重启] 分片 ${s.name} 未运行，正在启动...`);
+      const result = await startShard(s.name);
+      if (result !== "ok") {
+        console.error(`[自动重启] 分片 ${s.name} 启动失败：${result}`);
+        if (s.isMaster) masterFailed = true;
       }
     }
   } catch (e) { console.error("[自动重启] 检查失败", e); }
