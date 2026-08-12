@@ -930,7 +930,7 @@ async function loadModWorldgen() {
     const caveLocs = ["volcano", "cave", "under", "caves"];
     const isCaveLoc = (l) => caveLocs.some((c) => (l || "").toLowerCase().includes(c));
     const isModeId = (id) => /(RELAXED|ENDLESS|WILDERNESS|LIGHTS_?OUT|DEFAULT)$/.test(id);
-    const locCn = (l) => ({ shipwrecked: "海难", volcanolevel: "火山", hamlet: "哈姆雷特", porkland: "哈姆雷特(猪镇)", forest: "森林", caves: "洞穴", cave: "洞穴", volcano: "火山" }[l] || l);
+    const locCn = (l) => ({ shipwrecked: "海难", volcanoworld: "火山", volcanolevel: "火山", hamlet: "哈姆雷特", porkland: "哈姆雷特(猪镇)", forest: "森林", caves: "洞穴", cave: "洞穴", volcano: "火山" }[l] || l);
     const locReps = new Map();
     for (const p of m.presets) {
       if (!p.location) continue;
@@ -952,7 +952,7 @@ async function loadModWorldgen() {
     for (const p of locReps.values()) {
       wgOpts.push(`<option value="${p.id}" ${curWg === p.id || (!curWg && p.id === firstPresetId) ? "selected" : ""}>${locCn(p.location)}（${p.id}）</option>`);
     }
-    const modePresets = m.presets.filter((p) => isModeId(p.id) && p.id !== curWg);
+    const modePresets = m.presets.filter((p) => isModeId(p.id) && p.location && isCaveLoc(p.location) === !isSurfaceShard);
     return `
   <div class="card">
     <h3>模组世界设置：${esc(m.name)} <span class="hint">${esc(m.id)}</span>
