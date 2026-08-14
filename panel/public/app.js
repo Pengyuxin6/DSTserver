@@ -930,7 +930,7 @@ async function loadModWorldgen() {
     const caveLocs = ["volcano", "cave", "under", "caves"];
     const isCaveLoc = (l) => caveLocs.some((c) => (l || "").toLowerCase().includes(c));
     const isModeId = (id) => /(RELAXED|ENDLESS|WILDERNESS|LIGHTS_?OUT|DEFAULT)$/.test(id);
-    const locCn = (l) => ({ shipwrecked: "海难", volcanolevel: "火山", hamlet: "哈姆雷特", porkland: "哈姆雷特(猪镇)", forest: "森林", caves: "洞穴", cave: "洞穴", volcano: "火山" }[l] || l);
+    const locCn = (l) => ({ shipwrecked: "海难", volcanoworld: "火山", volcanolevel: "火山", hamlet: "哈姆雷特", porkland: "哈姆雷特(猪镇)", forest: "森林", caves: "洞穴", cave: "洞穴", volcano: "火山" }[l] || l);
     const locReps = new Map();
     for (const p of m.presets) {
       if (!p.location) continue;
@@ -952,7 +952,7 @@ async function loadModWorldgen() {
     for (const p of locReps.values()) {
       wgOpts.push(`<option value="${p.id}" ${curWg === p.id || (!curWg && p.id === firstPresetId) ? "selected" : ""}>${locCn(p.location)}（${p.id}）</option>`);
     }
-    const modePresets = m.presets.filter((p) => isModeId(p.id) && p.id !== curWg);
+    const modePresets = m.presets.filter((p) => isModeId(p.id) && p.location && isCaveLoc(p.location) === !isSurfaceShard);
     return `
   <div class="card">
     <h3>模组世界设置：${esc(m.name)} <span class="hint">${esc(m.id)}</span>
@@ -1938,7 +1938,22 @@ async function loadServerStatus() {
       <label><input type="radio" name="mode" value="offline" ${d.mode === "offline" ? "checked" : ""}> 离线模式</label>
       <span class="hint">切换后需重启服务器生效</span>
     </div>`;
-  const act = async (path, body = {}) => { const r = await api(path, { method: "POST", body }); toast(r.msg); setTimeout(pageServer, 1500); };
+  const act = async (path, body = {}) => {
+    // 启停请求可能需要数秒验证真实游戏进程；期间锁定控制按钮，防止重复点击并发拉起分片。
+    const buttons = ["start", "stop", "restart", "pauseBtn"].map((id) => $("#" + id)).filter(Boolean);
+    buttons.forEach((btn) => { btn.disabled = true; });
+    try {
+      const r = await api(path, { method: "POST", body });
+      toast(r.msg);
+      setTimeout(pageServer, 1000);
+      return true;
+    } catch (e) {
+      // api() 已将后端的具体失败原因显示为红色提示；延迟刷新，避免立即覆盖较长的错误提示。
+      if (!e?.handled) toast(e?.message || "操作失败", true);
+      setTimeout(pageServer, 3300);
+      return false;
+    }
+  };
   // 多开解锁：用户确认内存/端口条件满足后，解除控制置灰
   const unlockBtn = $("#multiOpenAllow");
   if (unlockBtn) unlockBtn.onclick = () => {
@@ -1972,7 +1987,7 @@ async function loadServerStatus() {
         }
       }
     }
-    act("server/start");
+    await act("server/start");
   };
   const stopBtn = $("#stop");
   if (stopBtn) stopBtn.onclick = async () => { if (await dlgConfirm("确定关闭服务器？在线玩家将被踢出。", { danger: true })) act("server/stop"); };

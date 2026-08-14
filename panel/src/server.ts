@@ -114,6 +114,33 @@ function getCpuUsage(): number {
   } catch { return 0; }
 }
 
+// Linux 下只识别真正的 DST 可执行进程。
+// 不能使用 pgrep -f：systemd 启动外壳和 SCREEN 的命令行也包含完整的 DST 路径，
+// 游戏已经退出后的数秒内仍会造成“分片运行中”的假阳性。
+interface LinuxDstProcess { pid: number; cluster: string; shard: string; }
+function linuxDstProcesses(): LinuxDstProcess[] {
+  if (IS_WIN) return [];
+  const out: LinuxDstProcess[] = [];
+  let entries: string[] = [];
+  try { entries = readdirSync("/proc"); } catch { return out; }
+  for (const entry of entries) {
+    if (!/^\d+$/.test(entry)) continue;
+    try {
+      const argv = readFileSync(`/proc/${entry}/cmdline`)
+        .toString("utf-8").split("\0").filter(Boolean);
+      const exe = basename(argv[0] || "");
+      if (!/^dontstarve_dedicated_server_nullrenderer(?:_x64)?$/.test(exe)) continue;
+      const ci = argv.indexOf("-cluster"), si = argv.indexOf("-shard");
+      const cluster = ci >= 0 ? argv[ci + 1] || "" : "";
+      const shard = si >= 0 ? argv[si + 1] || "" : "";
+      if (cluster && shard) out.push({ pid: Number(entry), cluster, shard });
+    } catch {
+      // 进程可能恰好在扫描期间退出，忽略即可
+    }
+  }
+  return out;
+}
+
 // 获取 DST 服务进程的内存占用（RSS MB）
 function getDstProcessMemory(): number {
   if (IS_WIN) {
@@ -122,17 +149,23 @@ function getDstProcessMemory(): number {
       const pids = [...winProcs.values()].map((p) => p.pid).filter(Boolean);
       if (!pids.length) return 0;
       const r = Bun.spawnSync(["powershell", "-NoProfile", "-Command", `(Get-Process -Id ${pids.join(",")} -ErrorAction SilentlyContinue | Measure-Object WorkingSet64 -Sum).Sum`], { stdout: "pipe" });
-      const bytes = Number(new Response(r.stdout).text().trim()) || 0;
+      const bytes = Number(Buffer.from(r.stdout).toString("utf-8").trim()) || 0;
       return Math.round(bytes / 1048576);
     } catch { return 0; }
   }
   try {
-    const r = Bun.spawnSync(["pgrep", "-f", "dontstarve_dedicated_server_nullrenderer"], { stdout: "pipe" });
     let totalRSS = 0;
-    for (const pid of new Response(r.stdout).text().trim().split("\n").filter(Boolean)) {
-      const smaps = readText(`/proc/${pid}/smaps_rollup`);
-      const rss = /Rss:\s+(\d+)/.exec(smaps);
-      if (rss) totalRSS += Number(rss[1]);
+    for (const p of linuxDstProcesses()) {
+      // smaps_rollup 在部分 hidepid / ptrace 配置下不可读，回退到所有者可读的 status。
+      const smaps = readText(`/proc/${p.pid}/smaps_rollup`);
+      const smapsRss = /^Rss:\s+(\d+)\s+kB/im.exec(smaps);
+      if (smapsRss) {
+        totalRSS += Number(smapsRss[1]);
+        continue;
+      }
+      const status = readText(`/proc/${p.pid}/status`);
+      const statusRss = /^VmRSS:\s+(\d+)\s+kB/im.exec(status);
+      if (statusRss) totalRSS += Number(statusRss[1]);
     }
     return Math.round(totalRSS / 1024); // KB → MB
   } catch {
@@ -168,16 +201,15 @@ async function runningDstAll(): Promise<{ cluster: string; shard: string }[]> {
     }
     return out;
   }
-  try {
-    const r = await run(["pgrep", "-af", "dontstarve_dedicated_server_nullrenderer"]);
-    const out: { cluster: string; shard: string }[] = [];
-    for (const line of r.out.split("\n")) {
-      const c = /-cluster\s+(\S+)/.exec(line);
-      const s = /-shard\s+(\S+)/.exec(line);
-      if (c && s) out.push({ cluster: c[1], shard: s[1] });
-    }
-    return out;
-  } catch { return []; }
+  const seen = new Set<string>();
+  return linuxDstProcesses()
+    .filter(({ cluster, shard }) => {
+      const key = `${cluster}\0${shard}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .map(({ cluster, shard }) => ({ cluster, shard }));
 }
 
 // ---------- Windows 本地模组复用 ----------
@@ -757,6 +789,12 @@ function listShards(): ShardInfo[] {
       });
     }
   }
+  // 主世界必须优先：Linux 的 readdir 顺序不稳定，若按目录顺序启动，Caves 可能先于 Master。
+  // 其余分片按地表优先、名称稳定排序，确保页面展示/启动/自动拉起行为一致。
+  out.sort((a, b) =>
+    Number(b.isMaster) - Number(a.isMaster)
+    || Number(b.isSurface) - Number(a.isSurface)
+    || a.name.localeCompare(b.name, "zh-CN"));
   shardListCache = out;
   return out;
 }
@@ -790,6 +828,9 @@ function clearModCaches() {
   modStrCache.clear();
   modLuaFilesCache.clear();
   modTransCache.clear();
+  chsNamesMap = null;
+  chsTextMap = null;
+  chsMsgMap = null;
   modWorldgenDataCache.clear();
   modWgDirCache.clear();
   modIconPngCache.clear();
@@ -802,11 +843,6 @@ function clearModCaches() {
 // ---------- 进程控制（Linux: screen/systemd；Windows: 直连进程） ----------
 // Windows 下由本面板直接启动的 DST 进程表："cluster::shard" -> Subprocess
 const winProcs = new Map<string, any>();
-async function screenList(): Promise<string> {
-  if (IS_WIN) return "";
-  const r = await run(["screen", "-ls"]);
-  return r.out;
-}
 // 分片的 screen 会话名：Master/Caves 沿用旧名（兼容历史），其余分片 dst_<名>；
 // 多开（其他存档在运行）时统一加存档前缀，避免会话冲突
 function screenSessionCandidates(shard: string, otherRunning: boolean): string[] {
@@ -823,22 +859,9 @@ async function shardRunning(shard: string): Promise<boolean> {
     if (p.isStartProcess && p.pid) return await startProcRunning(p.pid);
     return p.exitCode === null;
   }
-  // 优先检查 systemd transient service（cgroup 启动方式）
-  const unit = `dst-${shard.toLowerCase()}`;
-  const svc = await run(["systemctl", "is-active", "--quiet", unit]);
-  if (svc.code === 0) return true;
-  // 检查 screen 会话（兼容旧名与多开名）
-  const others = (await runningDstAll()).filter((x) => x.cluster !== panelConfig.cluster);
-  const ls = await screenList();
-  for (const sess of screenSessionCandidates(shard, others.length > 0)) {
-    if (new RegExp(`\\.${sess}\\b`).test(ls)) return true;
-  }
-  // pgrep 跨用户检测（带存档名，避免其他存档的同名分片误判）
-  const pg = await run(["pgrep", "-f", `dontstarve_dedicated_server_nullrenderer.*-cluster ${panelConfig.cluster}.*-shard ${shard}\\b`]);
-  if (pg.code === 0 && pg.out.trim().length > 0) return true;
-  // 兼容旧格式（无 -cluster 参数顺序差异）
-  const pg2 = await run(["pgrep", "-f", `dontstarve_dedicated_server_nullrenderer.*-shard ${shard}\\b`]);
-  return pg2.code === 0 && pg2.out.trim().length > 0;
+  // systemd/screen 只是启动外壳：游戏异常退出后它们可能还会短暂存活，不能代表分片健康。
+  // 直接匹配 /proc 中真实 DST 可执行进程，并同时限定存档与分片，避免多存档同名分片误判。
+  return linuxDstProcesses().some((p) => p.cluster === panelConfig.cluster && p.shard === shard);
 }
 // 按命令行 -cluster/-shard 匹配 DST 进程 PID（Start-Process 模式用，供状态检测/停止/注入）
 async function findDstPid(shard: string): Promise<number> {
@@ -869,6 +892,14 @@ async function startProcRunning(pid: number): Promise<boolean> {
   } catch { return false; }
 }
 async function startShard(shard: string): Promise<string> {
+  if (await shardRunning(shard)) return "ok";
+  // 清理由上次异常退出遗留的同名 transient unit；否则 systemd-run 会报 Unit already exists。
+  if (!IS_WIN) {
+    const unit = `dst-${shard.toLowerCase()}`;
+    const active = await run(["sudo", "-n", "systemctl", "is-active", "--quiet", unit]);
+    if (active.code === 0) await run(["sudo", "-n", "systemctl", "stop", unit]);
+    await run(["sudo", "-n", "systemctl", "reset-failed", unit]);
+  }
   // 既有世界文件夹（客户端存档）可能缺 server.ini，启动前自动补全
   ensureServerIni(shard);
   // 确保已启用模组在服务器 mods/ 目录中有符号链接（避免 Workshop 下载超时导致缺模组）
@@ -955,9 +986,35 @@ async function startShard(shard: string): Promise<string> {
     "sudo", "/usr/local/bin/dst-shard-launch.sh",
     shard, sess, BIN, BIN_DIR, panelConfig.cluster, ...extraArgs,
   ];
-  const r = await run(args, { cwd: BIN_DIR });
-  await sleep(2000);
-  return (await shardRunning(shard)) ? "ok" : (r.out || "启动失败");
+  const launchAt = Date.now();
+  const r = await run(args, { cwd: BIN_DIR, timeoutMs: 15000 });
+  const launcherOut = r.out.trim().replace(/\s+/g, " ").slice(-600);
+  if (r.code !== 0) return `启动器执行失败（退出码 ${r.code}）${launcherOut ? "：" + launcherOut : ""}`;
+
+  // 启动器/systemd/screen 成功并不等于游戏成功；等待真实 DST 进程出现。
+  // 连续存活 2 秒后才确认，过滤缺少动态库、端口冲突等“启动即退出”。
+  const deadline = Date.now() + 12000;
+  let firstSeenAt = 0;
+  while (Date.now() < deadline) {
+    if (await shardRunning(shard)) {
+      if (!firstSeenAt) firstSeenAt = Date.now();
+      if (Date.now() - firstSeenAt >= 2000) return "ok";
+    } else {
+      firstSeenAt = 0;
+    }
+    await sleep(500);
+  }
+
+  // 只读取本次启动后更新的日志，避免把历史错误误报成本次失败原因。
+  const logFile = join(shardDir(shard), "server_log.txt");
+  let log = "";
+  try { if (statSync(logFile).mtimeMs >= launchAt - 1000) log = readText(logFile); } catch {}
+  const errors = log.split(/\r?\n/)
+    .filter((line) => /(?:LUA ERROR|assertion failed|error loading mod|bind.*failed|address already in use|invalid.*token|token.*(?:invalid|failed)|segmentation fault)/i.test(line))
+    .slice(-3)
+    .map((line) => line.trim().slice(0, 240));
+  const detail = errors.length ? `；日志：${errors.join(" | ")}` : (launcherOut ? `；启动器：${launcherOut}` : "；请检查该分片 server_log.txt");
+  return `真实游戏进程未能稳定运行${detail}`;
 }
 async function stopShard(shard: string): Promise<void> {
   if (IS_WIN) {
@@ -978,17 +1035,19 @@ async function stopShard(shard: string): Promise<void> {
     winProcs.delete(key);
     return;
   }
-  // 先停 systemd transient service（清理 cgroup）；面板以 steam 运行，需 sudo 免密（/etc/sudoers.d/dst-panel）
+  // 先停 systemd transient service（会终止该单元的整个 cgroup）；面板以 steam 运行，需 sudo 免密。
   const unit = `dst-${shard.toLowerCase()}`;
   await run(["sudo", "-n", "systemctl", "stop", unit]);
   await run(["sudo", "-n", "systemctl", "reset-failed", unit]);
-  // 再清理 screen（两种命名都尝试）和残留进程（限定本存档）
+  // 再清理 screen（两种命名都尝试）。不使用宽泛 pkill，避免误杀其他存档的同名分片。
   const others = (await runningDstAll()).filter((x) => x.cluster !== panelConfig.cluster);
   for (const sess of screenSessionCandidates(shard, others.length > 0)) {
     await run(["screen", "-S", sess, "-X", "quit"]);
   }
-  await run(["pkill", "-f", `dontstarve_dedicated_server_nullrenderer.*-cluster ${panelConfig.cluster}.*-shard ${shard}\\b`]);
-  await run(["pkill", "-f", `dontstarve_dedicated_server_nullrenderer.*-shard ${shard}\\b`]);
+  // 兼容不是由当前 systemd 单元启动的历史进程：按 /proc 精确匹配 cluster + shard 后终止。
+  for (const p of linuxDstProcesses()) {
+    if (p.cluster === panelConfig.cluster && p.shard === shard) await run(["kill", "-TERM", String(p.pid)]);
+  }
 }
 async function sendLua(shard: string, lua: string): Promise<boolean> {
   if (!(await shardRunning(shard))) return false;
@@ -1072,7 +1131,12 @@ function writeLevelOverrides(shard: string, isSurface: boolean, overrides: Recor
   let st = existing.settings || wg;
   if (typeof preset === "string") { wg = preset; st = preset; }
   else if (preset) {
-    if (preset.worldgen) wg = preset.worldgen;
+    if (preset.worldgen) {
+      wg = preset.worldgen;
+      // 新选世界类型时若 settings 仍是另一 location 的旧预设，先与 worldgen 对齐。
+      // 后续“应用模式”会再单独替换 settings_preset。
+      if (!preset.settings && (!existing.worldgen || VANILLA_PRESETS.has(existing.settings))) st = preset.worldgen;
+    }
     if (preset.settings) st = preset.settings;
   }
   const lines = Object.entries(overrides)
@@ -1152,7 +1216,7 @@ function modDependencyIds(id: string): string[] {
   if (!modDir) return [];
   const text = readText(join(modDir, "modinfo.lua"));
   const ids: string[] = [];
-  for (const m of text.matchAll(/workshop\s*=\s*"workshop-(\d+)"/g)) {
+  for (const m of text.matchAll(/\bworkshop\s*=\s*["'](?:workshop-)?(\d+)["']/g)) {
     if (!ids.includes(m[1])) ids.push(m[1]);
   }
   return ids;
@@ -1564,7 +1628,7 @@ function parseModInfo(id: string, fileOverride?: string): ModInfo | null {
   if (!file) return null;
   const text = readText(file);
   const info: ModInfo = {
-    name: luaStrField(text, "name"),
+    name: luaLabelField(text, "name"),
     version: luaStrField(text, "version"),
     clientOnly: luaBoolField(text, "client_only_mod") === true,
     allClientsRequire: luaBoolField(text, "all_clients_require_mod") === true,
@@ -2124,8 +2188,29 @@ function modItems(id: string): { name: string; prefab: string; cat: string }[] {
   return out;
 }
 
-interface ModWorldgenOption { key: string; label: string; group: string; world: string; default: string; values: { v: string; label: string }[]; img?: string; atlas?: string; modConfig?: boolean }
-interface ModWorldgenPreset { id: string; name: string; location: string; overrides: Record<string, string> }
+interface ModWorldgenOption {
+  key: string;
+  label: string;
+  group: string;
+  world: string;
+  worlds?: string[];
+  category?: "worldgen" | "settings";
+  default: string;
+  values: { v: string; label: string }[];
+  img?: string;
+  atlas?: string;
+  modConfig?: boolean;
+  masterControlled?: boolean;
+  order?: number;
+}
+interface ModWorldgenPreset {
+  id: string;
+  name: string;
+  location: string;
+  overrides: Record<string, string>;
+  worldgenOverrides?: Record<string, string>;
+  settingsOverrides?: Record<string, string>;
+}
 
 let vanillaStringsMap: Map<string, string> | null = null;
 function vanillaStrings(): Map<string, string> {
@@ -2168,7 +2253,8 @@ function chsNames(): Map<string, string> {
       const files: string[] = [join(dir, "DST_chs.po")];
       try {
         for (const f of readdirSync(join(dir, "languages"))) {
-          if (/chinese_s|_chs|_cn|zh_/i.test(f) && f.endsWith(".po")) files.push(join(dir, "languages", f));
+          // IA Core 的简中语言文件名为 ia_sc.po（sc = Simplified Chinese）。
+          if (/chinese_s|_chs|_cn|zh_|(?:^|_)sc\.po$/i.test(f) && f.endsWith(".po")) files.push(join(dir, "languages", f));
         }
       } catch {}
       try {
@@ -2246,58 +2332,68 @@ function zhText(en: string, modId?: string): string {
 const modTransCache = new Map<string, { po: Map<string, string>; strings: Map<string, string> }>();
 function modTrans(id: string): { po: Map<string, string>; strings: Map<string, string> } {
   if (modTransCache.has(id)) return modTransCache.get(id)!;
-  const dir = ugcSharedDir();
+  const root = ugcSharedDir();
   const po = new Map<string, string>();
   const strings = new Map<string, string>();
-  // 加载模组 .po 文件
-  const poFiles = [
-    join(dir, id, "scripts", "languages", "pl_chinese_s.po"),
-    join(dir, id, "DST_chs.po"),
-    join(dir, id, "chinese_s.po"),
-  ];
-  for (const pf of poFiles) {
-    if (!existsSync(pf)) continue;
-    const text = readText(pf);
-    const unq = (s: string) => s.split("\n").map((l) => { const m = /^\s*"((?:[^"\\]|\\.)*)"\s*$/.exec(l); return m ? m[1] : ""; }).join("").replace(/\\n/g, " ").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
-    const re = /msgid\s+((?:"(?:[^"\\]|\\.)*"\s*\n?\s*)+)\nmsgstr\s+((?:"(?:[^"\\]|\\.)*"\s*\n?\s*)+)/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(text))) {
-      const msgid = unq(m[1]), msgstr = unq(m[2]);
-      if (msgid && msgstr && !po.has(msgid)) po.set(msgid, msgstr);
-    }
-    break;
-  }
-  // 加载模组 strings/common.lua（英文 STRINGS 值）
-  const strFile = join(dir, id, "strings", "common.lua");
-  if (existsSync(strFile)) {
-    const text = readText(strFile);
-    // 提取 KEY = "VALUE" 对（只取叶子节点的字符串值）
-    const re = /([A-Z][A-Z0-9_]*)\s*=\s*"((?:[^"\\]|\\.)*)"/g;
-    let m: RegExpExecArray | null;
-    while ((m = re.exec(text))) {
-      if (!strings.has(m[1])) strings.set(m[1], m[2].replace(/\\"/g, '"').replace(/\\\\/g, "\\"));
-    }
-  }
-  // 加载模组 translations/ 目录的中文翻译文件（STRINGS.X.Y 覆盖，如 scripts/translations/zh.lua）
-  // 俄语等其他语言的翻译文件不加载（避免把非中文文本带进翻译链）
-  for (const trDir of [join(dir, id, "scripts", "translations"), join(dir, id, "translations")]) {
-    try {
-      if (!existsSync(trDir)) continue;
-      for (const f of readdirSync(trDir)) {
-        if (!f.endsWith(".lua") || !/zh|chs|schinese|simplified/i.test(f)) continue;
-        const text = readText(join(trDir, f));
-        if (!text) continue;
-        const re2 = /([A-Z][A-Z0-9_]+(?:\.[A-Z][A-Z0-9_]*)*)\s*=\s*"((?:[^"\\]|\\.)*)"/g;
-        let m2: RegExpExecArray | null;
-        while ((m2 = re2.exec(text))) {
-          const full = m2[1];
-          const last = full.split(".").pop()!;
-          const val = m2[2].replace(/\\"/g, '"').replace(/\\\\/g, "\\");
-          if (!strings.has(last)) strings.set(last, val);
-          if (!strings.has(full)) strings.set(full, val);
+  // 海难的 UI STRINGS 与 ia_sc.po 位于 IA Core 依赖中，一并读取依赖的语言资源。
+  const sourceIds = [id, ...modDependencyIds(id)];
+  // 兼容不带 workshop 元数据的本地副本：IA 的前端字符串固定由 IA Core 提供。
+  if (id === "1467214795" && !sourceIds.includes("3435352667")) sourceIds.push("3435352667");
+  for (const sourceId of sourceIds) {
+    const dir = join(root, sourceId);
+    const poFiles = [
+      join(dir, "scripts", "languages", "pl_chinese_s.po"),
+      join(dir, "DST_chs.po"),
+      join(dir, "chinese_s.po"),
+    ];
+    for (const langDir of [join(dir, "languages"), join(dir, "scripts", "languages")]) {
+      try {
+        for (const f of readdirSync(langDir)) {
+          if (/chinese_s|_chs|_cn|zh_|(?:^|_)sc\.po$/i.test(f) && f.endsWith(".po")) poFiles.push(join(langDir, f));
         }
+      } catch {}
+    }
+    for (const pf of [...new Set(poFiles)]) {
+      if (!existsSync(pf)) continue;
+      const text = readText(pf);
+      const unq = (s: string) => s.split("\n").map((l) => { const m = /^\s*"((?:[^"\\]|\\.)*)"\s*$/.exec(l); return m ? m[1] : ""; }).join("").replace(/\\n/g, " ").replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+      const re = /msgid\s+((?:"(?:[^"\\]|\\.)*"\s*\n?\s*)+)\nmsgstr\s+((?:"(?:[^"\\]|\\.)*"\s*\n?\s*)+)/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text))) {
+        const msgid = unq(m[1]), msgstr = unq(m[2]);
+        if (msgid && msgstr && !po.has(msgid)) po.set(msgid, msgstr);
       }
-    } catch {}
+    }
+    // 加载模组 strings/common.lua（英文 STRINGS 值）。
+    const strFile = join(dir, "strings", "common.lua");
+    if (existsSync(strFile)) {
+      const text = readText(strFile);
+      const re = /([A-Z][A-Z0-9_]*)\s*=\s*"((?:[^"\\]|\\.)*)"/g;
+      let m: RegExpExecArray | null;
+      while ((m = re.exec(text))) {
+        if (!strings.has(m[1])) strings.set(m[1], m[2].replace(/\\"/g, '"').replace(/\\\\/g, "\\"));
+      }
+    }
+    // 加载模组 translations/ 目录的中文翻译文件（STRINGS.X.Y 覆盖，如 scripts/translations/zh.lua）。
+    for (const trDir of [join(dir, "scripts", "translations"), join(dir, "translations")]) {
+      try {
+        if (!existsSync(trDir)) continue;
+        for (const f of readdirSync(trDir)) {
+          if (!f.endsWith(".lua") || !/zh|chs|schinese|simplified/i.test(f)) continue;
+          const text = readText(join(trDir, f));
+          if (!text) continue;
+          const re2 = /([A-Z][A-Z0-9_]+(?:\.[A-Z][A-Z0-9_]*)*)\s*=\s*"((?:[^"\\]|\\.)*)"/g;
+          let m2: RegExpExecArray | null;
+          while ((m2 = re2.exec(text))) {
+            const full = m2[1];
+            const last = full.split(".").pop()!;
+            const val = m2[2].replace(/\\"/g, '"').replace(/\\\\/g, "\\");
+            if (!strings.has(last)) strings.set(last, val);
+            if (!strings.has(full)) strings.set(full, val);
+          }
+        }
+      } catch {}
+    }
   }
   const result = { po, strings };
   modTransCache.set(id, result);
@@ -2641,10 +2737,14 @@ function zhNameForKey(key: string, modId?: string): string {
   return "";
 }
 function resolveStringsRef(expr: string, modId?: string): string {
-  const m = /STRINGS(?:\.[A-Za-z_]\w*)+\.([A-Z][A-Z0-9_]*)$/.exec((expr || "").trim());
+  const fullPath = (/STRINGS(?:\.[A-Za-z_]\w*)+/.exec((expr || "").trim()) || [])[0] || "";
+  const m = /\.([A-Z][A-Z0-9_]*)$/.exec(fullPath);
   if (!m) return "";
   const lastKey = m[1];
-  // 先查模组自己的翻译
+  // 完整 msgctxt 最准确，可避免不同 STRINGS 分支下同名叶子键互相覆盖。
+  const contextual = chsMsg(fullPath);
+  if (contextual) return contextual;
+  // 先查模组自己及其依赖的翻译。
   if (modId) {
     const mt = modTrans(modId);
     const modEn = mt.strings.get(lastKey);
@@ -2765,18 +2865,21 @@ const STD_DESC: Record<string, { v: string; label: string }[]> = {
   frequency_descriptions: [["never", "无"], ["rare", "很少"], ["default", "默认"], ["often", "较多"], ["always", "大量"]].map(([v, label]) => ({ v, label })),
   worldgen_frequency_descriptions: [["never", "无"], ["rare", "很少"], ["uncommon", "较少"], ["default", "默认"], ["often", "较多"], ["mostly", "很多"], ["always", "大量"], ["insane", "疯狂"]].map(([v, label]) => ({ v, label })),
   speed_descriptions: [["never", "从不"], ["veryslow", "很慢"], ["slow", "慢"], ["default", "默认"], ["fast", "快"], ["veryfast", "很快"]].map(([v, label]) => ({ v, label })),
-  size_descriptions: [["small", "小"], ["medium", "中（默认）"], ["large", "大"], ["huge", "巨大"]].map(([v, label]) => ({ v, label })),
+  // Klei 当前 customize.lua：small / medium / default / huge（default 才是“大”）
+  size_descriptions: [["small", "小"], ["medium", "中"], ["default", "大（默认）"], ["huge", "巨大"]].map(([v, label]) => ({ v, label })),
   season_length_descriptions: [["noseason", "无"], ["veryshortseason", "极短"], ["shortseason", "短"], ["default", "默认"], ["longseason", "长"], ["verylongseason", "极长"], ["random", "随机"]].map(([v, label]) => ({ v, label })),
   day_descriptions: [["onlyday", "仅白天"], ["onlydusk", "仅黄昏"], ["onlynight", "仅黑夜"], ["default", "默认"], ["longday", "长白天"], ["longdusk", "长黄昏"], ["longnight", "长黑夜"], ["noday", "无白天"], ["nodusk", "无黄昏"], ["nonight", "无黑夜"]].map(([v, label]) => ({ v, label })),
-  yesno_descriptions: [["no", "否"], ["yes", "是"]].map(([v, label]) => ({ v, label })),
-  enableddisabled_descriptions: [["disabled", "禁用"], ["enabled", "启用"]].map(([v, label]) => ({ v, label })),
+  // 名字沿用 Klei Lua，但数据值并非 no/yes、disabled/enabled。
+  yesno_descriptions: [["never", "无"], ["default", "默认"]].map(([v, label]) => ({ v, label })),
+  enableddisabled_descriptions: [["none", "禁用"], ["always", "启用"]].map(([v, label]) => ({ v, label })),
 };
 // atlas 名称归一化到 icons/<目录名>
 function normalizeAtlas(ref: string): string {
   if (!ref) return "";
   if (/ATLAS_SW2/i.test(ref)) return "customization_shipwrecked2";
   if (/ATLAS_SW/i.test(ref)) return "customization_shipwrecked";
-  const m = /images\/([^"/]+)\.xml/.exec(ref);
+  // 支持 images/worldgen_customization.xml 及 images/hud/customization_core.xml 等嵌套路径。
+  const m = /images\/(?:[^"/]+\/)*([^"/]+)\.xml/i.exec(ref);
   if (m) return m[1];
   return "";
 }
@@ -2784,16 +2887,30 @@ function parseModCustomizeFile(text: string, modId = ""): ModWorldgenOption[] {
   text = stripLuaComments(text);
   // 解析 local 变量定义（如 local sw_atlas = "images/hud/customization_shipwrecked.xml"）
   const luaLocals: Record<string, string> = {};
-  for (const lm of text.matchAll(/local\s+([A-Za-z_]\w*)\s*=\s*"([^"]+)"/g)) {
+
+  for (const lm of text.matchAll(/local\s+([A-Za-z_]\w*)\s*=\s*["']([^"']+)["']/g)) {
     luaLocals[lm[1]] = lm[2];
   }
-  // normalizeAtlas 的增强版：支持变量引用解析
+  // 解析简单字符串数组；Island Adventures 用变量数组声明选项适用的世界。
+  const luaArrays: Record<string, string[]> = {};
+  const arrayRe = /local\s+([A-Za-z_]\w*)\s*=\s*\{/g;
+  let arrayM: RegExpExecArray | null;
+  while ((arrayM = arrayRe.exec(text))) {
+    const end = braceMatch(text, arrayRe.lastIndex - 1);
+    if (end === -1) continue;
+    const body = text.slice(arrayRe.lastIndex, end);
+    // 只收纯数组，避免把 ia_*_customize_table 之类的大表误当成世界列表。
+    if (!/(?:\[?\s*[A-Za-z_]\w*\s*\]?\s*=)/.test(body)) {
+      const values = [...body.matchAll(/["']([^"']+)["']/g)].map((m) => m[1]);
+      if (values.length) luaArrays[arrayM[1]] = values;
+    }
+    arrayRe.lastIndex = end;
+  }
+  // normalizeAtlas 的增强版：支持变量引用解析。
   const resolveAtlas = (ref: string): string => {
     if (!ref) return "";
-    // 直接是路径字符串
     const na = normalizeAtlas(ref);
     if (na) return na;
-    // 变量引用 → 从 luaLocals 查找
     if (luaLocals[ref]) return normalizeAtlas(luaLocals[ref]);
     return "";
   };
@@ -2889,18 +3006,62 @@ function parseModCustomizeFile(text: string, modId = ""): ModWorldgenOption[] {
     }
     return items;
   };
-  // 通用：解析单个 item block 并 push 到 options
-  const pushItem = (key: string, block: string, groupLabel: string, world: string, atlas: string) => {
-    const def = (/\bvalue\s*=\s*"([^"]*)"/.exec(block) || [])[1] || "default";
-    const itemDesc = (/\bdesc\s*=\s*([A-Za-z_]\w*)/.exec(block) || [])[1] || "frequency_descriptions";
-    const img = (/\bimage\s*=\s*"([^"]+)"/.exec(block) || [])[1] || key + ".tex";
-    const values = descMaps[itemDesc] || descMaps["frequency_descriptions"];
-    let label = zhNameForKey(key, modId) || MOD_WG_CN[key] || MOD_WG_CN[key.replace(/_setting$/, "")] || "";
+
+  const readItemField = (block: string, field: string): any => {
+    const m = new RegExp(`\\b${field}\\s*=\\s*`).exec(block);
+    if (!m) return undefined;
+    return parseLuaValue(block, m.index + m[0].length)[0];
+  };
+  const itemWorlds = (block: string): string[] => {
+    const m = /\bworld\s*=\s*/.exec(block);
+    if (!m) return [];
+    const start = m.index + m[0].length;
+    if (block[start] === "{") {
+      const end = braceMatch(block, start);
+      if (end === -1) return [];
+      return [...block.slice(start + 1, end).matchAll(/["']([^"']+)["']/g)].map((x) => x[1]);
+    }
+    const ref = /^([A-Za-z_]\w*)/.exec(block.slice(start));
+    return ref ? [...(luaArrays[ref[1]] || [])] : [];
+  };
+  interface PushItemMeta {
+    worlds?: string[];
+    category?: "worldgen" | "settings";
+    fallbackDesc?: string;
+    masterControlled?: boolean;
+    order?: number;
+  }
+  // 通用：解析单个 item block 并 push 到 options。
+  const pushItem = (key: string, block: string, groupLabel: string, world: string, atlas: string, meta: PushItemMeta = {}) => {
+    const rawDefault = readItemField(block, "value");
+    const def = rawDefault === undefined || rawDefault === null ? "default" : String(rawDefault);
+    const itemDesc = (/\bdesc\s*=\s*([A-Za-z_]\w*)/.exec(block) || [])[1] || meta.fallbackDesc || "frequency_descriptions";
+    const img = String(readItemField(block, "image") || key + ".tex");
+    const itemAtlasRef = (/\batlas\s*=\s*(?:["']([^"']+)["']|([A-Za-z_]\w*))/.exec(block) || []);
+    const itemAtlas = resolveAtlas(itemAtlasRef[1] || itemAtlasRef[2] || "") || atlas;
+    let values = (descMaps[itemDesc] || descMaps[meta.fallbackDesc || "frequency_descriptions"] || []).map((v) => ({ ...v }));
+    // 自定义描述表解析失败时仍要允许保存默认值；不能悄悄替换成 frequency 的非法值。
+    if (!values.some((v) => v.v === def)) values.unshift({ v: def, label: def === "default" ? "默认" : def });
+    let label = zhNameForKey(key, modId);
     if (!label && modId) {
       const en = modStringLookup(modId, key.toUpperCase(), "NAMES") || modStringLookup(modId, key.replace(/_setting$/, "").toUpperCase(), "NAMES");
       if (en) label = chinesePo().get(en) || en;
     }
-    options.push({ key, label: label || key, group: groupLabel, world, default: def, values, img, atlas });
+    const worlds = meta.worlds?.length ? [...meta.worlds] : (world ? [world] : []);
+    options.push({
+      key,
+      label: label || key,
+      group: groupLabel,
+      world: worlds.join("、"),
+      worlds,
+      category: meta.category,
+      default: def,
+      values,
+      img,
+      atlas: itemAtlas,
+      masterControlled: meta.masterControlled,
+      order: meta.order,
+    });
   };
   // --- 通用补丁式解析：兼容任意模组的 modworldgenmain.lua 定义方式 ---
   // 收集表变量别名：local wg = DebugUtil.GetValue(Customize.GetWorldGenOptions, "WORLDGEN_GROUP")
@@ -2975,39 +3136,130 @@ function parseModCustomizeFile(text: string, modId = ""): ModWorldgenOption[] {
       }
     }
   }
-  // --- Island Adventures / Shipwrecked 风格：ia_worldgen_customize_table + ia_settings_customize_table ---
-  // 结构：local ia_xxx_customize_table = { global = { key = { value=, image=, atlas=, desc= }, ... } }
-  // 注意：IA 没有 items 子层，条目直接在分组块中
-  // atlas 字段通常是变量引用（如 sw_atlas = "images/hud/customization_shipwrecked.xml"）
-  for (const iaTableName of ["ia_worldgen_customize_table", "ia_settings_customize_table"]) {
-    const iaRe = new RegExp("\\b" + iaTableName + "\\s*=\\s*\\{", "g");
+
+  // --- Island Adventures / Shipwrecked 风格 ---
+  // 真实结构没有 items 包装层：ia_*_customize_table = { group = { key = {...} } }。
+  // 同时解析 WORLDGEN 与 SETTINGS，并保留 world/master_controlled/order 语义。
+  const IA_GROUP_CN: Record<"worldgen" | "settings", Record<string, string>> = {
+    worldgen: { global: "全局", misc: "世界", resources: "资源", animals: "生物以及刷新点", monsters: "敌对生物以及刷新点" },
+    settings: { global: "全局", misc: "世界", resources: "资源再生", animals: "生物", monsters: "敌对生物", giants: "巨兽" },
+  };
+  const IA_GROUP_DESC: Record<"worldgen" | "settings", Record<string, string>> = {
+    worldgen: { resources: "worldgen_frequency_descriptions", animals: "worldgen_frequency_descriptions", monsters: "worldgen_frequency_descriptions" },
+    settings: { resources: "speed_descriptions", animals: "frequency_descriptions", monsters: "frequency_descriptions", giants: "frequency_descriptions" },
+  };
+  const parseIaTable = (tableName: string, category: "worldgen" | "settings") => {
+    const iaRe = new RegExp(`\\b${tableName}\\s*=\\s*\\{`, "g");
     let iaM: RegExpExecArray | null;
     while ((iaM = iaRe.exec(text))) {
       const iaEnd = braceMatch(text, iaM.index + iaM[0].length - 1);
-      if (iaEnd === -1) { iaRe.lastIndex = text.length; break; }
+      if (iaEnd === -1) break;
       const iaBody = text.slice(iaM.index + iaM[0].length, iaEnd);
       iaRe.lastIndex = iaEnd;
-      const grpRe = /([A-Za-z_]\w*)\s*=\s*\{/g;
-      let gr: RegExpExecArray | null;
-      while ((gr = grpRe.exec(iaBody))) {
-        const ge = braceMatch(iaBody, grpRe.lastIndex - 1);
-        if (ge === -1) continue;
-        const gblk = iaBody.slice(grpRe.lastIndex, ge);
-        grpRe.lastIndex = ge;
-        const groupTextExpr = (/\btext\s*=\s*([^,\n]+)/.exec(gblk) || [])[1] || "";
-        const groupLabel = resolveStringsRef(groupTextExpr, modId) || gr[1];
-        const gaM = /\batlas\s*=\s*(?:"([^"]+)"|([A-Za-z_]\w*))/.exec(gblk);
-        let groupAtlas = resolveAtlas((gaM && (gaM[1] || gaM[2])) || "") || "customization_shipwrecked";
-        // IA 无 items 子层：整个分组块即为条目容器
-        // 但如果有 items 子表则用之（兼容变体）
-        const im = /items\s*=\s*\{/.exec(gblk);
-        const iBody = im ? (() => { const ie = braceMatch(gblk, im.index + im[0].length - 1); return ie === -1 ? gblk : gblk.slice(im.index + im[0].length, ie); })() : gblk;
-        for (const it of extractItemsFromGroup(iBody)) {
-          const itemAtlasM = /\batlas\s*=\s*(?:"([^"]+)"|([A-Za-z_]\w*))/.exec(it.block);
-          if (itemAtlasM) groupAtlas = resolveAtlas(itemAtlasM[1] || itemAtlasM[2]) || groupAtlas;
-          pushItem(it.key, it.block, groupLabel, "shipwrecked", groupAtlas);
+      // extractItemsFromGroup 只读取当前层，因此不会把分组里的 item 错当顶层分组。
+      for (const group of extractItemsFromGroup(iaBody)) {
+        if (!group.block) continue;
+        const subLabel = IA_GROUP_CN[category][group.key] || group.key;
+        const groupLabel = (category === "worldgen" ? "世界生成·" : "世界设置·") + subLabel;
+        const fallbackDesc = IA_GROUP_DESC[category][group.key] || "frequency_descriptions";
+        for (const item of extractItemsFromGroup(group.block)) {
+          if (!item.block) continue;
+          const worlds = itemWorlds(item.block);
+          const masterControlled = readItemField(item.block, "master_controlled") === true;
+          const rawOrder = readItemField(item.block, "order");
+          pushItem(item.key, item.block, groupLabel, "", "customization_shipwrecked", {
+            worlds,
+            category,
+            fallbackDesc,
+            masterControlled,
+            order: typeof rawOrder === "number" ? rawOrder : undefined,
+          });
         }
       }
+    }
+  };
+  parseIaTable("ia_worldgen_customize_table", "worldgen");
+  parseIaTable("ia_settings_customize_table", "settings");
+
+  // IA 会把一部分原版 OPTIONS 的 world 列表扩展到 shipwrecked/volcanoworld。
+  // 模组世界会隐藏普通原版表，因此这里必须把这些“官方允许项”克隆进模组世界选项中。
+  const IA_TASK_SET_VALUES: Record<string, { v: string; label: string }[]> = {
+    shipwrecked: [{ v: "shipwrecked", label: "热带群岛" }],
+    volcanoworld: [{ v: "volcano", label: "火山" }],
+  };
+  const IA_START_LOCATION_VALUES: Record<string, { v: string; label: string }[]> = {
+    shipwrecked: [
+      { v: "shipwrecked_default", label: "默认" },
+      { v: "shipwrecked_plus", label: "额外资源" },
+      { v: "shipwrecked_darkness", label: "黑暗" },
+    ],
+    volcanoworld: [{ v: "volcano_default", label: "火山" }],
+  };
+  const addIaVanillaOptions = (arrayName: string, location: string) => {
+    const keys = luaArrays[arrayName] || [];
+    const icons = worldoptionIconMap();
+    for (const key of keys) {
+      // 同一个原版项可同时被扩展到海难和火山（火山清单大多是海难清单的子集）。
+      const existing = options.find((o) => o.key === key);
+      if (existing) {
+        existing.worlds = [...new Set([...(existing.worlds || []), location])];
+        existing.world = existing.worlds.join("、");
+        if (key === "task_set") existing.values.push(...IA_TASK_SET_VALUES[location].filter((v) => !existing.values.some((x) => x.v === v.v)));
+        if (key === "start_location") existing.values.push(...IA_START_LOCATION_VALUES[location].filter((v) => !existing.values.some((x) => x.v === v.v)));
+        continue;
+      }
+      const source = FOREST_OPTIONS.find((o) => o.key === key) || CAVE_OPTIONS.find((o) => o.key === key);
+      if (!source) continue;
+      const icon = icons[key];
+      const worldgenGroup = ["世界", "资源", "生物以及刷新点", "敌对生物以及刷新点"].includes(source.group);
+      const sourceValues = key === "task_set" ? IA_TASK_SET_VALUES[location]
+        : key === "start_location" ? IA_START_LOCATION_VALUES[location]
+        : source.values;
+      options.push({
+        key,
+        label: source.label,
+        group: (worldgenGroup ? "世界生成·" : "世界设置·") + source.group,
+        world: location,
+        worlds: [location],
+        category: worldgenGroup ? "worldgen" : "settings",
+        default: sourceValues[0]?.v || "default",
+        values: sourceValues.map((v) => ({ ...v })),
+        img: icon ? icon.img + ".tex" : "",
+        atlas: icon?.atlas || "",
+      });
+    }
+  };
+  addIaVanillaOptions("vanilla_options_in_islands", "shipwrecked");
+  addIaVanillaOptions("vanilla_options_in_volcano", "volcanoworld");
+  // Klei 的 world=nil 表示所有 location 都显示；这些全局项不会出现在 IA 的显式扩展数组中。
+  // 世界生成全局项 season_start 被 IA 自己的 shipwrecked_season_start 替代；世界设置全局项仍应完整保留。
+  if (luaArrays.vanilla_options_in_islands?.length || luaArrays.vanilla_options_in_volcano?.length) {
+    const icons = worldoptionIconMap();
+    const universalSettings = [
+      "specialevent", "autumn", "winter", "spring", "summer", "day", "spawnmode", "ghostenabled",
+      "portalresurection", "ghostsanitydrain", "resettime", "beefaloheat", "krampus",
+      "extrastartingitems", "seasonalstartingitems", "spawnprotection", "dropeverythingondespawn",
+      "healthpenalty", "lessdamagetaken", "temperaturedamage", "hunger", "darkness",
+      "shadowcreatures", "brightmarecreatures",
+    ];
+    for (const key of universalSettings) {
+      if (options.some((o) => o.key === key)) continue;
+      const source = FOREST_OPTIONS.find((o) => o.key === key);
+      if (!source) continue;
+      const icon = icons[key];
+      options.push({
+        key,
+        label: source.label,
+        group: "世界设置·" + source.group,
+        world: "",
+        worlds: [],
+        category: "settings",
+        default: source.values.some((v) => v.v === "default") ? "default" : (source.values[0]?.v || "default"),
+        values: source.values.map((v) => ({ ...v })),
+        img: icon ? icon.img + ".tex" : "",
+        atlas: icon?.atlas || "",
+        masterControlled: ["specialevent", "autumn", "winter", "spring", "summer", "day"].includes(key),
+      });
     }
   }
   // customize_items：[LEVELCATEGORY.WORLDGEN/SETTINGS] → 分组 → 条目
@@ -3051,13 +3303,14 @@ function parseModLevelPresets(text: string, modId = ""): ModWorldgenPreset[] {
   const re = /Add(?:WorldGenLevel|SettingsPreset|Level|Preset)\s*\(\s*LEVELTYPE\.\w+\s*,\s*\{/g;
   let m: RegExpExecArray | null;
   while ((m = re.exec(text))) {
-    const end = braceMatch(text, m.index + m[0].length - 1);
+    const declaration = m[0];
+    const end = braceMatch(text, m.index + declaration.length - 1);
     if (end === -1) continue;
-    const body = text.slice(m.index + m[0].length, end);
+    const body = text.slice(m.index + declaration.length, end);
     m.lastIndex = end;
-    const id = (/\bid\s*=\s*"([^"]+)"/.exec(body) || [])[1];
+    const id = (/\bid\s*=\s*["']([^"']+)["']/.exec(body) || [])[1];
     if (!id) continue;
-    const loc = (/\blocation\s*=\s*"([^"]+)"/.exec(body) || [])[1] || "";
+    const loc = (/\blocation\s*=\s*["']([^"']+)["']/.exec(body) || [])[1] || "";
     const nameExpr = (/\bname\s*=\s*([^,\n]+)/.exec(body) || [])[1] || "";
     const name = resolvePresetName(modId, id, nameExpr);
     let overrides: Record<string, string> = {};
@@ -3069,7 +3322,16 @@ function parseModLevelPresets(text: string, modId = ""): ModWorldgenPreset[] {
         for (const [k, v] of Object.entries(tbl)) overrides[k] = String(v);
       }
     }
-    out.push({ id, name, location: loc, overrides });
+    const isSettingsPreset = /AddSettingsPreset/.test(declaration);
+    const isWorldgenPreset = /AddWorldGenLevel/.test(declaration);
+    out.push({
+      id,
+      name,
+      location: loc,
+      overrides,
+      settingsOverrides: isSettingsPreset ? { ...overrides } : undefined,
+      worldgenOverrides: isWorldgenPreset ? { ...overrides } : undefined,
+    });
   }
   // 形式二：先定义局部表再传入：local xxx = { id = "...", location = "...", overrides = {...} }
   const byVar = new Map<string, ModWorldgenPreset>();
@@ -3078,9 +3340,9 @@ function parseModLevelPresets(text: string, modId = ""): ModWorldgenPreset[] {
     const end = braceMatch(text, varRe.lastIndex - 1);
     if (end === -1) continue;
     const body = text.slice(varRe.lastIndex, end);
-    const id = (/\bid\s*=\s*"([^"]+)"/.exec(body) || [])[1];
+    const id = (/\bid\s*=\s*["']([^"']+)["']/.exec(body) || [])[1];
     if (!id) continue;
-    const loc = (/\blocation\s*=\s*"([^"]+)"/.exec(body) || [])[1] || "";
+    const loc = (/\blocation\s*=\s*["']([^"']+)["']/.exec(body) || [])[1] || "";
     const nameExpr = (/\bname\s*=\s*([^,\n]+)/.exec(body) || [])[1] || "";
     let overrides: Record<string, string> = {};
     const om = /overrides\s*=\s*\{/.exec(body);
@@ -3188,10 +3450,30 @@ function modWorldgenDataFromDirRaw(id: string, dir: string): { name: string; opt
     options = options.concat(parseModCustomizeFile(text, id));
     presets = presets.concat(parseModLevelPresets(text, id));
   }
-  const seenO = new Set<string>();
-  options = options.filter((o) => !seenO.has(o.key + o.group) && seenO.add(o.key + o.group));
-  const seenP = new Set<string>();
-  presets = presets.filter((p) => !seenP.has(p.id) && seenP.add(p.id));
+  // 游戏的 customize option 名在全局唯一；按 key 去重，避免同一项被多个扫描文件重复展示。
+  const optionByKey = new Map<string, ModWorldgenOption>();
+  for (const option of options) if (!optionByKey.has(option.key)) optionByKey.set(option.key, option);
+  options = [...optionByKey.values()];
+  // IA 同一个 ID 会分别声明 AddSettingsPreset 与 AddWorldGenLevel。
+  // 不能简单丢掉第二项，必须合并两边 overrides（如 LIGHTS_OUT 的 day + start_location）。
+  const presetById = new Map<string, ModWorldgenPreset>();
+  for (const preset of presets) {
+    const old = presetById.get(preset.id);
+    if (!old) presetById.set(preset.id, {
+      ...preset,
+      overrides: { ...preset.overrides },
+      worldgenOverrides: preset.worldgenOverrides ? { ...preset.worldgenOverrides } : undefined,
+      settingsOverrides: preset.settingsOverrides ? { ...preset.settingsOverrides } : undefined,
+    });
+    else {
+      old.name = old.name || preset.name;
+      old.location = old.location || preset.location;
+      Object.assign(old.overrides, preset.overrides);
+      if (preset.worldgenOverrides) old.worldgenOverrides = { ...(old.worldgenOverrides || {}), ...preset.worldgenOverrides };
+      if (preset.settingsOverrides) old.settingsOverrides = { ...(old.settingsOverrides || {}), ...preset.settingsOverrides };
+    }
+  }
+  presets = [...presetById.values()];
   // 模组通过 modworldgenmain.lua 修改/替换的世界生成相关文件清单
   const worldgenFiles: string[] = [];
   const mwText = existsSync(mw) ? readText(mw) : "";
@@ -3211,7 +3493,53 @@ function modWorldgenDataFromDirRaw(id: string, dir: string): { name: string; opt
   if (!options.length && !presets.length) return null;
   const mi = parseModInfo(id, join(dir, "modinfo.lua"));
   const st = modCache.items[id];
-  return { name: st?.title || mi?.name || id, options, presets, worldgenFiles };
+  return { name: mi?.name || st?.title || id, options, presets, worldgenFiles };
+}
+function shardWorldLocation(shard: string, isMaster: boolean): string {
+  const target = listShards().find((s) => s.name === shard);
+  const isSurface = target?.isSurface ?? isMaster;
+  const selected = readLevelOverrides(shard).presets;
+  const presetIds = [selected.worldgen, selected.settings].filter(Boolean);
+  const enabled = [...readModOverrides(shard)].filter(([, e]) => e.enabled).map(([key]) => key.replace("workshop-", ""));
+  // 当前 worldgen/settings 预设最权威；跨所有已启用模组查 owner，依赖模组也能得到 IA 的 location。
+  for (const presetId of presetIds) {
+    for (const id of enabled) {
+      const location = modWorldgenData(id)?.presets.find((p) => p.id === presetId)?.location;
+      if (location) return location;
+    }
+  }
+  // 尚未写预设时，如果启用的替换型世界模组只提供一个对应层 location，就按该层推断。
+  const isSublevelLocation = (location: string) => /volcano|cave|under/i.test(location || "");
+  const candidates = new Set<string>();
+  for (const id of enabled) {
+    for (const preset of modWorldgenData(id)?.presets || []) {
+      if (isSublevelLocation(preset.location) === !isSurface && preset.location) candidates.add(preset.location);
+    }
+  }
+  if (candidates.size === 1) return [...candidates][0];
+  return isSurface ? "forest" : "cave";
+}
+function modOptionForLocation(option: ModWorldgenOption, location: string, isMaster: boolean): ModWorldgenOption | null {
+  if (!isMaster && option.masterControlled) return null;
+  if (option.worlds?.length && location && !option.worlds.includes(location)) return null;
+  // task_set/start_location 的有效 data 由 location 动态产生；只向当前海难层暴露对应值。
+  if (option.key === "task_set" && location === "shipwrecked") {
+    return { ...option, default: "shipwrecked", values: [{ v: "shipwrecked", label: "热带群岛" }] };
+  }
+  if (option.key === "task_set" && location === "volcanoworld") {
+    return { ...option, default: "volcano", values: [{ v: "volcano", label: "火山" }] };
+  }
+  if (option.key === "start_location" && location === "shipwrecked") {
+    return { ...option, default: "shipwrecked_default", values: [
+      { v: "shipwrecked_default", label: "默认" },
+      { v: "shipwrecked_plus", label: "额外资源" },
+      { v: "shipwrecked_darkness", label: "黑暗" },
+    ] };
+  }
+  if (option.key === "start_location" && location === "volcanoworld") {
+    return { ...option, default: "volcano_default", values: [{ v: "volcano_default", label: "火山" }] };
+  }
+  return option;
 }
 function enabledClusterModOverrides(): Map<string, ModOverrideEntry> {
   const master = listShards().find((s) => s.isMaster) || listShards()[0];
@@ -3224,9 +3552,16 @@ function enabledClusterModOverrides(): Map<string, ModOverrideEntry> {
 }
 function enabledModWorldgenOptions(shard: string): Map<string, Set<string>> {
   const map = new Map<string, Set<string>>();
+
+  const target = listShards().find((s) => s.name === shard);
+  if (!target) return map;
+  const location = shardWorldLocation(shard, target.isMaster);
   for (const [key] of enabledClusterModOverrides()) {
     const d = modWorldgenData(key.replace("workshop-", ""));
-    if (d) for (const o of d.options) map.set(o.key, new Set(o.values.map((v) => v.v)));
+    if (d) for (const o of d.options) {
+      const localized = !o.modConfig ? modOptionForLocation(o, location, target.isMaster) : null;
+      if (localized) map.set(localized.key, new Set(localized.values.map((v) => v.v)));
+    }
   }
   return map;
 }
@@ -4039,18 +4374,22 @@ function groupOtherRunning(all: { cluster: string; shard: string }[]): Map<strin
 // 启用模组统一逻辑（mod设置页保存所选 / 本地模组库一键启用 共用）：
 // 冲突检测 → 写 modoverrides+setup ids → 不支持洞穴的地图模组自动删 Caves 分片 → 新启用的大型地图模组自动应用世界预设
 async function applyEnabledMods(ids: string[]): Promise<Response> {
+  // 展开已安装的必需依赖（Island Adventures - Shipwrecked 依赖 IA Core）。
+  const requested = [...ids];
+  const enabledIds = new Set(ids);
+  const queue = [...ids];
+  for (let i = 0; i < queue.length; i++) {
+    for (const dep of modDependencyIds(queue[i])) {
+      if (enabledIds.has(dep)) continue;
+      if (!modInfoPath(dep)) return fail(`模组 ${queue[i]} 依赖创意工坊 ${dep}，请先下载该依赖后再启用`);
+      enabledIds.add(dep);
+      queue.push(dep);
+    }
+  }
+  ids = [...enabledIds];
+  const autoDependencies = ids.filter((id) => !requested.includes(id));
   const enabledSet = new Set(ids);
-  // 冲突检测：替换世界生成的模组（AddLevel/PRESETLEVELS）同时只能启用一个
-  // 注意：仅用 AddLevelPreInitAny 修改现有关卡的模组（如三合一）不算冲突
-  const worldModIds = ids.filter((id) => {
-    const mw = join(ugcSharedDir(), id, "modworldgenmain.lua");
-    if (!existsSync(mw)) return false;
-    const text = readText(mw);
-    // 有 AddLevel/AddPreset/LEVELTYPE 调用 = 替换型世界生成
-    // 仅有 AddLevelPreInitAny = 兼容型修改，不冲突
-    return /AddLevel\s*\(|AddPreset\s*\(|LEVELTYPE\.\w+\s*,\s*\{/.test(text) && !text.includes("AddLevelPreInitAny");
-  });
-  // 多层结构允许多个世界模组共存，不再限制冲突
+  // 多层结构允许多个世界模组共存，不再限制冲突。
   // 保留已有配置，未勾选的省略
   const master = listShards().find((s) => s.isMaster) || listShards()[0];
   const old = master ? readModOverrides(master.name) : new Map<string, ModOverrideEntry>();
@@ -4065,7 +4404,9 @@ async function applyEnabledMods(ids: string[]): Promise<Response> {
   writeFileSync(join(shardDir(master.name), "modoverrides.lua"), serializeModOverrides(map) + "\n");
   modOverridesCache.delete(master.name);
   const omitted = [...old.keys()].filter((k) => !enabledSet.has(k.replace("workshop-", "")));
-  // 检测启用的地图模组是否有地下/独立世界预设（洞穴、火山等）
+
+  // 检测启用的地图模组是否有洞穴预设
+  // 多层结构允许只有地表预设的世界模组与其他层共存，不自动删除已有层级。
   // 大型地图模组（海难/哈姆雷特/三合一等）：新启用时自动应用对应世界预设
   const autoApplied: string[] = [];
   // VANILLA_PRESETS 已在文件顶部定义为全局常量
@@ -4089,16 +4430,13 @@ async function applyEnabledMods(ids: string[]): Promise<Response> {
       if (!VANILLA_PRESETS.has(cur)) continue; // 已是模组预设则不覆盖
       const pick = pickPreset(d.presets, shard.isSurface);
       if (!pick) continue;
-      // 预设自带的 overrides 由 DST 引擎加载预设时自动应用（在 level_data.overrides 中），
-      // 不需要面板重复写入 worldgenoverride.lua。
-      // IA 模组的 water.lua 会把 yesno 类型值（如 volcano="yes"）当作 MULTIPLY 频率值处理，
-      // 重复写入会导致 nil 算术错误。
+      // 预设自带的 overrides 由 DST 引擎加载预设时自动应用。
       writeLevelOverrides(shard.name, shard.isSurface, {}, pick.id);
       autoApplied.push(`${shard.name}→${pick.id}`);
     }
   }
   for (const shard of listShards()) syncShardWorldMods(shard.name);
-  // 取消世界模组时：把仍在用该模组预设的分片切回原版，避免模组缺失导致启动崩溃
+  // 取消世界模组时：把仍在用该模组预设的分片切回原版，避免模组缺失导致启动崩溃。
   if (omitted.length) {
     for (const shard of listShards()) {
       const wg = readLevelOverrides(shard.name).presets.worldgen;
@@ -4110,7 +4448,10 @@ async function applyEnabledMods(ids: string[]): Promise<Response> {
       }
     }
   }
-  return ok(null, `已保存所选（启用 ${ids.length} 个模组）` + (omitted.length ? `；未勾选的 ${omitted.length} 个模组配置已省略` : "") + (autoApplied.length ? `；已自动应用大型模组预设: ${autoApplied.join("、")}` : ""));
+  return ok(null, `已保存所选（启用 ${ids.length} 个模组）`
+    + (autoDependencies.length ? `；已自动启用必需依赖: ${autoDependencies.join("、")}` : "")
+    + (omitted.length ? `；未勾选的 ${omitted.length} 个模组配置已省略` : "")
+    + (autoApplied.length ? `；已自动应用大型模组预设: ${autoApplied.join("、")}` : ""));
 }
 
 async function api(req: Request, url: URL): Promise<Response> {
@@ -4529,69 +4870,32 @@ async function api(req: Request, url: URL): Promise<Response> {
     const target = listShards().find((s) => s.name === shard);
     if (!target) return fail("世界不存在");
     const mods: any[] = [];
+
+    const location = shardWorldLocation(shard, target.isMaster);
     const shardOverrides = readModOverrides(shard);
     for (const [key, globalEntry] of enabledClusterModOverrides()) {
       const id = key.replace("workshop-", "");
       const e = shardOverrides.get(key) || globalEntry;
-      const d = modWorldgenData(id) || (findLocalModPath(id) ? modWorldgenDataFromDir(id, findLocalModPath(id)!) : null);
-      const mi = parseModInfo(id) || (findLocalModPath(id) ? parseModInfo(id, join(findLocalModPath(id)!, "modinfo.lua")) : null);
-      // 有世界生成数据 或 有配置选项 → 显示该模组卡片
+      const localPath = findLocalModPath(id);
+      const d = modWorldgenData(id) || (localPath ? modWorldgenDataFromDir(id, localPath) : null);
+      const mi = parseModInfo(id) || (localPath ? parseModInfo(id, join(localPath, "modinfo.lua")) : null);
       if ((!d || (!d.options.length && !d.presets.length)) && (!mi || !mi.configOptions.length)) continue;
-      // 合并世界选项和 modConfig 选项
       const worldOpts = d?.options || [];
-      const modCfgOpts = (mi?.configOptions || []).map((o) => ({
+      const modCfgOpts: ModWorldgenOption[] = (mi?.configOptions || []).map((o) => ({
         key: o.name, label: worldConfigLabel(id, o), group: "世界设置", world: "",
         default: String(o.default ?? ""),
         values: o.options.length ? o.options.map((op) => ({ v: String(op.data), label: configValueLabel(id, op) })) : [{ v: String(o.default ?? "default"), label: configValueLabel(id, { description: o.label, data: o.default }) }],
         modConfig: true,
       })).filter((o) => !worldOpts.some((w) => w.key === o.key));
-      const allOpts = [...worldOpts, ...modCfgOpts];
-      const enriched = allOpts.map((o) => {
-        if (o.modConfig) {
-          const current = e.options[o.key] !== undefined ? e.options[o.key] : o.default;
-          return { ...o, current: String(current) };
-        }
-        return o;
-      });
-      const isActive = (() => {
-        const wg = readLevelOverrides(shard).presets?.worldgen || "";
-        return !!wg && d?.presets?.some((p) => p.id === wg);
-      })();
-      mods.push({ id, name: d?.name || mi?.name || id, options: enriched, presets: d?.presets || [], worldgenFiles: d?.worldgenFiles || [], enabledOnShard: isActive });
+      const enriched = [...worldOpts, ...modCfgOpts]
+        .map((o) => o.modConfig ? o : modOptionForLocation(o, location, target.isMaster))
+        .filter((o): o is ModWorldgenOption => o !== null)
+        .map((o) => o.modConfig ? { ...o, current: String(e.options[o.key] !== undefined ? e.options[o.key] : o.default) } : o);
+      const currentPreset = readLevelOverrides(shard).presets.worldgen || "";
+      const isActive = !!currentPreset && !!d?.presets.some((p) => p.id === currentPreset);
+      mods.push({ id, name: d?.name || mi?.name || id, options: enriched, presets: d?.presets || [], worldgenFiles: d?.worldgenFiles || [], enabledOnShard: isActive, location });
     }
-    // 原版世界选项（模组世界时原版 optTable 被隐藏，这里附带原版选项供前端合并显示）
-    const isSurfaceShard = target.isSurface;
-    return ok({ mods, vanilla: worldOptionTable(isSurfaceShard), isSurfaceShard });
-  }
-  // 切换某层级「模组世界生成」开关：修改该分片 modoverrides.lua 的 enabled，
-  // 关闭后该层级生成世界时不再加载该模组的 modworldgenmain.lua 影响（仅影响当前层级）
-  if (path === "world/mod-enabled" && method === "POST") {
-    const b = await bodyJson(req);
-    const shard = String(b.shard || "");
-    const modId = String(b.modId || "");
-    const on = b.on !== false;
-    if (!validId(modId)) return fail("非法模组 ID");
-    const target = listShards().find((s) => s.name === shard);
-    if (!target) return fail("世界不存在");
-    const map = readModOverrides(shard);
-    const key = `workshop-${modId}`;
-    const title = modCache.items[modId]?.title || parseModInfo(modId)?.name || modId;
-    if (!map.has(key)) {
-      if (!on) return ok(null, `层级 ${shard} 未启用模组「${title}」，无需关闭`);
-      map.set(key, { enabled: true, options: {} });
-    }
-    map.get(key)!.enabled = true;  // 关滑块不取消模组启用
-    // 滑块状态通过 preset 控制（有预设=开，无预设=关）
-    const d = modWorldgenData(modId);
-    const firstPreset = d?.presets[0]?.id;
-    if (on && firstPreset) {
-      try { writeLevelOverrides(shard, target.isSurface, {}, firstPreset); } catch {}
-    } else if (!on) {
-      try { writeLevelOverrides(shard, target.isSurface, {}, target.isSurface ? "SURVIVAL_TOGETHER" : "DST_CAVE"); } catch {}
-    }
-    syncShardWorldMods(shard);
-    clearModCaches();
-    return ok(null, on ? `已在层级 ${shard} 启用「${title}」的世界生成（重新生成世界生效）` : `已在层级 ${shard} 停用「${title}」的世界生成（该层级不再受其 modworldgenmain.lua 影响，重新生成世界生效）`);
+    return ok({ mods, location, vanilla: worldOptionTable(target.isSurface), isSurfaceShard: target.isSurface });
   }
   if (path === "world/overrides" && method === "POST") {
     const b = await bodyJson(req);
@@ -4617,34 +4921,20 @@ async function api(req: Request, url: URL): Promise<Response> {
         if (val !== null) modConfigUpdates[k] = val;
         continue;
       }
+      // 模组世界生成选项优先：海难会复用 task_set/start_location 等原版 key，
+      // 但有效值是 shipwrecked/volcano，若先走原版校验会被错误丢弃。
+      if (modAllowed.has(k)) {
+        if (!validWorldVal(String(v))) continue;
+        if (modAllowed.get(k)!.has(String(v))) current[k] = String(v);
+        continue;
+      }
       // 原版世界设置项
       if (allowed.has(k)) {
         if (!validWorldVal(String(v))) continue;
         if (allowed.get(k)!.has(String(v))) current[k] = String(v);
         continue;
       }
-      // 模组世界生成选项（写入 worldgenoverride.lua）
-      if (modAllowed.has(k)) {
-        if (!validWorldVal(String(v))) continue;
-        // yesno 类选项（值 yes/no）的特殊处理：
-        // IA 的 water.lua 用 MULTIPLY 表查频率值控制水域实体散布。
-        // volcano=yes/no 会进入 MULTIPLY 查询，需要映射为 default/never 避免 nil 算术错误。
-        const vals = modAllowed.get(k)!;
-        const isYesNo = vals.has("yes") && vals.has("no") && vals.size <= 3;
-        if (isYesNo) {
-          current[k] = String(v) === "no" ? "never" : "default";
-          continue;
-        }
-        // volcanoisland=disabled 时，IA 的 level postinit 检查 overrides.volcanoisland ~= "none"
-        // 来决定是否添加 VolcanoIsland 任务。设为 "none" 才能阻止火山岛生成。
-        // volcano 保持 default（yes）以保留火山水域实体。
-        if (k === "volcanoisland" && (String(v) === "disabled" || String(v) === "none")) {
-          current[k] = "none";
-          continue;
-        }
-        if (vals.has(String(v))) current[k] = String(v);
-        continue;
-      }
+
     }
     // 写入 modConfig 选项到 modoverrides.lua（对应模组）
     if (Object.keys(modConfigUpdates).length > 0) {
@@ -4674,18 +4964,34 @@ async function api(req: Request, url: URL): Promise<Response> {
         }
         ensureServerModSymlinks();
         writeSetupIds(ids);
+        // syncShardWorldMods 以主分片为全局清单；直接从“编辑世界”选择预设时先补进主分片，
+        // 否则 activeOwner 会因全局未启用而立刻被清空。
+        const master = listShards().find((s) => s.isMaster) || listShards()[0];
+        if (master) {
+          const global = readModOverrides(master.name);
+          for (const dep of [id, ...modDependencyIds(id)]) {
+            const depKey = `workshop-${dep}`;
+            const oldEntry = global.get(depKey);
+            global.set(depKey, { enabled: true, options: oldEntry?.options || {} });
+          }
+          writeFileSync(join(shardDir(master.name), "modoverrides.lua"), serializeModOverrides(global) + "\n");
+          modOverridesCache.delete(master.name);
+        }
       }
       syncShardWorldMods(shard);
       return serializeModOverrides(readModOverrides(shard)) !== before;
     };
-    const mergePresetOverrides = (pid: string) => {
+
+    const mergePresetOverrides = (pid: string, side?: "worldgen" | "settings") => {
       for (const [key] of enabledClusterModOverrides()) {
         const d = modWorldgenData(key.replace("workshop-", ""));
         const p = d?.presets.find((x) => x.id === pid);
         if (p) {
-          for (const [k, v] of Object.entries(p.overrides)) {
-            const sv = typeof v === "boolean" ? (v ? "true" : "false") : v;
-            if (validKeyVal(k) && validWorldVal(sv)) current[k] = sv;
+          const selected = side === "worldgen" ? (p.worldgenOverrides || p.overrides)
+            : side === "settings" ? (p.settingsOverrides || p.overrides)
+            : p.overrides;
+          for (const [k, v] of Object.entries(selected)) {
+            if (validKeyVal(k) && validWorldVal(v)) current[k] = String(v);
           }
         }
       }
@@ -4700,8 +5006,8 @@ async function api(req: Request, url: URL): Promise<Response> {
     } else {
       const wg = typeof b.worldgen_preset === "string" && /^[A-Za-z0-9_]{1,64}$/.test(b.worldgen_preset) ? b.worldgen_preset : "";
       const st = typeof b.settings_preset === "string" && /^[A-Za-z0-9_]{1,64}$/.test(b.settings_preset) ? b.settings_preset : "";
-      if (wg) mergePresetOverrides(wg);
-      if (st) mergePresetOverrides(st);
+      if (wg) mergePresetOverrides(wg, "worldgen");
+      if (st) mergePresetOverrides(st, "settings");
       if (wg || st) presetArg = { worldgen: wg || undefined, settings: st || undefined };
       for (const pid of [wg, st]) {
         if (pid) {
@@ -4733,17 +5039,18 @@ async function api(req: Request, url: URL): Promise<Response> {
     if (finalWg && !VANILLA_PRESETS.has(finalWg)) {
       const keep = new Set<string>();
       const owner = presetOwner(finalWg);
-      if (owner) {
-        const d = modWorldgenData(owner.replace("workshop-", ""));
-        if (d) {
-          for (const o of d.options) keep.add(o.key);
-          const p = d.presets.find((x) => x.id === finalWg);
-          if (p) for (const k of Object.keys(p.overrides)) keep.add(k);
+      const ownerData = owner ? modWorldgenData(owner.replace("workshop-", "")) : null;
+      const location = ownerData?.presets.find((x) => x.id === finalWg)?.location || shardWorldLocation(shard, target.isMaster);
+      // IA Core 等依赖模组也提供这个 location 的设置；不能只保留预设 owner 自身的选项。
+      for (const [key] of enabledClusterModOverrides()) {
+        const d = modWorldgenData(key.replace("workshop-", ""));
+        if (d) for (const o of d.options) {
+          if (!o.modConfig && modOptionForLocation(o, location, target.isMaster)) keep.add(o.key);
         }
       }
-      if (keep.size) {
-        for (const k of Object.keys(current)) if (!keep.has(k)) delete current[k];
-      }
+      const ownerPreset = ownerData?.presets.find((x) => x.id === finalWg);
+      if (ownerPreset) for (const k of Object.keys(ownerPreset.overrides)) keep.add(k);
+      if (keep.size) for (const k of Object.keys(current)) if (!keep.has(k)) delete current[k];
     }
     writeLevelOverrides(shard, target.isSurface, current, presetArg);
     syncShardWorldMods(shard);
@@ -5339,19 +5646,29 @@ async function api(req: Request, url: URL): Promise<Response> {
     if (!res.ok) return fail(res.msg, 200);
     const msgs: string[] = [];
     let hasFailure = false;
+    let masterFailed = false;
     for (const s of shards) {
       if (await shardRunning(s.name)) { msgs.push(`${s.name}: 已在运行`); continue; }
+      // 副分片依赖主分片。主分片拉起失败时不再继续启动新的副分片，避免只剩“地下运行中”。
+      if (!s.isMaster && masterFailed) {
+        hasFailure = true;
+        msgs.push(`${s.name}: 未启动（主分片启动失败）`);
+        continue;
+      }
       const r = await startShard(s.name);
-      const ok = r === "ok";
-      if (!ok) hasFailure = true;
-      msgs.push(`${s.name}: ${ok ? "已启动" : "启动失败 " + r}`);
+      const started = r === "ok";
+      if (!started) {
+        hasFailure = true;
+        if (s.isMaster) masterFailed = true;
+      }
+      msgs.push(`${s.name}: ${started ? "已启动" : "启动失败 " + r}`);
     }
     let msg = msgs.join("；");
     if (hasFailure) {
-      msg += "。💡 如果反复启动失败，很可能是内存不足。可尝试：1) 关闭其他服务释放内存 2) 减少启用的模组数量 3) 检查 dst.slice 内存限制";
+      msg += "。至少一个分片未成功启动，请按上面的具体错误检查该分片日志、端口、令牌和模组";
     }
     if (startWarnings.length) msg += "。" + startWarnings.join("；");
-    return ok(null, msg);
+    return hasFailure ? fail(msg) : ok(null, msg);
   }
   if (path === "server/stop" && method === "POST") {
     for (const s of listShards()) await stopShard(s.name);
@@ -5364,11 +5681,24 @@ async function api(req: Request, url: URL): Promise<Response> {
     const res = checkResources();
     if (!res.ok) return fail(res.msg, 200);
     const msgs: string[] = [];
+    let hasFailure = false;
+    let masterFailed = false;
     for (const s of shards) {
+      if (!s.isMaster && masterFailed) {
+        hasFailure = true;
+        msgs.push(`${s.name}: 未启动（主分片启动失败）`);
+        continue;
+      }
       const r = await startShard(s.name);
-      msgs.push(`${s.name}: ${r === "ok" ? "已启动" : "启动失败 " + r}`);
+      const started = r === "ok";
+      if (!started) {
+        hasFailure = true;
+        if (s.isMaster) masterFailed = true;
+      }
+      msgs.push(`${s.name}: ${started ? "已启动" : "启动失败 " + r}`);
     }
-    return ok(null, "重启完成：" + msgs.join("；"));
+    const msg = (hasFailure ? "重启未完整成功：" : "重启完成：") + msgs.join("；");
+    return hasFailure ? fail(msg) : ok(null, msg);
   }
   if (path === "server/autorestart" && method === "POST") {
     const b = await bodyJson(req);
@@ -6059,10 +6389,18 @@ setInterval(async () => {
     }
     // 掉线自动拉起（仅在开启自动重启时）
     if (!panelConfig.autorestart) return;
+    let masterFailed = false;
     for (const s of listShards()) {
-      if (!(await shardRunning(s.name))) {
-        console.log(`[自动重启] 分片 ${s.name} 未运行，正在启动...`);
-        await startShard(s.name);
+      if (await shardRunning(s.name)) continue;
+      if (!s.isMaster && masterFailed) {
+        console.error(`[自动重启] 跳过分片 ${s.name}：主分片启动失败`);
+        continue;
+      }
+      console.log(`[自动重启] 分片 ${s.name} 未运行，正在启动...`);
+      const result = await startShard(s.name);
+      if (result !== "ok") {
+        console.error(`[自动重启] 分片 ${s.name} 启动失败：${result}`);
+        if (s.isMaster) masterFailed = true;
       }
     }
   } catch (e) { console.error("[自动重启] 检查失败", e); }
