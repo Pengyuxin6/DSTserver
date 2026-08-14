@@ -59,7 +59,7 @@ function clusterRoot(): string { return panelConfig.clusterRoot || DEFAULT_CLUST
 function modsStoreDir(): string { return panelConfig.modsDir || DEFAULT_MODS_DIR; }
 const STEAMCMD = IS_WIN ? join(PANEL_DIR, "steamcmd", "steamcmd.exe") : join(HOME, "steamcmd", "steamcmd.sh");
 const STEAMCMD_WORKSHOP = IS_WIN ? join(PANEL_DIR, "steamcmd", "steamapps", "workshop", "content", "322330") : join(HOME, "steamcmd", "steamapps", "workshop", "content", "322330");
-const PORT = 5323;
+const PORT = Number(process.env.DST_PANEL_PORT) || 5323;
 // 多开内存门槛：已有服务器在跑时，空余内存低于该值禁止再开（MB）
 const MULTI_OPEN_MIN_MEM = 4096;
 
