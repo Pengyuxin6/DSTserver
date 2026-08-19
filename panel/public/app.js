@@ -387,6 +387,7 @@ async function pageBasic() {
   const fmtTime = (t) => (t ? new Date(t).toLocaleString("zh-CN", { hour12: false }) : "-");
   // 框架先行：三张卡片先渲染占位，数据到位后逐卡填充（避免整页白屏等待）
   content.innerHTML = `
+  <div class="card"><div class="btn-row" style="margin-bottom:0"><button class="btn" id="updateServerBasic">⬆ 更新服务器</button><span class="hint">通过 SteamCMD 校验更新 DST 服务端到最新版本（app 343050）</span></div></div>
   <div class="card" id="basicPathCard"><h3>路径</h3><div class="loading-box"><span class="spinner"></span>正在加载路径设置…</div></div>
   <div class="card" id="basicClusterCard"><h3>存档列表</h3><div class="loading-box"><span class="spinner"></span>正在加载存档列表…</div></div>
   <div class="card" id="basicCfgCard"><h3>当前存档设置</h3><div class="loading-box"><span class="spinner"></span>正在加载当前存档设置…</div></div>`;
@@ -492,6 +493,7 @@ async function pageBasic() {
     const r = await api("cluster/create", { method: "POST", body: { name } });
     toast(r.msg); route();
   };
+  $("#updateServerBasic").onclick = () => triggerServerUpdate();
   $("#save").onclick = async () => {
     const body = {
       intention: $("#intention").value,
@@ -1837,6 +1839,33 @@ async function showPortEditor(shardName, refresh, running) {
   };
 }
 
+// ---- 自动更新 DST 服务端（app 343050）—— 服务器管理/基本设置/控制台三页共用的公共逻辑 ----
+// 确认弹窗 → 调用 server/update → 后台任务执行 SteamCMD 校验下载 → 轮询任务接口。
+// 服务器管理页有 #updateLogWrap 实时日志区；其他页面用 toast 提示进度。
+let _updPollTimer = null;
+async function triggerServerUpdate() {
+  if (!(await dlgConfirm("确定更新饥荒服务器到最新版本？\n将通过 SteamCMD 校验并下载最新服务端，可能需要几分钟，期间请勿关闭面板。"))) return;
+  const r = await api("server/update", { method: "POST", body: {} });
+  toast(r.msg);
+  const taskId = r.data?.taskId;
+  if (!taskId) return;
+  const wrap = $("#updateLogWrap");   // 仅服务器管理页有实时日志区
+  if (wrap) wrap.style.display = "";
+  const logEl = $("#updateLog");
+  if (_updPollTimer) { clearInterval(_updPollTimer); _updPollTimer = null; }
+  const poll = async () => {
+    const t = await apiQuiet("task?id=" + encodeURIComponent(taskId));
+    if (!t?.data) return;
+    if (logEl) { logEl.textContent = t.data.log || ""; logEl.scrollTop = logEl.scrollHeight; }
+    if (t.data.status === "success" || t.data.status === "failed") {
+      if (_updPollTimer) { clearInterval(_updPollTimer); _updPollTimer = null; }
+      toast(t.data.status === "success" ? "服务端更新完成，重启服务器后生效" : "服务端更新失败，可在服务器管理页查看日志", t.data.status === "failed");
+    }
+  };
+  await poll();
+  if (!_updPollTimer) _updPollTimer = setInterval(poll, 2000);
+}
+
 // ============ 4. 服务器管理 ============
 async function pageServer() {
   // 顶部加载进度条（各区域完成推进，全部完成渐隐）
@@ -1964,31 +1993,9 @@ async function loadServerStatus() {
     unlockBtn.remove();
     toast("已解锁多开控制，请注意内存占用");
   };
-  // 更新服务器：通过 SteamCMD 校验并下载最新 DST 服务端（app 343050），任务式执行，下方实时日志
+  // 更新服务器：调用公共逻辑（含确认弹窗与实时日志）
   const updBtn = $("#updateServer");
-  if (updBtn) updBtn.onclick = async () => {
-    if (!(await dlgConfirm("确定更新饥荒服务器到最新版本？\n将通过 SteamCMD 校验下载，可能需要几分钟，期间请勿关闭面板。"))) return;
-    const r = await api("server/update", { method: "POST", body: {} });
-    toast(r.msg);
-    const taskId = r.data?.taskId;
-    if (!taskId) return;
-    const wrap = $("#updateLogWrap");
-    if (wrap) wrap.style.display = "";
-    const logEl = $("#updateLog");
-    if (updBtn) updBtn.disabled = true;
-    const poll = async () => {
-      const t = await apiQuiet("task?id=" + encodeURIComponent(taskId));
-      if (!t?.data) return;
-      if (logEl) { logEl.textContent = t.data.log || ""; logEl.scrollTop = logEl.scrollHeight; }
-      if (t.data.status === "success" || t.data.status === "failed") {
-        clearInterval(timer);
-        if (updBtn) updBtn.disabled = false;
-        if (t.data.status === "success") toast("服务端更新完成，重启服务器后生效");
-      }
-    };
-    await poll();
-    const timer = setInterval(poll, 2000);
-  };
+  if (updBtn) updBtn.onclick = () => triggerServerUpdate();
   // 分片表端口内联修改（运行中只读）
   const pr = $("#portReset");
   if (pr) pr.onclick = async () => { if (await resetPortsDefault()) pageServer(); };
@@ -2299,6 +2306,7 @@ async function pageConsole() {
     <h3>系统资源</h3>
     <div class="row"><span id="consoleSysRes" class="hint">加载中…</span></div>
     <div class="hint" id="consoleMemHint">💡 可用内存低于 <span style="color:var(--red)">512MB</span> 时自动终止服务器</div>
+    <div class="btn-row" style="margin-top:8px"><button class="btn" id="updateServerConsole">⬆ 更新服务器</button><span class="hint">通过 SteamCMD 校验更新 DST 服务端到最新版本（app 343050）</span></div>
   </div>
 
   <div class="cols">
@@ -2482,6 +2490,7 @@ async function pageConsole() {
   };
   renderItemHistory();
 
+  $("#updateServerConsole").onclick = () => triggerServerUpdate();
   $("#refreshPlayers").onclick = async () => {
     const j = await apiQuiet("console/players", { method: "POST", body: {} });
     if (!j) return;
