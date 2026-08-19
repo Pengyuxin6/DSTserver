@@ -1151,6 +1151,12 @@ function writeLevelOverrides(shard: string, isSurface: boolean, overrides: Recor
   // 删除可能残留的旧格式 leveldataoverride.lua，避免游戏校验失败
   try { unlinkSync(join(shardDir(shard), "leveldataoverride.lua")); } catch {}
 }
+// 新建分片时的默认 worldgenoverride.lua 内容。
+// 必须写：分片目录没有该文件时，专用服务器生成世界会默认用 SURVIVAL_TOGETHER 地表预设，
+// 导致洞穴分片生成成地面世界（与 writeLevelOverrides 同格式，游戏/面板均可识别）。
+function defaultWorldgenOverrideText(preset: string): string {
+  return `return {\n  override_enabled = true,\n  preset = "${preset}",\n  worldgen_preset = "${preset}",\n  settings_preset = "${preset}",\n  overrides = {\n  },\n}\n`;
+}
 
 // ---------- modoverrides.lua ----------
 interface ModOverrideEntry {
@@ -4725,6 +4731,9 @@ async function api(req: Request, url: URL): Promise<Response> {
     writeFileSync(join(dir, "cluster_token.txt"), "# 在此粘贴 Klei 服务器令牌（必须填写才能开服）\n");
     writeFileSync(join(dir, "Master", "server.ini"), `[NETWORK]\nserver_port = ${mServer}\n\n[SHARD]\nis_master = true\n\n[STEAM]\nmaster_server_port = ${mSteam}\nauthentication_port = ${mAuth}\n\n[ACCOUNT]\nencode_user_path = true\n`);
     writeFileSync(join(dir, "Caves", "server.ini"), `[NETWORK]\nserver_port = ${cServer}\n\n[SHARD]\nis_master = false\nname = Caves\n\n[STEAM]\nmaster_server_port = ${cSteam}\nauthentication_port = ${cAuth}\n\n[ACCOUNT]\nencode_user_path = true\n`);
+    // 写入默认世界生成配置：没有 worldgenoverride.lua 时洞穴分片会被生成成地面世界
+    writeFileSync(join(dir, "Master", "worldgenoverride.lua"), defaultWorldgenOverrideText("SURVIVAL_TOGETHER"));
+    writeFileSync(join(dir, "Caves", "worldgenoverride.lua"), defaultWorldgenOverrideText("DST_CAVE"));
     panelConfig.cluster = name;
     clearAllClusterCache();
     savePanelConfig();
@@ -4855,6 +4864,11 @@ async function api(req: Request, url: URL): Promise<Response> {
     mkdirSync(dir, { recursive: true });
     const ini = `[NETWORK]\nserver_port = ${serverPort}\n\n[SHARD]\nis_master = ${isMaster}\n${isMaster ? "" : `name = ${name}\n`}\n[STEAM]\nmaster_server_port = ${steamPort}\nauthentication_port = ${authPort}\n\n[ACCOUNT]\nencode_user_path = true\n`;
     writeFileSync(join(dir, "server.ini"), ini);
+    // 原版地表/洞穴层级写入默认世界生成配置：没有 worldgenoverride.lua 时，
+    // 专用服务器会默认生成 SURVIVAL_TOGETHER 地表世界（洞穴变地面）。模组层级仍需在“世界设置”里保存一次以应用模组预设。
+    if (layerType === "forest" || layerType === "cave") {
+      writeFileSync(join(dir, "worldgenoverride.lua"), defaultWorldgenOverrideText(lt.surface ? "SURVIVAL_TOGETHER" : "DST_CAVE"));
+    }
     // 新分片继承当前启用模组配置（modoverrides 与主世界一致），保证层级对应的模组（如 IA）在该分片生效
     try {
       const masterShard = listShards().find((s) => s.isMaster) || listShards()[0];
