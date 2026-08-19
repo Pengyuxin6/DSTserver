@@ -1912,7 +1912,10 @@ async function loadServerStatus() {
       <button class="btn" id="restart" ${blocked ? "disabled" : ""}>🔁 重启服务器</button>
       <button class="btn" id="pauseBtn" ${blocked ? "disabled" : ""}>⏸ 暂停服务器</button>
       <button class="btn" id="reStatus">🔄 刷新状态</button>
+      <button class="btn" id="updateServer" ${blocked ? "disabled" : ""}>⬆ 更新服务器</button>
     </div>
+    <div class="row" style="margin-top:6px;display:none" id="updateLogWrap">
+      <div class="card" style="width:100%"><h3>服务端更新日志</h3><pre id="updateLog" style="max-height:320px;overflow-y:auto;white-space:pre-wrap;font-size:12px;background:var(--bg);padding:10px;border-radius:6px"></pre></div>
     <div class="row" style="margin-bottom:4px"><label>自动刷新状态</label>
       <label class="switch" title="每 10 秒自动刷新分片状态"><input type="checkbox" id="autoStatusSwitch" checked><span class="slider"></span></label>
       <span class="hint">开启后每 10 秒自动刷新分片状态和系统资源</span></div>
@@ -1960,6 +1963,31 @@ async function loadServerStatus() {
     for (const id of ["start", "stop", "restart", "pauseBtn"]) { const b = $("#" + id); if (b) b.disabled = false; }
     unlockBtn.remove();
     toast("已解锁多开控制，请注意内存占用");
+  };
+  // 更新服务器：通过 SteamCMD 校验并下载最新 DST 服务端（app 343050），任务式执行，下方实时日志
+  const updBtn = $("#updateServer");
+  if (updBtn) updBtn.onclick = async () => {
+    if (!(await dlgConfirm("确定更新饥荒服务器到最新版本？\n将通过 SteamCMD 校验下载，可能需要几分钟，期间请勿关闭面板。"))) return;
+    const r = await api("server/update", { method: "POST", body: {} });
+    toast(r.msg);
+    const taskId = r.data?.taskId;
+    if (!taskId) return;
+    const wrap = $("#updateLogWrap");
+    if (wrap) wrap.style.display = "";
+    const logEl = $("#updateLog");
+    if (updBtn) updBtn.disabled = true;
+    const poll = async () => {
+      const t = await apiQuiet("task?id=" + encodeURIComponent(taskId));
+      if (!t?.data) return;
+      if (logEl) { logEl.textContent = t.data.log || ""; logEl.scrollTop = logEl.scrollHeight; }
+      if (t.data.status === "success" || t.data.status === "failed") {
+        clearInterval(timer);
+        if (updBtn) updBtn.disabled = false;
+        if (t.data.status === "success") toast("服务端更新完成，重启服务器后生效");
+      }
+    };
+    await poll();
+    const timer = setInterval(poll, 2000);
   };
   // 分片表端口内联修改（运行中只读）
   const pr = $("#portReset");

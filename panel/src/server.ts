@@ -3885,6 +3885,55 @@ async function ensureSteamcmdReady(): Promise<void> {
   steamcmdBootstrapped = true;
 }
 
+// ---------- 自动更新 DST 服务端（app 343050） ----------
+// 通过 SteamCMD 校验并下载最新版专用服务器。实时输出写入任务日志，前端轮询 task 接口查看。
+async function runServerUpdate(task: Task): Promise<void> {
+  task.status = "running";
+  try {
+    const dir = SERVER_DIR;
+    if (!dir || !existsSync(dir)) throw new Error(`服务器目录不存在：${dir}（请先在「基本设置」配置服务器目录）`);
+    if (IS_WIN) await ensureSteamcmdReady();
+    if (!existsSync(STEAMCMD)) throw new Error(`未找到 SteamCMD：${STEAMCMD}（Windows 版会尝试自动下载，如失败请手动安装或配置 Steam 搜索代理）`);
+    const cmd = [STEAMCMD, "+force_install_dir", dir, "+login", "anonymous", "+app_update", "343050", "validate", "+quit"];
+    task.log += `开始更新 DST 服务端（app 343050）\n目标目录: ${dir}\n命令: ${cmd.join(" ")}\n\n`;
+    const proc = Bun.spawn(cmd, { cwd: dirname(STEAMCMD), stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+    const pumpLog = async (stream: ReadableStream | null, tag: string) => {
+      if (!stream) return;
+      const reader = stream.getReader();
+      const dec = new TextDecoder();
+      let rem = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        rem += dec.decode(value, { stream: true });
+        let idx: number;
+        while ((idx = rem.indexOf("\n")) >= 0) {
+          const line = rem.slice(0, idx).replace(/\r$/, "");
+          rem = rem.slice(idx + 1);
+          if (line.trim()) task.log += `[${tag}] ${line}\n`;
+        }
+        if (task.log.length > 200000) task.log = task.log.slice(-150000);
+      }
+    };
+    const p1 = pumpLog(proc.stdout, "steamcmd");
+    const p2 = pumpLog(proc.stderr, "err");
+    const code = await proc.exited;
+    await Promise.all([p1, p2]);
+    if (code === 0) {
+      task.status = "success";
+      task.log += `\n✅ 更新完成（exit=0）。如服务器正在运行，请到「服务器管理」重启服务器使新版本生效。\n`;
+    } else {
+      task.status = "failed";
+      task.log += `\n❌ 更新失败（exit=${code}）。\n`;
+    }
+  } catch (e: any) {
+    task.status = "failed";
+    task.log += `\n[失败] ${e?.message || e}\n`;
+  } finally {
+    task.finishedAt = Date.now();
+  }
+}
+
 async function downloadOneMod(id: string, task: Task, slot: number): Promise<boolean> {
   // Windows 下若 steamcmd 不存在，先尝试自动下载（多源 steamcmd.zip + 代理 + 常见位置查找）
   await ensureSteamcmdReady();
@@ -5699,6 +5748,24 @@ async function api(req: Request, url: URL): Promise<Response> {
     }
     const msg = (hasFailure ? "重启未完整成功：" : "重启完成：") + msgs.join("；");
     return hasFailure ? fail(msg) : ok(null, msg);
+  }
+  if (path === "server/update" && method === "POST") {
+    // 自动更新 DST 服务端（app 343050）。防重复：已有进行中的更新任务直接返回该任务
+    const existing = [...tasks.values()].find((t) => t.modId === "343050" && (t.status === "queued" || t.status === "running"));
+    if (existing) return ok({ taskId: existing.id, already: true }, "更新任务已在进行中，正在执行或排队");
+    const task: Task = {
+      id: `t${Date.now()}_${++taskSeq}`,
+      modId: "343050",
+      label: "DST 服务端更新（app 343050）",
+      status: "queued",
+      log: "已创建服务端更新任务\n",
+      totalBytes: 0,
+      downloadedBytes: 0,
+      startedAt: Date.now(),
+    };
+    tasks.set(task.id, task);
+    runServerUpdate(task).catch((e) => { task.status = "failed"; task.log += `[异常] ${e?.message || e}\n`; task.finishedAt = Date.now(); });
+    return ok({ taskId: task.id }, "已开始更新 DST 服务端（下方可查看实时进度日志）");
   }
   if (path === "server/autorestart" && method === "POST") {
     const b = await bodyJson(req);
