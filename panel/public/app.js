@@ -2872,11 +2872,12 @@ async function pageHelp() {
     <button data-h="manual" class="${helpState.sub === "manual" ? "active" : ""}">⌨️ 手动操作</button>
     <button data-h="migrate" class="${helpState.sub === "migrate" ? "active" : ""}">📦 模组迁移</button>
     <button data-h="config" class="${helpState.sub === "config" ? "active" : ""}">⚙️ 配置说明</button>
+    <button data-h="build" class="${helpState.sub === "build" ? "active" : ""}">🧰 打包分发</button>
   </div>
   <div id="helpBody"></div>`;
   $$(".subtabs button").forEach((b) => (b.onclick = () => { helpState.sub = b.dataset.h; pageHelp(); }));
   const body = $("#helpBody");
-  const helpMap = { guide: HELP_GUIDE, panel: HELP_PANEL, faq: HELP_FAQ, tech: HELP_TECH, manual: HELP_MANUAL, migrate: HELP_MIGRATE, config: HELP_CONFIG };
+  const helpMap = { guide: HELP_GUIDE, panel: HELP_PANEL, faq: HELP_FAQ, tech: HELP_TECH, manual: HELP_MANUAL, migrate: HELP_MIGRATE, config: HELP_CONFIG, build: HELP_BUILD };
   body.innerHTML = helpMap[helpState.sub] || HELP_GUIDE;
 }
 
@@ -4148,6 +4149,44 @@ const HELP_CONFIG = `
     <li>面板「基本设置」页面可直接修改，保存即生效</li>
   </ul>
 </div>`;
+
+// ---- 章节八：打包分发 ----
+const HELP_BUILD = `
+<div class="card help-doc">
+  <h3>🧰 打包分发（编译 Windows 独立 exe）</h3>
+  <h4>前置：安装 Bun</h4>
+  <p>面板后端用 Bun 运行，打包前先安装 Bun：</p>
+  <pre><code># Windows（PowerShell）
+powershell -c "irm bun.sh/install.ps1 | iex"
+
+# Linux / macOS
+curl -fsSL https://bun.sh/install | bash</code></pre>
+
+  <h4>获取源码</h4>
+  <pre><code>git clone https://github.com/Pengyuxin6/DSTserver.git
+cd DSTserver</code></pre>
+
+  <h4>编译为 exe</h4>
+  <pre><code>cd panel
+bun build src/server.ts --compile --outfile ../dist/DSTserver.exe</code></pre>
+
+  <h4>复制静态资源</h4>
+  <p>编译出的 exe 需要配套的前端静态文件，把 <code>panel/public</code> 与 <code>panel/docs</code> 复制到 <code>dist/</code> 下：</p>
+  <pre><code>mkdir -p ../dist/public ../dist/docs
+cp -r public/* ../dist/public/
+cp -r docs/* ../dist/docs/</code></pre>
+
+  <h4>最终目录结构</h4>
+  <pre><code>dist/
+├── DSTserver.exe     # 主程序（双击运行）
+├── public/           # 前端页面（app.js / index.html / style.css / icons/…）
+└── docs/             # 帮助文档</code></pre>
+
+  <h4>运行</h4>
+  <p>双击 <code>DSTserver.exe</code>，浏览器打开 <code>http://127.0.0.1:5323/</code> 登录使用。服务器目录、存档目录、客户端位置会自动检测（也可在「基本设置」手动配置）。</p>
+  <div class="doc-warn">⚠ 打包分发时请勿把服务器令牌、面板密码、服务器地址等私密信息写入任何文件。项目公开仓库：<code>https://github.com/Pengyuxin6/DSTserver</code></div>
+</div>`;
+
 // ============ 启动 ============
 renderTabs();
 startTopFx();
