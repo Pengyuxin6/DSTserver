@@ -5542,17 +5542,19 @@ async function api(req: Request, url: URL): Promise<Response> {
   // ===== 端口设置（多开时每个存档端口必须唯一；支持查看 / 手动修改 / 一键自动分配） =====
   if (path === "server/ports" && method === "GET") {
     const shards = listShards();
+    // 逐个分片检测运行状态（per-shard running，供端口设置区显示每个世界的运行圆点）
     let running = false;
-    for (const s of shards) if (await shardRunning(s.name)) { running = true; break; }
+    const shardRun: boolean[] = [];
+    for (const s of shards) { const r = await shardRunning(s.name); shardRun.push(r); if (r) running = true; }
     const ci = parseIni(readText(join(clusterDir(), "cluster.ini")));
     const mpRaw = iniGet(ci, "SHARD", "master_port");
-    const shardPorts = shards.map((s) => {
+    const shardPorts = shards.map((s, i) => {
       const lines = parseIni(readText(join(clusterDir(), s.name, "server.ini")));
       const spRaw = iniGet(lines, "NETWORK", "server_port");
       const mspRaw = iniGet(lines, "STEAM", "master_server_port");
       const apRaw = iniGet(lines, "STEAM", "authentication_port");
       return {
-        name: s.name, isMaster: s.isMaster,
+        name: s.name, isMaster: s.isMaster, running: shardRun[i],
         serverPort: Number(spRaw || (s.isMaster ? 11000 : 11001)), serverPortSet: spRaw !== null,
         masterServerPort: Number(mspRaw || (s.isMaster ? 27018 : 27019)), masterServerPortSet: mspRaw !== null,
         authPort: Number(apRaw || (s.isMaster ? 8768 : 8769)), authPortSet: apRaw !== null,

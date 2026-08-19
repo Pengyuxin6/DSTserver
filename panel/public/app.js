@@ -2134,7 +2134,13 @@ async function loadPorts() {
   let html = "";
   if (p.running) html += `<div class="multi-err">服务器运行中，端口只读。请先关闭服务器再修改。</div>`;
   html += row("主世界通信端口 master_port", "master_port", p.masterPort, !p.masterPortSet);
-  html += `<div class="hint" style="margin:8px 0 2px">分片端口（${p.shards.map((s) => `${esc(s.name)} ${s.serverPort}`).join(" / ")}）请点击上方「服务器控制」分片表中的端口号查看冲突详情并修改</div>`;
+  // 分片端口列表：每个世界一行，显示运行状态圆点 + 名称 + 端口（点击查看冲突/修改）
+  html += `<div class="hint" style="margin:8px 0 2px">分片端口（点击端口号查看冲突/修改）：</div>`;
+  for (const s of p.shards) {
+    const stTxt = s.running ? "运行中" : "未运行";
+    html += `<div class="row port-row"><label style="min-width:230px"><span class="status-dot ${s.running ? "on" : "off"}"></span>${esc(s.name)}（${s.isMaster ? "地上·主世界" : "地下"}）<span class="hint"> ${stTxt}</span></label>
+      <span class="port-edit${s.running ? " disabled" : ""}" data-shard="${esc(s.name)}" data-port="${esc(String(s.serverPort))}" title="${s.running ? "运行中不可修改" : "点击查看冲突详情 / 修改"}">${esc(String(s.serverPort))}</span></div>`;
+  }
   html += `<div class="btn-row" style="margin-top:10px">
     <button class="btn" id="portAuto" ${p.running ? "disabled" : ""}>⚡ 自动分配空闲端口</button>
     <button class="btn primary" id="portSave" ${p.running ? "disabled" : ""}>💾 保存端口</button>
@@ -2162,6 +2168,11 @@ async function loadPorts() {
     toast(r.msg, !r.ok);
     pageServer();
   };
+  // 分片端口可点击：查看冲突详情/修改（运行中只读）
+  $$(".port-edit[data-shard]", box).forEach((el) => {
+    if (el.classList.contains("disabled")) return;
+    el.onclick = () => showPortEditor(el.dataset.shard, pageServer, false);
+  });
 }
 
 // ---- 管理员 / 黑名单（独立加载） ----
