@@ -811,15 +811,25 @@ function clearAllClusterCache() {
 // 不看其他存档：新建/导入的世界固定拿默认端口，跨存档冲突仅黄色警告）
 function ensureServerIni(shard: string): void {
   const f = join(shardDir(shard), "server.ini");
-  if (existsSync(f)) return;
-  const used = new Set<number>();
-  try { for (const p of clusterPorts(panelConfig.cluster, true)) used.add(p.port); } catch {}
-  const alloc = (start: number) => { let p = start; while (used.has(p) && p < 65535) p++; used.add(p); return p; };
-  const info = listShards().find((s) => s.name === shard);
-  const isMaster = info ? info.isMaster : /^master$/i.test(shard);
-  const ini = `[NETWORK]\nserver_port = ${alloc(isMaster ? 11000 : 11001)}\n\n[SHARD]\nis_master = ${isMaster}\n${isMaster ? "" : `name = ${shard}\n`}\n[STEAM]\nmaster_server_port = ${alloc(isMaster ? 27018 : 27019)}\nauthentication_port = ${alloc(isMaster ? 8768 : 8769)}\n\n[ACCOUNT]\nencode_user_path = true\n`;
-  writeFileSync(f, ini);
-  clearShardListCache();
+  // 补全缺失的 server.ini
+  if (!existsSync(f)) {
+    const used = new Set<number>();
+    try { for (const p of clusterPorts(panelConfig.cluster, true)) used.add(p.port); } catch {}
+    const alloc = (start: number) => { let p = start; while (used.has(p) && p < 65535) p++; used.add(p); return p; };
+    const info = listShards().find((s) => s.name === shard);
+    const isMaster = info ? info.isMaster : /^master$/i.test(shard);
+    const ini = `[NETWORK]\nserver_port = ${alloc(isMaster ? 11000 : 11001)}\n\n[SHARD]\nis_master = ${isMaster}\n${isMaster ? "" : `name = ${shard}\n`}\n[STEAM]\nmaster_server_port = ${alloc(isMaster ? 27018 : 27019)}\nauthentication_port = ${alloc(isMaster ? 8768 : 8769)}\n\n[ACCOUNT]\nencode_user_path = true\n`;
+    writeFileSync(f, ini);
+    clearShardListCache();
+  }
+  // 补全缺失的 worldgenoverride.lua：没有该文件时，专用服务器会按地表预设生成世界，导致洞穴分片变地面。
+  // 仅在缺失时补写默认配置，不覆盖已有文件，不影响已有正确配置的存档。
+  const wgo = join(shardDir(shard), "worldgenoverride.lua");
+  if (!existsSync(wgo)) {
+    const info = listShards().find((s) => s.name === shard);
+    const isMaster = info ? info.isMaster : /^master$/i.test(shard);
+    writeFileSync(wgo, defaultWorldgenOverrideText(isMaster ? "SURVIVAL_TOGETHER" : "DST_CAVE"));
+  }
 }
 // 模组文件变动（下载/删除/导入）后清除模组相关缓存
 function clearModCaches() {
